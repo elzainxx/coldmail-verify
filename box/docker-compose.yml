@@ -1,0 +1,25 @@
+# Box deployable — the forked truemail-rack running STOCK (Phase 0).
+# Separate from the brain; they are NEVER merged (README.md).
+#
+#   docker compose -f box/docker-compose.yml build
+#   docker compose -f box/docker-compose.yml up
+#
+# Phase 0 proves the fork BUILDS and RUNS stock. It does NOT do real verification
+# behind a real IP (Phase 3) and has NO wrapper endpoints (Phase 2).
+services:
+  box:
+    build:
+      context: ./truemail-rack
+      dockerfile: Dockerfile
+    image: truemail-box:stock-p0
+    ports:
+      - "3000:3000"
+    environment:
+      # REQUIRED by the stock rack. Placeholders for a Phase-0 stock smoke test only.
+      # In real deployment these come from secure config, never committed (Door 3 / secrets).
+      VERIFIER_EMAIL: "${VERIFIER_EMAIL:-verifier@example.test}"
+      ACCESS_TOKENS: "${ACCESS_TOKENS:-phase0-stock-smoke-token}"
+      RACK_ENV: "${RACK_ENV:-production}"
+    # Stock rack has NO /healthcheck body (returns 200, empty). Probe the root
+    # liveness via the version endpoint instead (auth-gated) — kept simple here.
+    restart: "no"

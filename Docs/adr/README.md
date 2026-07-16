@@ -1,0 +1,33 @@
+# ADR log
+
+Architecture Decision Records for the Truemail verification system. An ADR is required for
+**any decision that touches a one-way door** (response shape, LOG, hashing, vocabulary,
+never-fork) or that **elevates/gates a cross-phase decision** an owner-OQ ruling produced
+(PROJECT_RULES.md §8). Cross-phase *rulings* live in [`../DECISIONS.md`](../DECISIONS.md); the
+ADRs here are the durable record for the door-touching subset.
+
+## Format
+
+Each ADR: `ADR-NNNN-short-slug.md`, with **Status** (PROPOSED / ACCEPTED / SUPERSEDED), the
+**Door** it touches, **Context**, **Decision**, **Consequences**, and — critically — a
+**"does this reopen a frozen door?"** check. ADRs are append-only in spirit: supersede, never
+silently rewrite (mirror Door 2).
+
+## Index
+
+| ADR | Decision | Door | Reopens it? | Status |
+|---|---|---|---|---|
+| [ADR-0001](ADR-0001-outcome-feed-authentication.md) | OQ-P7-1 elevated to a hard pre-P7 authentication door | *new* TB-7 trust gate (P7 input) | No — new gate, five frozen doors untouched | ACCEPTED |
+| [ADR-0002](ADR-0002-queue-plaintext-backup-scope.md) | Queue-plaintext backup-awareness gate at P5 | **Door 3** (hashing / no-plaintext) | **No** — affirms Door 3 + the P5 bounded exception | ACCEPTED |
+| [ADR-0003](ADR-0003-truemail-engine-pin.md) | truemail engine pinned exactly at 3.3.1, never forked | **Door 5** (never-fork) | **No** — enforces Door 5 | ACCEPTED |
+| [ADR-0004](ADR-0004-cheap-layers-brain-native.md) | Cheap layers run brain-native; brain takes no truemail dependency | Door 5 (engine boundary) | **No** — draws the boundary, doesn't fork | ACCEPTED |
+
+## Owner-OQ rulings that became records
+
+The P1–P7 Appendix D sign-offs are the owner-OQ rulings; the cross-phase and door-touching ones
+are captured as ADRs (above) or in the [`../DECISIONS.md`](../DECISIONS.md) §6 owner-OQ register.
+Per-phase-only sign-offs remain in each spec's Appendix C/D.
+
+## Next number
+
+The next ADR is **ADR-0005**. Increment monotonically; never reuse a number.

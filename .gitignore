@@ -1,0 +1,44 @@
+# ============================================================================
+# Secrets — NEVER committed. (PROJECT_RULES.md Door 3 / secrets custody.)
+# The most permanent secret in the system is the email-hash pepper; losing it
+# de-joins all history, leaking it makes low-entropy addresses brute-forceable.
+# It, node tokens, vendor keys, and Supabase keys are loaded from secure config
+# at runtime and are never present in the repo. See config/secrets.example.env.
+# ============================================================================
+*.env
+.env
+.env.*
+!*.example.env
+secrets/
+*.pem
+*.key
+*.pepper
+config/secrets.env
+config/local.*.yaml
+
+# Go (brain)
+/brain/bin/
+/brain/dist/
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Ruby (box / forked truemail-rack)
+box/**/.bundle/
+box/**/vendor/bundle/
+box/**/tmp/
+box/**/coverage/
+box/**/log/
+*.gem
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Build / CI artifacts
+/artifacts/
+/.task-cache/
