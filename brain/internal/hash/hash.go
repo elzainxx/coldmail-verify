@@ -82,6 +82,12 @@ func (h *Hasher) Normalize(raw string) (email, domain string, err error) {
 
 	// Local side: lowercase (OQ-3); keep dots and +tags (provider-specific, kept separate).
 	// P1 WIRING POINT: Unicode NFC on the local part before lowercasing.
+	// Same refusal as the domain: a non-ASCII local part must NOT be hashed without NFC,
+	// or the composed vs decomposed byte forms of one address produce two different hashes
+	// (splitting one identity in the frozen store). Refuse until NFC is wired at P1.
+	if !isASCII(local) {
+		return "", "", ErrUnparseable
+	}
 	local = strings.ToLower(local)
 
 	return local + "@" + dom, dom, nil

@@ -8,6 +8,10 @@ import (
 
 // Door 3 is frozen. These tests pin the observable behavior of norm/v1 + hmac-sha256/v1
 // so a change to the scheme (which would de-join all history) fails loudly.
+//
+// Non-ASCII test inputs are built with explicit \u escapes so the SOURCE stays pure ASCII
+// (no editor/tool byte-encoding fragility): ö = 'ö' (composed), ̈ = combining
+// diaeresis (the decomposed diacritic).
 
 func newTestHasher(t *testing.T) *Hasher {
 	t.Helper()
@@ -27,7 +31,7 @@ func TestEmptyPepperRefused(t *testing.T) {
 func TestNormalizeASCIIPath(t *testing.T) {
 	h := newTestHasher(t)
 	cases := []struct{ in, wantEmail, wantDomain string }{
-		{"Jane.Doe@Example.COM", "jane.doe@example.com", "example.com"}, // lowercase both sides
+		{"Jane.Doe@Example.COM", "jane.doe@example.com", "example.com"},      // lowercase both sides
 		{"  user+tag@Example.com. ", "user+tag@example.com", "example.com"}, // trim, trailing dot, KEEP +tag & dots
 		{"a@b.co", "a@b.co", "b.co"},
 	}
@@ -56,8 +60,27 @@ func TestNonASCIIDomainRefusedNotMishashed(t *testing.T) {
 	// Phase-0 honesty: until IDNA is wired (P1), a non-ASCII domain is REFUSED, not
 	// hashed un-punycoded — so no wrong hash enters the frozen store early.
 	h := newTestHasher(t)
-	if _, _, err := h.Normalize("user@exämple.com"); err != ErrUnparseable {
+	if _, _, err := h.Normalize("user@exämple.com"); err != ErrUnparseable { // exämple.com
 		t.Errorf("non-ASCII domain must be refused at P0 (IDNA is the P1 wiring point), got err=%v", err)
+	}
+}
+
+// Regression (code-review finding): a non-ASCII LOCAL part must ALSO be refused until NFC
+// is wired at P1 — otherwise the composed vs decomposed byte forms of the same visual
+// address hash DIFFERENTLY, splitting one identity in the frozen store (a Door-3
+// corruption). The original suite only covered the domain side; this pins the local side.
+func TestNonASCIILocalPartRefused(t *testing.T) {
+	h := newTestHasher(t)
+	composed := "jöhn@example.com"    // j ö hn      (ö = one code point)
+	decomposed := "jöhn@example.com" // j o ◌̈ hn   (o + combining diaeresis)
+	if composed == decomposed {
+		t.Fatal("test setup: forms are byte-identical")
+	}
+	// Both are non-ASCII and MUST be refused (the WHY: un-normalized they hash differently).
+	for _, in := range []string{composed, decomposed} {
+		if _, _, err := h.Normalize(in); err != ErrUnparseable {
+			t.Errorf("non-ASCII local part must be refused at P0 (NFC is the P1 wiring point), got err=%v for %q", err, in)
+		}
 	}
 }
 

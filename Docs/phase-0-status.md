@@ -74,6 +74,26 @@ mock-vs-live ruling → [ADR-0004](adr/ADR-0004-cheap-layers-brain-native.md)). 
 **LICENSE is still an owner choice** (README.md "License posture") — third-party MIT respected in
 [NOTICE](../NOTICE), the project's own license deliberately not asserted.
 
+## Code-review gate — outcome
+
+The required review gate ran on the Phase-0 diff. The background reviewer **stalled** (0-byte
+output, ~37 min idle — the same failure this project recorded in P3 Appendix C), but not before
+surfacing one genuine lead, which was then confirmed and completed by an **inline adversarial pass**
+(the documented fallback):
+
+- **MAJOR (Door 3) — CONFIRMED & FIXED.** `hash.Normalize` guarded `isASCII` on the domain but
+  **not the local part**, so a non-ASCII local part was hashed without NFC — composed vs decomposed
+  byte forms of the same address produced **different `email_hash` values**, splitting one identity
+  in the frozen store. Empirically confirmed with a failing test, then fixed by refusing non-ASCII
+  on **both** sides until NFC/IDNA is wired at P1. Locked with a permanent regression test
+  (`TestNonASCIILocalPartRefused`). The original suite missed it by only exercising the domain path.
+- **Inline sweep of the remaining high-risk surfaces — CLEAN:** no secret value reaches any
+  log/print path (`secrets.String()` is presence-only via `redact()`); the assembler emits only
+  frozen vocabulary constants and guards with `Response.Valid()`; Door-2 append-only holds by
+  interface shape; Door-5 pin is exact + CI-enforced.
+
+Full brain suite green after the fix (build + vet + all unit tests; GAP harness SKIPs as designed).
+
 ## What Phase 0 deliberately did NOT build (correct scope)
 
 No cheap-layer logic, no SMTP, no wrapper endpoints, no queue, no fallback, no calibration, no real
