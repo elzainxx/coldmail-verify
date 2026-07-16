@@ -3,7 +3,7 @@
 **Status:** ACCEPTED — 2026-07-17 (Phase 0)
 **Door:** Door 5 (never fork the engine; node-list discipline)
 **Deciders:** owner (build discipline); recorded by the Phase-0 scaffolding pass
-**Companions:** [`../../PROJECT_RULES.md`](../../PROJECT_RULES.md) · [`../../box/truemail-rack/FORK.md`](../../box/truemail-rack/FORK.md) · [`../truemail-ground-truth.md`](../truemail-ground-truth.md) · [`DECISIONS.md`](../DECISIONS.md)
+**Companions:** [`../../PROJECT_RULES.md`](../../PROJECT_RULES.md) · [`../../verifier-node/truemail-rack/FORK.md`](../../verifier-node/truemail-rack/FORK.md) · [`../truemail-ground-truth.md`](../truemail-ground-truth.md) · [`DECISIONS.md`](../DECISIONS.md)
 
 ---
 
@@ -20,9 +20,9 @@ The prompt asked to **confirm whether `v3.3.1` is the correct/current version** 
 ## Decision
 
 **Pin `truemail` to exactly `3.3.1`.** The fork's `Gemfile` reads `gem 'truemail', '3.3.1'`
-(exact, no `~>`/`>=`). CI asserts this (`box/truemail-rack/bin/assert-gem-unmodified.sh` + an
+(exact, no `~>`/`>=`). CI asserts this (`verifier-node/truemail-rack/bin/assert-gem-unmodified.sh` + an
 in-Docker `bundle list truemail` check). The engine is **never** forked; any behavioral gap is
-closed brain-side or in the rack wrapper (Phase 2+), never by editing the gem.
+closed control-plane-side or in the rack wrapper (Phase 2+), never by editing the gem.
 
 ### Why 3.3.1 (confirmed, not assumed)
 
@@ -34,11 +34,11 @@ closed brain-side or in the rack wrapper (Phase 2+), never by editing the gem.
   (no `0.10.0` tag exists) embedding **gem `3.3.1`**. Logged as ground-truth deltas
   ([`../truemail-ground-truth.md`](../truemail-ground-truth.md)); they touch no frozen door.
 
-### The engine stays box-side (not pulled into the brain)
+### The engine stays verifier-node-side (not pulled into the control-plane)
 
-Per the prompt: the brain **may not need the gem in Phase 1** (cheap layers are brain-native Go —
-P1 OQ-6). So the gem dependency lives **only in `box/truemail-rack/`** (Ruby); the Go brain does
-**not** take a truemail dependency. Pin it in the repo (the fork), keep it out of the brain.
+Per the prompt: the control-plane **may not need the gem in Phase 1** (cheap layers are control-plane-native Go —
+P1 OQ-6). So the gem dependency lives **only in `verifier-node/truemail-rack/`** (Ruby); the Go control-plane does
+**not** take a truemail dependency. Pin it in the repo (the fork), keep it out of the control-plane.
 
 ### One forced consequence (flagged, not silent)
 
@@ -61,8 +61,8 @@ we fork; **not** a gem patch). Recorded in `FORK.md` modification #2. The stale 
 
 ## Compliance / enforcement
 
-- `box/truemail-rack/Gemfile` — exact pin (asserted by the Door-5 check).
-- `box/truemail-rack/bin/assert-gem-unmodified.sh` — host/CI check: exact pin, no vendored engine
+- `verifier-node/truemail-rack/Gemfile` — exact pin (asserted by the Door-5 check).
+- `verifier-node/truemail-rack/bin/assert-gem-unmodified.sh` — host/CI check: exact pin, no vendored engine
   source, ADR agreement.
 - In Docker: `bundle list truemail` must report exactly `3.3.1`.
-- `box/truemail-rack/FORK.md` — the exhaustive rack-side modification list.
+- `verifier-node/truemail-rack/FORK.md` — the exhaustive rack-side modification list.

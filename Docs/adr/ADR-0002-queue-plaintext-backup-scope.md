@@ -39,7 +39,7 @@ Neither phase is wrong on its own. P1 said "no plaintext" about *its* stores. P5
 
 - **Positive.** The Door-3 exception becomes *genuinely* bounded — bounded in the live table (P5 already) **and** in backups (this gate). The one plaintext-at-rest store no longer has a silent long-lived copy.
 - **Cost.** P5 must choose and implement a backup-protection mechanism before shipping the queue. Small, and native to when backups first hold real plaintext.
-- **Interaction with pepper custody.** If the chosen mechanism is separate-key encryption, that key becomes a new secret with its own custody story — deliberately **separate from the pepper** so the two failure domains don't collapse into one (ties to F-9/F-19 brain-crown-jewel concentration). Flagged for the P5 runbook.
+- **Interaction with pepper custody.** If the chosen mechanism is separate-key encryption, that key becomes a new secret with its own custody story — deliberately **separate from the pepper** so the two failure domains don't collapse into one (ties to F-9/F-19 control-plane-crown-jewel concentration). Flagged for the P5 runbook.
 
 ## Compliance / how it's checked
 

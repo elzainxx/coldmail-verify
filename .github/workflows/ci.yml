@@ -1,6 +1,6 @@
 # CI — the gate every change passes (PROJECT_RULES.md §7).
-# Runs: brain build/vet/test, the Door-5 gem-unmodified assertion + the real Docker gem
-# resolution, the docs-updated staleness check, config-reference freshness, and the
+# Runs: control-plane build/vet/test, the Door-5 gem-unmodified assertion + the real Docker
+# gem resolution, the docs-updated staleness check, config-reference freshness, and the
 # code-reviewer gate. It MUST NOT fake green: rollout-only truths (greylist retry-then-accept,
 # vendor accuracy) are never asserted here (Docs/test-strategy.md §4).
 name: ci
@@ -14,12 +14,12 @@ permissions:
   contents: read
 
 jobs:
-  brain:
-    name: brain (Go build + vet + test)
+  control-plane:
+    name: control-plane (Go build + vet + test)
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: brain
+        working-directory: control-plane
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -32,19 +32,19 @@ jobs:
       - run: go test -v ./...
 
   door5-gem-unmodified:
-    name: box (Door 5 — engine pinned, unmodified)
+    name: verifier-node (Door 5 — engine pinned, unmodified)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       # Host-portable check: exact pin, no vendored engine source, ADR-0003 agreement.
-      - run: bash box/truemail-rack/bin/assert-gem-unmodified.sh
-      # The REAL resolution (not stubbed): build the box and assert bundle resolved 3.3.1.
+      - run: bash verifier-node/truemail-rack/bin/assert-gem-unmodified.sh
+      # The REAL resolution (not stubbed): build the node and assert bundle resolved 3.3.1.
       - name: Docker build resolves the pinned gem to 3.3.1
         run: |
-          docker build -t truemail-box:ci box/truemail-rack
-          v="$(docker run --rm truemail-box:ci bundle list truemail | grep -oE '3\.3\.1' || true)"
+          docker build -t truemail-verifier-node:ci verifier-node/truemail-rack
+          v="$(docker run --rm truemail-verifier-node:ci bundle list truemail | grep -oE '3\.3\.1' || true)"
           test "$v" = "3.3.1" || { echo "FAIL: resolved truemail != 3.3.1 (got '$v')"; exit 1; }
-          echo "OK: box resolved truemail 3.3.1"
+          echo "OK: verifier-node resolved truemail 3.3.1"
 
   docs-discipline:
     name: docs-updated + config-reference freshness

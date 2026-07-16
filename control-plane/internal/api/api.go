@@ -1,10 +1,10 @@
-// Package api is the brain's HTTP front door (P1 §5.2). Phase 0 serves:
+// Package api is the control-plane's HTTP front door (P1 §5.2). Phase 0 serves:
 //   - POST /v1/verify  : token-auth + stubbed verdict (honest unknown/plausible)
 //   - GET  /healthz    : liveness (no deps)
 //   - GET  /readyz     : readiness (reports config summary + secret presence, NOT values)
 //
 // No feature logic: /v1/verify returns the Door-1 shape with a Phase-0 honest verdict; it
-// does NOT run cheap layers, route, or hit a box (those are P1/P2). It proves the contract
+// does NOT run cheap layers, route, or hit a verifier-node (those are P1/P2). It proves the contract
 // shape, the auth seam, and the request lifecycle skeleton.
 package api
 
@@ -13,10 +13,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/mnfi/codmailling/brain/internal/config"
-	"github.com/mnfi/codmailling/brain/internal/hash"
-	"github.com/mnfi/codmailling/brain/internal/secrets"
-	"github.com/mnfi/codmailling/brain/internal/verdict"
+	"github.com/mnfi/codmailling/control-plane/internal/config"
+	"github.com/mnfi/codmailling/control-plane/internal/hash"
+	"github.com/mnfi/codmailling/control-plane/internal/secrets"
+	"github.com/mnfi/codmailling/control-plane/internal/verdict"
 )
 
 // Server holds the wired dependencies. Deps are interfaces/values, so tests inject fakes.
@@ -64,7 +64,7 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Phase-0 lifecycle skeleton: derive the domain via the frozen normalizer if a pepper
-	// is present; otherwise leave domain empty. We do NOT score, route, or hit a box.
+	// is present; otherwise leave domain empty. We do NOT score, route, or hit a verifier-node.
 	domain := ""
 	if s.hasher != nil {
 		if _, d, err := s.hasher.Normalize(req.Email); err == nil {

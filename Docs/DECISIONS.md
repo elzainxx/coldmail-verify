@@ -1,6 +1,7 @@
 # DECISIONS — Truemail (rulings of record)
 
-**Status:** LIVE — the binding decision log for the Truemail brain. Rulings here are for-build.
+**Status:** LIVE — the binding decision log for the Truemail control-plane. Rulings here are for-build.
+(Deployable names: the design docs' "brain" is the `control-plane`, "box" is the `verifier-node` — [ADR-0005](adr/ADR-0005-deployable-naming.md). Ruling text below that quotes the consistency report keeps its original "brain"/"box" vocabulary.)
 **Scope of this file:** owner rulings that are *cross-phase* or that *elevate/gate* something a single phase couldn't decide alone. Per-phase sign-offs remain in each spec's Appendix D; this file records only what the phases could not.
 **Companions:** [`adr/`](adr/) (door-touching decisions) · [`consolidation-application-report.md`](consolidation-application-report.md) · [`cross-phase-consistency-report.md`](cross-phase-consistency-report.md) · [`pre-takeoff-checklist.md`](pre-takeoff-checklist.md) · [`shadow-mode.md`](shadow-mode.md) · [`kill-switch-ladder.md`](kill-switch-ladder.md) · [`config-manifest.md`](config-manifest.md)
 

@@ -1,4 +1,4 @@
-// Package config loads the brain's runtime configuration. It wires the
+// Package config loads the control-plane's runtime configuration. It wires the
 // config-manifest.md flags/dials as REAL, READABLE settings from day one — even
 // where the feature a flag gates is still a stub. (Phase-0 rule: everything the
 // manifest calls a flag is a config entry, never hardcoded.)
@@ -132,7 +132,7 @@ type Policy struct {
 // Config is the whole readable configuration surface.
 type Config struct {
 	Env         string // "development" | "production"
-	ListenAddr  string // brain front door bind
+	ListenAddr  string // control-plane front door bind
 	KillSwitch  KillSwitch
 	ShadowModes ShadowModes
 	Dials       Dials
@@ -186,7 +186,7 @@ func Defaults() Config {
 
 // Load builds config from defaults, then applies environment overrides. (File-based
 // overrides land at P1; the precedence order is defaults -> file -> env.) It VALIDATES
-// the result so a nonsensical kill-switch/mode can't start the brain.
+// the result so a nonsensical kill-switch/mode can't start the control-plane.
 func Load(getenv func(string) string) (Config, error) {
 	c := Defaults()
 

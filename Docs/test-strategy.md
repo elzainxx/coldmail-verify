@@ -19,11 +19,11 @@ the GAP regressed.** (PROJECT_RULES.md §7.)
 
 | Layer | Substrate | Proves | Cannot prove |
 |---|---|---|---|
-| **Unit** | in-process (Go `testing`, Ruby RSpec) | frozen contracts: Door-4 vocab, Door-3 hashing, config defaults, Door-1 response shape | anything about a real box or provider |
+| **Unit** | in-process (Go `testing`, Ruby RSpec) | frozen contracts: Door-4 vocab, Door-3 hashing, config defaults, Door-1 response shape | anything about a real node or provider |
 | **Behavioral / integration** | socket-level mocks (`smtp_mock`/`dns_mock`), DB, in-process CAS harness | wire behavior, idempotency mechanics, the audit cross-check, exclusion discipline | real-provider behavior (greylist, vendor accuracy) |
-| **Rollout (real)** | a real box, real providers, real bounces | greylist retry-then-accept; vendor per-provider accuracy | — (this is the only layer that can) |
+| **Rollout (real)** | a real node, real providers, real bounces | greylist retry-then-accept; vendor per-provider accuracy | — (this is the only layer that can) |
 
-The unit layer exists **today** (Phase-0 brain: `vocab`, `hash`, `config`, `api` tests pass).
+The unit layer exists **today** (Phase-0 control-plane: `vocab`, `hash`, `config`, `api` tests pass).
 The behavioral layer is **scaffolded** below. The rollout layer is **named, not faked**.
 
 ---
@@ -59,8 +59,8 @@ phase must satisfy; the owning phase implements the assertions.
 | **0** | both deployables build empty; manifest loadable; cheap-only rung works; harness runs empty-but-real | **implemented now:** `go build/test/vet` green; `config.CheapLayersOnly()` true by default; gem-unmodified check passes; this harness compiles and runs |
 | **1** | POST an address → scored, logged verdict, cheap layers only, no port 25 | a request produces a valid Door-1 response **and** exactly one append-only LOG row (incl. `from_cache`/`invalid_syntax` NULL-hash cases) |
 | **2** | full pipeline on mocks; mock→real is one config value | the §3.5 "Prove:" matrix on socket mocks (`valid` via seeded probe; `invalid`; `unknown/blocked`; `catch_all`; `timeout`) + a config-only mock→real diff |
-| **3** | one audited box, real verdicts, big providers `:mx` | `:smtp`-eligible **iff** `green AND port25_open`; forced-red → quarantine → degrade to cheap (never `invalid`); the GAP-24 four-way IP identity holds |
-| **4** | a blocked box auto-quarantines, traffic re-routes, +1 config line | quarantine node #1 (present node #2) → traffic flows to #2, not degrade; fleet-wide spike → **alert, not cascade** (GAP-28); node #2 = config-only diff |
+| **3** | one audited verifier-node, real verdicts, big providers `:mx` | `:smtp`-eligible **iff** `green AND port25_open`; forced-red → quarantine → degrade to cheap (never `invalid`); the GAP-24 four-way IP identity holds |
+| **4** | a blocked verifier-node auto-quarantines, traffic re-routes, +1 config line | quarantine node #1 (present node #2) → traffic flows to #2, not degrade; fleet-wide spike → **alert, not cascade** (GAP-28); node #2 = config-only diff |
 | **5** | greylist retried on backoff & settles; bulk job handle; group-by-domain; no gate bypassed | GAP-37 no-double-settle under reclaim; GAP-35 loop mechanics; every queued check passes the identical router+gates (master invariant) |
 | **6** | residue escalates to a stubbed vendor; never non-residue; spend-once | vendor `valid`→`risky` (anti-laundering); hard-invalid/valid/cache-hit never escalated; GAP-42 no double-charge under reclaim |
 | **7** | loop closed; recalibration gated; accuracy per provider; weaning per bucket | GAP-49 classifier truth table; recalibration sample-gated + bounded-step + cascade-brake; `unknown` never pressured to `valid` |
@@ -89,11 +89,11 @@ CI surfaces these as **explicit `PROVABLE-ONLY-AT-ROLLOUT` markers**, not skippe
 ## 5. CI shape
 
 Per PROJECT_RULES.md §7, every change runs (see [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml)):
-1. **brain:** `go build ./...`, `go vet ./...`, `go test ./...`
-2. **box (Door 5):** `assert-gem-unmodified.sh` (host-portable) + `bundle list truemail`==3.3.1 in Docker
+1. **control-plane:** `go build ./...`, `go vet ./...`, `go test ./...`
+2. **verifier-node (Door 5):** `assert-gem-unmodified.sh` (host-portable) + `bundle list truemail`==3.3.1 in Docker
 3. **docs-updated staleness check** — a behavior change without a doc/ADR touch fails
 4. **config-reference freshness** — regenerate and diff; drift fails
 5. **the code-reviewer gate** — on every change, docs included
 
 CI **must not fake green**: the rollout-only truths (§4) are reported as pending markers, and the
-box Docker build is the real (not stubbed) resolution of the pinned gem.
+verifier-node Docker build is the real (not stubbed) resolution of the pinned gem.

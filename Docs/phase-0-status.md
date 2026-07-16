@@ -12,7 +12,7 @@ not faked).
 
 | # | Phase-0 "done when" | Status | Evidence |
 |---|---|---|---|
-| 1 | Repo scaffolds for **both deployables** exist and build empty | ✅ **met** | `brain/` `go build ./...` clean; `box/truemail-rack/` forked + Dockerized |
+| 1 | Repo scaffolds for **both deployables** exist and build empty | ✅ **met** | `control-plane/` `go build ./...` clean; `verifier-node/truemail-rack/` forked + Dockerized |
 | 2 | truemail gem **pinned** (ADR recorded) | ✅ **met** | `Gemfile` `truemail '3.3.1'` exact; [ADR-0003](adr/ADR-0003-truemail-engine-pin.md); Door-5 check passes |
 | 2b | truemail-rack **forked & running stock** | ⚠️ **partial** | Forked + Dockerfile + compose written; **live `docker build`/run PENDING** (no Docker daemon + no host Ruby + blocked rubygems here). Reproducible command in ground-truth §0. |
 | 2c | **truemail-ground-truth.md** reconciles real vs specs | ⚠️ **partial** | Source-read reconciliation **complete** (endpoints, JSON shape, config surface, versions — GAP-1/2/3/4/8 confirmed from source); **live-run rows PENDING** (smtp_debug runtime, host_audit, GAP-14 accept-all). Flagged, not fabricated. |
@@ -29,19 +29,19 @@ not faked).
 
 ## The two honest gaps (flagged, not faked)
 
-### G-1 · Live box build/run is PENDING (criterion 2b)
+### G-1 · Live verifier-node build/run is PENDING (criterion 2b)
 - **Why:** Docker daemon not running in this sandbox; Ruby not on the host; rubygems.org HTTPS
-  blocked (Windows schannel revocation error). The box builds/runs **only** via Docker.
+  blocked (Windows schannel revocation error). The verifier-node builds/runs **only** via Docker.
 - **What IS done:** the fork is vendored at v0.9.0, de-gitted, provenance in
-  [FORK.md](../box/truemail-rack/FORK.md); gem pinned exactly to 3.3.1; the forced `net-smtp`
+  [FORK.md](../verifier-node/truemail-rack/FORK.md); gem pinned exactly to 3.3.1; the forced `net-smtp`
   bump applied; `Dockerfile` + `docker-compose.yml` written; the Door-5 gem-unmodified check
   **passes**.
-- **To close:** run `docker compose -f box/docker-compose.yml build && … up` on a host with a
+- **To close:** run `docker compose -f verifier-node/docker-compose.yml build && … up` on a host with a
   Docker daemon; confirm `bundle list truemail` == 3.3.1. Exact commands in
   [truemail-ground-truth.md §0](truemail-ground-truth.md).
 
 ### G-2 · Ground-truth live-run rows are PENDING (criterion 2c)
-- **Why:** same as G-1 — capturing *runtime* engine output needs the running box + mock substrate.
+- **Why:** same as G-1 — capturing *runtime* engine output needs the running verifier-node + mock substrate.
 - **What IS done:** everything **source-readable** is reconciled from the fork's actual source +
   the gem's real gemspec + upstream's documented output — endpoints (no `/validate`, GAP-1), the
   lean JSON body (no domain/mail_servers, GAP-2/9), raw-string smtp_debug (GAP-4), subset config
@@ -70,7 +70,7 @@ accept-all pending. None mutates a frozen door.
 Phase 0 **decided nothing** that was owner-open. The parked sub-decisions in
 [DECISIONS.md §5](DECISIONS.md) remain parked; the [§6 owner-OQ register](DECISIONS.md) added
 this phase only *points* to where already-decided OQs live (P6-3, P6-6, P7-2, P7-8, and the P1
-mock-vs-live ruling → [ADR-0004](adr/ADR-0004-cheap-layers-brain-native.md)). The project's own
+mock-vs-live ruling → [ADR-0004](adr/ADR-0004-cheap-layers-control-plane-native.md)). The project's own
 **LICENSE is still an owner choice** (README.md "License posture") — third-party MIT respected in
 [NOTICE](../NOTICE), the project's own license deliberately not asserted.
 
@@ -92,11 +92,11 @@ surfacing one genuine lead, which was then confirmed and completed by an **inlin
   frozen vocabulary constants and guards with `Response.Valid()`; Door-2 append-only holds by
   interface shape; Door-5 pin is exact + CI-enforced.
 
-Full brain suite green after the fix (build + vet + all unit tests; GAP harness SKIPs as designed).
+Full control-plane suite green after the fix (build + vet + all unit tests; GAP harness SKIPs as designed).
 
 ## What Phase 0 deliberately did NOT build (correct scope)
 
 No cheap-layer logic, no SMTP, no wrapper endpoints, no queue, no fallback, no calibration, no real
-DB — all later-phase. The brain returns an honest `unknown`/`plausible` (never a guessed verdict);
+DB — all later-phase. The control-plane returns an honest `unknown`/`plausible` (never a guessed verdict);
 the node client returns `ErrNotImplemented` (never a fake verdict); the store offers no
 verdict-mutation method (Door 2 by shape). Stubs respect contracts; features are the phases that own them.

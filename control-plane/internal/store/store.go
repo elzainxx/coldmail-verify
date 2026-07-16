@@ -30,7 +30,7 @@ type VerificationRow struct {
 // ErrNotWired marks the Phase-0 stub (no live DB).
 var ErrNotWired = errors.New("store: no database wired (Phase 0 stub)")
 
-// Store is the brain's only path to state. Note the deliberate ABSENCE of an
+// Store is the control-plane's only path to state. Note the deliberate ABSENCE of an
 // UpdateVerification / DeleteVerification method — Door 2 append-only is enforced by the
 // interface shape, not just by DB grants.
 type Store interface {

@@ -1,4 +1,4 @@
-// Command brain is the control-plane entrypoint. Phase 0: load config + secrets, wire
+// Command control-plane is the control-plane entrypoint. Phase 0: load config + secrets, wire
 // the hasher and the HTTP front door, and serve. It builds and runs empty — no real
 // verification. It proves: config loads (manifest flags readable), the secrets scaffold
 // works, the kill-switch defaults to cheap-layers-only, and the Door-1 endpoint responds.
@@ -14,10 +14,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mnfi/codmailling/brain/internal/api"
-	"github.com/mnfi/codmailling/brain/internal/config"
-	"github.com/mnfi/codmailling/brain/internal/hash"
-	"github.com/mnfi/codmailling/brain/internal/secrets"
+	"github.com/mnfi/codmailling/control-plane/internal/api"
+	"github.com/mnfi/codmailling/control-plane/internal/config"
+	"github.com/mnfi/codmailling/control-plane/internal/hash"
+	"github.com/mnfi/codmailling/control-plane/internal/secrets"
 )
 
 func main() {
@@ -27,9 +27,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
-	log.Printf("brain starting: %s", cfg.Summary())
+	log.Printf("control-plane starting: %s", cfg.Summary())
 
-	// Secrets: at Phase 0 we do NOT require core secrets so `brain` can boot for a build
+	// Secrets: at Phase 0 we do NOT require core secrets so `control-plane` can boot for a build
 	// smoke without a real pepper. A real (feature-serving) deployment sets requireCore=true.
 	requireCore := cfg.Env == "production"
 	sec, err := secrets.Load(secrets.EnvSource{}, requireCore)

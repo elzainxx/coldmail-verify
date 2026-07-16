@@ -20,7 +20,8 @@ silently rewrite (mirror Door 2).
 | [ADR-0001](ADR-0001-outcome-feed-authentication.md) | OQ-P7-1 elevated to a hard pre-P7 authentication door | *new* TB-7 trust gate (P7 input) | No — new gate, five frozen doors untouched | ACCEPTED |
 | [ADR-0002](ADR-0002-queue-plaintext-backup-scope.md) | Queue-plaintext backup-awareness gate at P5 | **Door 3** (hashing / no-plaintext) | **No** — affirms Door 3 + the P5 bounded exception | ACCEPTED |
 | [ADR-0003](ADR-0003-truemail-engine-pin.md) | truemail engine pinned exactly at 3.3.1, never forked | **Door 5** (never-fork) | **No** — enforces Door 5 | ACCEPTED |
-| [ADR-0004](ADR-0004-cheap-layers-brain-native.md) | Cheap layers run brain-native; brain takes no truemail dependency | Door 5 (engine boundary) | **No** — draws the boundary, doesn't fork | ACCEPTED |
+| [ADR-0004](ADR-0004-cheap-layers-brain-native.md) | Cheap layers run control-plane-native; the control-plane takes no truemail dependency (filename keeps "brain-native" — ADRs are immutable records) | Door 5 (engine boundary) | **No** — draws the boundary, doesn't fork | ACCEPTED |
+| [ADR-0005](ADR-0005-deployable-naming.md) | Deployables named: "brain"→`control-plane`, "box"→`verifier-node` | naming (durable) | **No** — a total rename, no contract changed | ACCEPTED |
 
 ## Owner-OQ rulings that became records
 
@@ -30,4 +31,4 @@ Per-phase-only sign-offs remain in each spec's Appendix C/D.
 
 ## Next number
 
-The next ADR is **ADR-0005**. Increment monotonically; never reuse a number.
+The next ADR is **ADR-0006**. Increment monotonically; never reuse a number.

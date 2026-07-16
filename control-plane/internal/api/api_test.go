@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mnfi/codmailling/brain/internal/config"
-	"github.com/mnfi/codmailling/brain/internal/secrets"
-	"github.com/mnfi/codmailling/brain/internal/verdict"
+	"github.com/mnfi/codmailling/control-plane/internal/config"
+	"github.com/mnfi/codmailling/control-plane/internal/secrets"
+	"github.com/mnfi/codmailling/control-plane/internal/verdict"
 )
 
 // The Phase-0 front door must (a) emit a VALID Door-1 contract response, (b) never a

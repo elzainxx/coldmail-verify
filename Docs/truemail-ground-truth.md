@@ -5,7 +5,7 @@
 **what the seven specs assumed**, for every field / endpoint / behavior a one-way door depends on.
 **Rule (non-negotiable):** any mismatch is a **flagged item for owner sign-off — never a silent fix.**
 A frozen door built on a wrong assumption is the exact failure the seven-phase planning prevented.
-**Anchors:** pinned engine `truemail 3.3.1` ([ADR-0003](adr/ADR-0003-truemail-engine-pin.md)); fork `truemail-rack v0.9.0` ([FORK.md](../box/truemail-rack/FORK.md)).
+**Anchors:** pinned engine `truemail 3.3.1` ([ADR-0003](adr/ADR-0003-truemail-engine-pin.md)); fork `truemail-rack v0.9.0` ([FORK.md](../verifier-node/truemail-rack/FORK.md)).
 
 ---
 
@@ -15,12 +15,12 @@ There are **two** grades of evidence in this document, and they are **never** co
 
 | Grade | Meaning | Trust for a one-way door |
 |---|---|---|
-| **`SOURCE ✓`** | Read directly from the **pinned fork's own source** (`box/truemail-rack/app/…`), the **gem's `v3.3.1` gemspec/version**, or **upstream's own documented output** (rack README). | Authoritative for **endpoints, JSON keys/shape, config surface**. |
+| **`SOURCE ✓`** | Read directly from the **pinned fork's own source** (`verifier-node/truemail-rack/app/…`), the **gem's `v3.3.1` gemspec/version**, or **upstream's own documented output** (rack README). | Authoritative for **endpoints, JSON keys/shape, config surface**. |
 | **`PENDING-RUN`** | Requires **executing** the stock rack against `smtp_mock` + `dns_mock` to observe **runtime values / behavior**. | **Not yet verified.** Do not freeze a door on a `PENDING-RUN` row until the live capture confirms it. |
 
 **Why the live run is pending in this environment (flagged, not worked around):**
 - **Docker daemon not running** — `docker` CLI is present but the Desktop Linux engine pipe is
-  absent (`open //./pipe/dockerDesktopLinuxEngine: … cannot find`). The box builds/runs only via Docker.
+  absent (`open //./pipe/dockerDesktopLinuxEngine: … cannot find`). The verifier-node builds/runs only via Docker.
 - **No host Ruby** — `ruby`/`bundle` are not installed on the host.
 - **rubygems.org HTTPS blocked here** — `curl` to the registry fails with a Windows schannel
   revocation error (`CRYPT_E_NO_REVOCATION_CHECK`), so gems can't resolve on the host either.
@@ -34,11 +34,11 @@ treated as reality-confirmed.**
 
 ```bash
 # 1. Build + run the stock pinned rack (regenerates the lock, resolves truemail 3.3.1):
-docker compose -f box/docker-compose.yml build
-docker compose -f box/docker-compose.yml up -d
+docker compose -f verifier-node/docker-compose.yml build
+docker compose -f verifier-node/docker-compose.yml up -d
 
 # 2. Confirm the pin actually resolved to 3.3.1 (Door 5, stronger than the host check):
-docker compose -f box/docker-compose.yml exec box bundle list truemail   # => truemail (3.3.1)
+docker compose -f verifier-node/docker-compose.yml exec verifier-node bundle list truemail   # => truemail (3.3.1)
 
 # 3. Capture the REAL emitted shapes (fill the PENDING-RUN rows from these):
 TOKEN=phase0-stock-smoke-token
@@ -57,7 +57,7 @@ curl -s -i 'http://localhost:3000/validate'                                     
 
 ## 1. Endpoints — what the stock pinned rack actually serves `SOURCE ✓`
 
-Read from `box/truemail-rack/app/truemail_server/router.rb` (the `Resolver`) — **authoritative**:
+Read from `verifier-node/truemail-rack/app/truemail_server/router.rb` (the `Resolver`) — **authoritative**:
 
 | Endpoint | Exists in stock fork? | Spec assumption | Verdict |
 |---|---|---|---|
@@ -82,13 +82,13 @@ the gem's lean `ValidatorJson`. Confirmed against upstream README's own document
 
 | Field a door depends on | Real stock output | Spec assumption | Verdict |
 |---|---|---|---|
-| top-level keys | `date, email, validation_type, success, errors, smtp_debug, configuration` | P1 §3.1.3 knows the lean set; brain builds its own response | matches `SOURCE ✓` |
+| top-level keys | `date, email, validation_type, success, errors, smtp_debug, configuration` | P1 §3.1.3 knows the lean set; control-plane builds its own response | matches `SOURCE ✓` |
 | `domain` | **absent** from JSON | P1 GAP-2: "rack JSON omits `domain`/`mail_servers`" | **GAP-2 CONFIRMED** `SOURCE ✓` |
-| `mail_servers` | **absent** from JSON | P1 GAP-2 (brain self-resolves MX); P2 fork **adds** an `mx` block | **GAP-2 CONFIRMED** `SOURCE ✓` |
-| `smtp_debug` (on failure) | **array of raw-string** transcripts (`errors:{rcptto:"550 …\n"}`), no numeric code | P1 GAP-4 / P2 §6.2: raw strings, brain parses the code | **GAP-4 CONFIRMED** `SOURCE ✓` (README example) |
+| `mail_servers` | **absent** from JSON | P1 GAP-2 (control-plane self-resolves MX); P2 fork **adds** an `mx` block | **GAP-2 CONFIRMED** `SOURCE ✓` |
+| `smtp_debug` (on failure) | **array of raw-string** transcripts (`errors:{rcptto:"550 …\n"}`), no numeric code | P1 GAP-4 / P2 §6.2: raw strings, control-plane parses the code | **GAP-4 CONFIRMED** `SOURCE ✓` (README example) |
 | `smtp_debug` (on clean success) | **`null`** | P2 §6.8 discriminator (`success && smtp_debug==null` = clean 250) | matches `SOURCE ✓` |
 | `configuration` | **subset** (no `verifier_email/domain`, timeouts, `smtp_port`, `connection_attempts`) | P1 GAP-3 / P2 §4.6: fork adds `/v1/config` for full config | **GAP-3 CONFIRMED** `SOURCE ✓` |
-| `date` | engine **local-tz string** (`"2021-02-07 10:00:56 +0200"`) | P1 GAP-8: brain stores UTC, keeps raw in sidecar | **GAP-8 CONFIRMED** `SOURCE ✓` |
+| `date` | engine **local-tz string** (`"2021-02-07 10:00:56 +0200"`) | P1 GAP-8: control-plane stores UTC, keeps raw in sidecar | **GAP-8 CONFIRMED** `SOURCE ✓` |
 | `validation_type` | `regex\|mx\|mx_blacklist\|smtp` (+ `whitelist\|blacklist` overrides) | P1 §3.2.2 `engine_validation_type`; GAP-7 whitelist/blacklist | matches `SOURCE ✓` |
 | `success` | engine's own boolean, distinct from our `status` | P1 §3.2.2 `engine_success` kept distinct | matches `SOURCE ✓` |
 | exact runtime `smtp_debug` array on a live reject | — | P2 §6.2 parse procedure | **PENDING-RUN** (needs smtp_mock reject fixture) |
@@ -103,7 +103,7 @@ the two things still needing a live run are the *runtime* `smtp_debug` array con
 ### 3.1 GAP-1 — `/validate` (build-plan) vs `/` (reality) `SOURCE ✓ CONFIRMED`
 Stock rack validation is the **root** `/`, not `/validate` (router.rb). The specs already resolved
 this (node client targets `/` in P1; the fork adds `/v1/verify` in P2). **Not a frozen-door break** —
-the door is the *response contract*, which is versioned and brain-owned. **No sign-off needed beyond
+the door is the *response contract*, which is versioned and control-plane-owned. **No sign-off needed beyond
 noting the build-plan's `/validate` wording was never literal.** ✓
 
 ### 3.2 `/version` shape `SOURCE ✓`
@@ -149,7 +149,7 @@ Per the rule. None of these mutates a frozen door; each is surfaced for an expli
 | **GT-1** | engine version | appendices cite `gem@3.3.0` | **`3.3.1`** (latest tag; `version.rb`) | `engine_version` provenance string | **Pin 3.3.1** (ADR-0003). Specs' `3.3.0` was illustrative — accept 3.3.1, no door change. |
 | **GT-2** | rack version | appendices cite `rack@0.10.0` | **`v0.9.0`** (no `0.10.0` tag exists) | `engine_version = rack@0.9.0+gem@3.3.1` | Accept real version in provenance. Illustrative spec string; no door change. |
 | **GT-3** | `net-smtp` pin | (not in specs) | 3.3.1 forces `~> 0.5.0`; upstream rack pinned `~> 0.4.0` (conflict) | fork build resolvability | **Bump fork's net-smtp to 0.5.0** (FORK.md #2). Rack-side edit, not a gem patch. Owner: confirm acceptable. |
-| **GT-4** | `host_audit` live shape | P3 builds the audit gate on `{current_host_ip, warnings}` | shape matches specs, but **not verifiable until the Phase-2 wrapper runs it live** | P3 audit gate | Do **not** freeze the P3 gate's runtime assumptions until the PENDING-RUN capture (§3.3) confirms them on a real box. |
+| **GT-4** | `host_audit` live shape | P3 builds the audit gate on `{current_host_ip, warnings}` | shape matches specs, but **not verifiable until the Phase-2 wrapper runs it live** | P3 audit gate | Do **not** freeze the P3 gate's runtime assumptions until the PENDING-RUN capture (§3.3) confirms them on a real node. |
 | **GT-5** | `smtp_mock` accept-all | P2 GAP-14 (seeded probe needed for `valid`) | **PENDING-RUN** — unverified from source | P2 `valid`-path proof | Confirm at live capture; until then P2's `valid`-path proof is "designed," not "observed." |
 
 **All PENDING-RUN rows and GT-4/GT-5 mean deliverable #2 is only *partially* met in this

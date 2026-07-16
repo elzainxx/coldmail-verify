@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Docs-updated staleness gate (PROJECT_RULES.md §8): a BEHAVIOR change (code under brain/
-# or box/) that does NOT also touch a doc/ADR is a FAILING check, not a nag.
+# Docs-updated staleness gate (PROJECT_RULES.md §8): a BEHAVIOR change (code under control-plane/
+# or verifier-node/) that does NOT also touch a doc/ADR is a FAILING check, not a nag.
 #
 # Compares the changed file set (against a base ref, or the working tree) and fails if it
 # contains code changes but no doc/ADR/spec/PROJECT_RULES change. Config-only, test-only,
@@ -31,29 +31,29 @@ changed="$(echo "$changed" | sed '/^$/d' | sort -u)"
 
 [ -z "$changed" ] && { echo "docs-updated: no changes — ok."; exit 0; }
 
-# Does the diff contain a BEHAVIOR change? (source under brain/ or box/, excluding tests,
+# Does the diff contain a BEHAVIOR change? (source under control-plane/ or verifier-node/, excluding tests,
 # config, and the fork's own docs which are provenance not behavior.)
 code_changed=false
 docs_changed=false
 while IFS= read -r f; do
   case "$f" in
     # Behavior surfaces:
-    brain/*.go|brain/**/*.go)
+    control-plane/*.go|control-plane/**/*.go)
       case "$f" in
         *_test.go) : ;;                       # tests are not behavior
-        brain/internal/config/*) : ;;          # config surface is exempt (dials, not behavior)
+        control-plane/internal/config/*) : ;;          # config surface is exempt (dials, not behavior)
         *) code_changed=true ;;
       esac ;;
-    box/truemail-rack/app/*|box/truemail-rack/config/*|box/truemail-rack/lib/*)
+    verifier-node/truemail-rack/app/*|verifier-node/truemail-rack/config/*|verifier-node/truemail-rack/lib/*)
       code_changed=true ;;
     # Doc surfaces:
-    *.md|Docs/*|Docs/**/*|PROJECT_RULES.md|box/truemail-rack/FORK.md)
+    *.md|Docs/*|Docs/**/*|PROJECT_RULES.md|verifier-node/truemail-rack/FORK.md)
       docs_changed=true ;;
   esac
 done <<< "$changed"
 
 if $code_changed && ! $docs_changed; then
-  echo "FAIL (docs-updated): behavior changed under brain/ or box/ but no doc/ADR/spec was touched." >&2
+  echo "FAIL (docs-updated): behavior changed under control-plane/ or verifier-node/ but no doc/ADR/spec was touched." >&2
   echo "Changed files:" >&2
   echo "$changed" | sed 's/^/  - /' >&2
   echo "Fix: update the relevant Docs/ spec or add/append an ADR in the SAME change (PROJECT_RULES.md §8)." >&2

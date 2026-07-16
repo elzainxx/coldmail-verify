@@ -1,4 +1,4 @@
-# Box = forked truemail-rack + PINNED truemail gem (Door 5).
+# Verifier-node = forked truemail-rack + PINNED truemail gem (Door 5).
 # Ruby is pinned to the fork's .ruby-version (3.2). Runs STOCK in Phase 0 —
 # no wrapper endpoints (/verify, /audit, /catchall, /config, /stats): those are Phase 2.
 #

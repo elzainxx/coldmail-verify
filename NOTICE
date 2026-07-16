@@ -3,8 +3,8 @@ Truemail Verification System — Third-Party Notices
 
 This repository contains two decoupled deployables (see README.md):
 
-  - brain/  — the Go control plane (our own code)
-  - box/    — the verifier box: a FORK of truemail-rack (Ruby) that embeds the
+  - control-plane/  — the Go control plane (our own code)
+  - verifier-node/    — the verifier node: a FORK of truemail-rack (Ruby) that embeds the
               PINNED, UNMODIFIED truemail gem as its validation engine.
 
 The following third-party components are used, and their licenses are respected.
@@ -15,21 +15,21 @@ The following third-party components are used, and their licenses are respected.
   Upstream:  https://github.com/truemail-rb/truemail
   Version:   3.3.1  (pinned exactly — see Docs/adr/ADR-0003-*.md)
   License:   MIT — Copyright (c) 2019-2023 Vladislav Trotsenko
-  Use:       Consumed as an unmodified dependency of the forked rack (box/).
+  Use:       Consumed as an unmodified dependency of the forked rack (verifier-node/).
              Door 5 (PROJECT_RULES.md): the engine is a pinned dependency and is
              NEVER patched or forked. A CI check asserts it is unmodified.
 
 --------------------------------------------------------------------------------
-2. truemail-rack (the HTTP SERVER) — FORKED (this is the box)
+2. truemail-rack (the HTTP SERVER) — FORKED (this is the verifier-node)
 --------------------------------------------------------------------------------
   Upstream:  https://github.com/truemail-rb/truemail-rack
   Fork base: tag v0.9.0, commit 9ecbbbdc45001d971a7d477e35136540c1477d11
   License:   MIT — Copyright (c) 2020-2023 Vladislav Trotsenko
-             (original license retained verbatim at box/truemail-rack/LICENSE.txt)
-  Use:       Forked into box/truemail-rack/. The ONLY thing we fork. Wrapper
+             (original license retained verbatim at verifier-node/truemail-rack/LICENSE.txt)
+  Use:       Forked into verifier-node/truemail-rack/. The ONLY thing we fork. Wrapper
              endpoints (/verify, /audit, /catchall, /config, /stats) are a
              Phase-2 activity and are NOT added in Phase 0 — the fork runs stock.
-  Modifications from upstream v0.9.0 are recorded in box/truemail-rack/FORK.md.
+  Modifications from upstream v0.9.0 are recorded in verifier-node/truemail-rack/FORK.md.
 
 --------------------------------------------------------------------------------
 3. Transitive / tooling dependencies
@@ -42,7 +42,7 @@ The following third-party components are used, and their licenses are respected.
 --------------------------------------------------------------------------------
 Project's own code
 --------------------------------------------------------------------------------
-  The license for THIS project's own code (brain/, box/ wrapper additions, and
+  The license for THIS project's own code (control-plane/, verifier-node/ wrapper additions, and
   the Docs/) is an OWNER decision and is deliberately NOT asserted here — see
   README.md "License posture". Nothing in this file grants rights over the
   owner's own code; it only records the third-party components we must respect.

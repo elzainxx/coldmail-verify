@@ -18,7 +18,7 @@ func TestGAP37_ExactlyOnceSettlementUnderReclaim(t *testing.T) {
 		"slow (not dead) holder + TTL reclaim: second attempt runs, but only the CAS-on-lease-holder commits",
 		"lost attempt (reclaimed) discards its result: no settle, no requeue, no LOG row",
 		"crash after SMTP-success, before settle: reclaim re-attempts; settles exactly once (GAP-33)",
-		"lease TTL must exceed the brain's max SMTP client deadline (a live attempt never loses its lease)",
+		"lease TTL must exceed the control-plane's max SMTP client deadline (a live attempt never loses its lease)",
 	}
 	t.Logf("GAP-37 scenarios to assert (%d): %v", len(scenarios), scenarios)
 	t.Skip("PENDING P5: needs the work_items store + drainer + CAS. Harness is real-shaped; assertions land in Phase 5.")

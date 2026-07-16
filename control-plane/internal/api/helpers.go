@@ -18,7 +18,7 @@ func newRequestID(now time.Time) string {
 }
 
 // trimBearer accepts both "Bearer <t>" and a raw token (the front door is bearer; the
-// box token is raw — kept distinct per P1 §3.5.4).
+// verifier-node token is raw — kept distinct per P1 §3.5.4).
 func trimBearer(h string) string {
 	h = strings.TrimSpace(h)
 	if after, ok := strings.CutPrefix(h, "Bearer "); ok {
@@ -27,7 +27,7 @@ func trimBearer(h string) string {
 	return h
 }
 
-// frontDoorToken returns the configured caller->brain bearer, if any.
+// frontDoorToken returns the configured caller->control-plane bearer, if any.
 func (s *Server) frontDoorToken() (string, bool) {
 	if s.secrets == nil {
 		return "", false

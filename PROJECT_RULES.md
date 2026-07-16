@@ -27,7 +27,7 @@ suggestion.
 ### Door 1 — the `/verify` response shape is versioned & additive-only
 - The response is `POST /v1/verify` → a JSON object with `api_version, status, reason, confidence,
   recommendation, email, domain, flags, signals, meta, raw` (P1 §3.1.3). Implemented as the frozen
-  contract in `brain/internal/verdict`.
+  contract in `control-plane/internal/verdict`.
 - **Never remove or rename a field. Never change a field's type or meaning.** `confidence` is always
   an integer 0–100 — never a float or string.
 - **Only add**: new fields, new `flags`/`signals` keys, new enum values (Door 4). A breaking change is
@@ -54,7 +54,7 @@ suggestion.
 
 ### Door 3 — email hashing + normalization: one scheme, frozen
 - Scheme: **`norm/v1` + `hmac-sha256/v1`**, stored as **`bytea` (32 bytes)**, keyed by a **single
-  global HMAC pepper**. Implemented in `brain/internal/hash`.
+  global HMAC pepper**. Implemented in `control-plane/internal/hash`.
 - The **raw full email is NEVER persisted.** Only `email_hash` (the address's identity across history)
   and `domain` (in clear) are stored. Local-part lowercased (OQ-3, RFC-lossy accepted); dots/`+tags`
   are **not** folded into the primary hash (provider quirks are a separate optional column).
@@ -62,8 +62,8 @@ suggestion.
   history de-joins forever; leak it → low-entropy addresses become brute-forceable. It gets its **own
   tested backup/custody runbook** (not a secrets-manager line): generated once, stored outside the DB,
   redundant + geo-separate + access-audited backups, recovery **drilled before P1 ships**, rotation
-  additive-only. The brain holds it in memory → host-hardening + core-dump suppression are part of
-  custody (F-9/F-19). See [`brain/internal/secrets`](brain/internal/secrets/secrets.go) and
+  additive-only. The control-plane holds it in memory → host-hardening + core-dump suppression are part of
+  custody (F-9/F-19). See [`control-plane/internal/secrets`](control-plane/internal/secrets/secrets.go) and
   [pre-takeoff-checklist §1.1](Docs/pre-takeoff-checklist.md).
 - **The one bounded exception** (P5, DR-4/ADR-0002): the queue (`work_items`) holds *plaintext for
   work-not-yet-done only*, purged transactionally on settle, and its backup copy must be
@@ -75,19 +75,19 @@ suggestion.
 - `status ∈ {valid, invalid, risky, unknown}`; `recommendation ∈ {send, review, skip}`; `reason` is the
   frozen enum in P1 §3.4.3. All later-phase values (`historical_bounce`, `external_verified`, the SMTP
   reasons, …) are **reserved now** so no future addition is breaking.
-- The enums live in **one** place: [`brain/internal/vocab`](brain/internal/vocab/vocab.go). Never
+- The enums live in **one** place: [`control-plane/internal/vocab`](control-plane/internal/vocab/vocab.go). Never
   duplicated per service. Storage-layer CHECK constraints mirror it (adding a value = an additive
   migration).
 
 ### Door 5 — never fork the engine; talk to a node LIST
 - **The `truemail` gem (the engine) is a pinned dependency at `3.3.1`, NEVER forked or patched**
   ([ADR-0003](Docs/adr/ADR-0003-truemail-engine-pin.md)). Only **`truemail-rack` (the HTTP server)** is
-  forked (`box/truemail-rack/`, provenance in [FORK.md](box/truemail-rack/FORK.md)). CI asserts the
-  engine is unmodified ([`bin/assert-gem-unmodified.sh`](box/truemail-rack/bin/assert-gem-unmodified.sh)).
-- The brain talks to a **LIST of nodes** (even length 0/1) through a pluggable **Strategy interface** —
-  there is **no** code path referencing a single hardcoded endpoint (`brain/internal/router`). Adding
+  forked (`verifier-node/truemail-rack/`, provenance in [FORK.md](verifier-node/truemail-rack/FORK.md)). CI asserts the
+  engine is unmodified ([`bin/assert-gem-unmodified.sh`](verifier-node/truemail-rack/bin/assert-gem-unmodified.sh)).
+- The control-plane talks to a **LIST of nodes** (even length 0/1) through a pluggable **Strategy interface** —
+  there is **no** code path referencing a single hardcoded endpoint (`control-plane/internal/router`). Adding
   node #2 is a **config-list edit, never a code change** (GAP-31).
-- Any behavioral gap is closed **brain-side** or in the **rack wrapper** (Phase 2+), **never** by
+- Any behavioral gap is closed **control-plane-side** or in the **rack wrapper** (Phase 2+), **never** by
   editing the gem. "Door 5 outranks design elegance" — if a nicety needs a gem patch, drop the nicety
   (e.g. the GAP-13 catch-all-session decision).
 
@@ -109,7 +109,7 @@ This is the founding discipline, not a Door but the reason the Doors matter.
 - The flywheel never pressures `unknown → valid` to look more accurate (P7 §8.4). First-class `unknown`
   survives all seven phases intact.
 
-The Phase-0 brain embodies this: with no engine consulted, `/v1/verify` returns
+The Phase-0 control-plane embodies this: with no engine consulted, `/v1/verify` returns
 `unknown`/`plausible`, never a guessed verdict (`verdict.NewCheapUnknown`).
 
 ---
@@ -142,7 +142,7 @@ alert, never auto-change, until a human deliberately promotes it (DR-2, [shadow-
 
 - **The four day-one mutators default to `recommend-only`:** A1 (P4 block-rate quarantine, statistical
   trigger), A6 (P7 confidence recalibration — the sharpest), A8 (P7 provider auto-promotion), A9 (P7
-  fallback weaning). Wired as real config in [`brain/internal/config`](brain/internal/config/config.go)
+  fallback weaning). Wired as real config in [`control-plane/internal/config`](control-plane/internal/config/config.go)
   (`ShadowModes`, defaulted recommend-only, tested).
 - Promotion to `auto` is a per-mechanism, per-scope, **admin-audited** owner action — never a global
   flip. The two systemic brakes (A5 fleet, A7 cascade) already alert-and-hold; they are the pattern
@@ -163,7 +163,7 @@ The documented degradation hierarchy (full → SMTP-off → fallback-off → che
 rung returns a real, correctly-labelled verdict — degradation lowers *confidence*, never *honesty*.**
 No rung ever fabricates `valid`/`invalid`. Every rung is reachable by **config/flag, not code** (Door
 5). Full detail: [kill-switch-ladder.md](Docs/kill-switch-ladder.md). Wired as real config in
-`brain/internal/config` (`KillSwitch`).
+`control-plane/internal/config` (`KillSwitch`).
 
 | Rung | Disables | Still returns | Scope |
 |---|---|---|---|
@@ -187,19 +187,19 @@ No rung ever fabricates `valid`/`invalid`. Every rung is reachable by **config/f
 
 ## 6. Coding standards
 
-- **Two deployables, never merged.** Go brain (`brain/`), Ruby forked rack (`box/`). The boundary is a
-  security + correctness boundary (README.md). Boxes are dumb/stateless/disposable; the brain holds all
-  state; boxes never talk to each other and never touch the DB.
+- **Two deployables, never merged.** Go control-plane (`control-plane/`), Ruby forked rack (`verifier-node/`). The boundary is a
+  security + correctness boundary (README.md). Verifier-nodes are dumb/stateless/disposable; the control-plane holds all
+  state; nodes never talk to each other and never touch the DB.
 - **LOCKED → code; DIAL → config.** Everything the specs marked LOCKED becomes a rule or a type
   (`vocab`, `hash`, the append-only `store` shape); everything marked DIAL becomes a readable config
-  entry ([`config`](brain/internal/config/config.go)). **Nothing the config manifest calls a flag is
+  entry ([`config`](control-plane/internal/config/config.go)). **Nothing the config manifest calls a flag is
   hardcoded.**
 - **Interfaces at the seams.** The router `Strategy`, the node `Client` (pure-function `email → raw
   JSON`), and the `store.Store` are interfaces so later phases add implementations without touching
   callers (Door 5's payoff).
 - **Secrets are never committed, never logged.** Loaded from secure config at startup, held in memory,
   redacted in any `String()`. `.gitignore` excludes `*.env` (except `*.example.env`), `secrets/`, keys,
-  and the pepper. See [`brain/config/secrets.example.env`](brain/config/secrets.example.env).
+  and the pepper. See [`control-plane/config/secrets.example.env`](control-plane/config/secrets.example.env).
 - **Harden toward `unknown` in code, not just prose.** A path that cannot prove a verdict returns
   `unknown`/degrades to cheap — it never invents `valid`/`invalid` (see the node stub returning
   `ErrNotImplemented`, never a fake verdict).
@@ -218,15 +218,15 @@ No rung ever fabricates `valid`/`invalid`. Every rung is reachable by **config/f
   planning passes are gated the same way as code.
 - The gate checks: correctness, the additive-only doors, no hardcoded manifest flag, no secret in the
   diff, and no future-phase mechanism built ahead of its phase.
-- CI also runs: `go build` + `go test` + `go vet` (brain), the **gem-unmodified assertion** (Door 5),
+- CI also runs: `go build` + `go test` + `go vet` (control-plane), the **gem-unmodified assertion** (Door 5),
   and the **docs-updated staleness check** (§8).
 
 ---
 
 ## 8. A change isn't done until its docs are updated
 
-- **Documentation staleness is a failing check, not a nag.** A behavior change (code under `brain/` or
-  `box/`) that does not also touch a doc/ADR fails the docs-updated CI check
+- **Documentation staleness is a failing check, not a nag.** A behavior change (code under `control-plane/` or
+  `verifier-node/`) that does not also touch a doc/ADR fails the docs-updated CI check
   ([`scripts/check-docs-updated.sh`](scripts/check-docs-updated.sh)).
 - **One-way-door decisions and owner-OQ rulings become ADRs** ([`Docs/adr/`](Docs/adr/)). Cross-phase
   rulings live in [`Docs/DECISIONS.md`](Docs/DECISIONS.md); parked sub-decisions stay parked in §5 there

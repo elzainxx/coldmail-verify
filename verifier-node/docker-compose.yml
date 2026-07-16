@@ -1,17 +1,17 @@
-# Box deployable — the forked truemail-rack running STOCK (Phase 0).
-# Separate from the brain; they are NEVER merged (README.md).
+# Verifier-node deployable — the forked truemail-rack running STOCK (Phase 0).
+# Separate from the control-plane; they are NEVER merged (README.md).
 #
-#   docker compose -f box/docker-compose.yml build
-#   docker compose -f box/docker-compose.yml up
+#   docker compose -f verifier-node/docker-compose.yml build
+#   docker compose -f verifier-node/docker-compose.yml up
 #
 # Phase 0 proves the fork BUILDS and RUNS stock. It does NOT do real verification
 # behind a real IP (Phase 3) and has NO wrapper endpoints (Phase 2).
 services:
-  box:
+  verifier-node:
     build:
       context: ./truemail-rack
       dockerfile: Dockerfile
-    image: truemail-box:stock-p0
+    image: truemail-verifier-node:stock-p0
     ports:
       - "3000:3000"
     environment:

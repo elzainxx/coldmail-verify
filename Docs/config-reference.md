@@ -20,7 +20,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | **total knobs** | **226** |
 
 > One-way doors are **not** dials: the frozen contracts (response shape, LOG, hashing,
-> vocabulary, never-fork) live in code (`brain/internal/{vocab,hash,verdict,store,router}`),
+> vocabulary, never-fork) live in code (`control-plane/internal/{vocab,hash,verdict,store,router}`),
 > not in this toggle list. A dial that *feeds* a door (e.g. a `confidence` number vs. the
 > `confidence` int-0–100 *type*) is a dial; the type it feeds is frozen.
 

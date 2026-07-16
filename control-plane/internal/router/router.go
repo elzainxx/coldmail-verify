@@ -1,4 +1,4 @@
-// Package router implements Door 5's node-LIST discipline: the brain talks to a
+// Package router implements Door 5's node-LIST discipline: the control-plane talks to a
 // LIST of nodes (even length 0/1) through a pluggable Strategy interface — there is
 // NO code path that references a single hardcoded endpoint. (PROJECT_RULES.md Door 5;
 // P1 §3.5.1/§5.4.)
@@ -13,7 +13,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/mnfi/codmailling/brain/internal/config"
+	"github.com/mnfi/codmailling/control-plane/internal/config"
 )
 
 // ErrNoEligibleNode is returned when the candidate list is empty. Callers degrade to a

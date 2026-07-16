@@ -16,20 +16,20 @@ secrets/
 config/secrets.env
 config/local.*.yaml
 
-# Go (brain)
-/brain/bin/
-/brain/dist/
+# Go (control-plane)
+/control-plane/bin/
+/control-plane/dist/
 *.test
 *.out
 coverage.txt
 coverage.html
 
-# Ruby (box / forked truemail-rack)
-box/**/.bundle/
-box/**/vendor/bundle/
-box/**/tmp/
-box/**/coverage/
-box/**/log/
+# Ruby (verifier-node / forked truemail-rack)
+verifier-node/**/.bundle/
+verifier-node/**/vendor/bundle/
+verifier-node/**/tmp/
+verifier-node/**/coverage/
+verifier-node/**/log/
 *.gem
 
 # Editors / OS

@@ -77,7 +77,7 @@ IFS=$'\t' read -r _ TOTAL SEC FF DIAL OTHER < "$tmp.counts"
   echo "| **total knobs** | **${TOTAL}** |"
   echo
   echo "> One-way doors are **not** dials: the frozen contracts (response shape, LOG, hashing,"
-  echo "> vocabulary, never-fork) live in code (\`brain/internal/{vocab,hash,verdict,store,router}\`),"
+  echo "> vocabulary, never-fork) live in code (\`control-plane/internal/{vocab,hash,verdict,store,router}\`),"
   echo "> not in this toggle list. A dial that *feeds* a door (e.g. a \`confidence\` number vs. the"
   echo "> \`confidence\` int-0–100 *type*) is a dial; the type it feeds is frozen."
   echo
