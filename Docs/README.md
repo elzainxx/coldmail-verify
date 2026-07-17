@@ -52,6 +52,14 @@ touching a one-way door or elevating/gating a cross-phase decision.
 | [`truemail-ground-truth.md`](truemail-ground-truth.md) | Real engine output vs. spec assumptions (source-complete; live-run rows flagged pending). |
 | [`test-strategy.md`](test-strategy.md) | The behavioral/integration test discipline tied to named GAPs. |
 | [`phase-0-status.md`](phase-0-status.md) | What Phase 0 delivered, what's verified, and what's honestly pending. |
+| [`phase-0-signoff-sheet.md`](phase-0-signoff-sheet.md) | The owner sign-off sheet — RESOLVED 2026-07-17 (GT-1…GT-6 accepted, Door-3 fix blessed, LICENSE deferred; recorded in [DECISIONS.md](DECISIONS.md) §6.1). |
+
+## Phase-1 artifacts (foundations build — in progress)
+
+| Doc | What it is |
+|---|---|
+| [`phase-1-status.md`](phase-1-status.md) | Live scorecard of the Phase-1 build against its "done-when" criteria. |
+| [`../control-plane/migrations/`](../control-plane/migrations/) | The Supabase data model (§4) as forward-only SQL — the LOG (append-only via revoked grants), cache, lists, nodes, policies, empty P7 seam. See its `README.md`. |
 
 ## How the living-docs system stays honest (enforced, not asked)
 
