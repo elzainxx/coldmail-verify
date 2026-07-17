@@ -128,6 +128,10 @@ type DisposableLayer struct{}
 
 func (DisposableLayer) ID() string { return "disposable" }
 
+// Detector convention (matches the §7.2 gate keys): for the detector layers (null_mx,
+// spam_trap, disposable), Result=Pass means the DETECTED CONDITION IS PRESENT — e.g.
+// disposable:Pass = "it IS disposable" → the gate `disposable:pass` fires. Result=Fail =
+// absent (no gate). The is_* response flag comes from Value (bool), independent of Result.
 func (DisposableLayer) Run(ctx context.Context, ev *Evidence) LayerOutput {
 	if ev.lists == nil {
 		// No list wired → we cannot assert disposability; emit unknown, never a false flag.
@@ -137,9 +141,11 @@ func (DisposableLayer) Run(ctx context.Context, ev *Evidence) LayerOutput {
 	if err != nil {
 		return LayerOutput{LayerID: "disposable", SignalKey: "is_disposable", Result: Unknown, SeverityHint: Warn, Value: false, Detail: err.Error()}
 	}
-	res := Pass
+	// Pass = IS disposable (fires `disposable:pass` → risky:disposable:stop, OQ-7 — risky,
+	// NEVER invalid). Value sets is_disposable regardless. Not-disposable → Fail (no gate).
+	res := Fail
 	if is {
-		res = Flag // OQ-7: a flag → risky; the policy SKIPS it, never labels it invalid.
+		res = Pass
 	}
 	return LayerOutput{LayerID: "disposable", SignalKey: "is_disposable", Result: res, SeverityHint: Info, Value: is}
 }

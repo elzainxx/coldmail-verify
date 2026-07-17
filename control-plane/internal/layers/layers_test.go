@@ -223,13 +223,16 @@ func (f fakeLists) IsSpamTrap(_ context.Context, d string) (bool, error) {
 func TestDisposableLayer(t *testing.T) {
 	ctx := context.Background()
 	lists := fakeLists{disposable: map[string]bool{"mailinator.com": true}}
-	if out := (DisposableLayer{}).Run(ctx, ev(t, "a@mailinator.com", "a", "mailinator.com", nil, lists)); out.Result != Flag {
-		t.Errorf("disposable must Flag (OQ-7: flag→risky, never gate→invalid), got %s", out.Result)
+	// Detector convention: Pass = IS disposable (fires disposable:pass → risky, OQ-7),
+	// Value=true sets is_disposable. It is NEVER a gate to invalid — that is the policy's job.
+	out := DisposableLayer{}.Run(ctx, ev(t, "a@mailinator.com", "a", "mailinator.com", nil, lists))
+	if out.Result != Pass || out.Value != true {
+		t.Errorf("disposable must be Pass/true (detector present; policy makes it risky), got %s/%v", out.Result, out.Value)
 	}
-	if out := (DisposableLayer{}).Run(ctx, ev(t, "a@corp.com", "a", "corp.com", nil, lists)); out.Result != Pass {
-		t.Errorf("non-disposable must Pass, got %s", out.Result)
+	if out := (DisposableLayer{}).Run(ctx, ev(t, "a@corp.com", "a", "corp.com", nil, lists)); out.Result != Fail || out.Value != false {
+		t.Errorf("non-disposable must be Fail/false, got %s/%v", out.Result, out.Value)
 	}
-	// A list error must yield Unknown, never a false flag.
+	// A list error must yield Unknown, never a false detection.
 	errLists := fakeLists{err: errors.New("db down")}
 	if out := (DisposableLayer{}).Run(ctx, ev(t, "a@corp.com", "a", "corp.com", nil, errLists)); out.Result != Unknown {
 		t.Errorf("list error must yield Unknown, got %s", out.Result)

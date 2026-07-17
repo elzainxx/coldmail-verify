@@ -19,7 +19,7 @@ verifier-node ran for real, ground-truth fully real, and the Phase-0 sign-off is
 | 2 | **Supabase data model** — §4 tables as forward-only SQL; Door-2 append-only via revoked grants | ✅ **done** | `control-plane/migrations/0001…0005` + README; **applied to real Postgres 16** — all migrations exit 0; append-only PROVEN (as `cp_runtime`: INSERT ok, UPDATE/DELETE → permission denied); CHECK + partial-unique guards bite |
 | 3 | **Store (pgx)** — real Postgres client implementing the append-only `store.Store`; in-memory fake | ✅ **done** | `internal/store/{postgres,mem}.go` + `internal/idgen` (UUIDv7). Unit tests (mem: append-only accumulation, composite-key + TTL cache, tri-state lists) + **gated PG integration tests proven against real Postgres 16** (append, cache round-trip, wrong-config miss, NULL-hash invalid_syntax insert). Skips honestly without `TM_TEST_DATABASE_URL` (never faked). |
 | 4 | **Cheap layers** — 9 brain-native layers (syntax, typo, role, free/corp, MX/DNS, null-MX, disposable, spam-trap, provider-classify) | ✅ **done** | `internal/layers/{layers,resolver,cheap_layers,dns_layers}.go`. Each emits a `LayerOutput`, none gates alone. DNS layers share ONE memoized lookup via injectable `Resolver`; **harden-toward-unknown proven** (transient DNS → Unknown, only NXDOMAIN → Fail). OQ-7 disposable = Flag (never invalid). Full fixture-resolver tests, no network. |
-| 5 | **Policy engine + `cold-email`** — table-driven, action grammar, cheapest-sufficient, confidence baseline | ⬜ pending | — |
+| 5 | **Policy engine + `cold-email`** — table-driven, action grammar, cheapest-sufficient, confidence baseline | ✅ **done** | `internal/policy/{policy,coldemail}.go`. Open-object definition (OQ-25), `status:reason:stop\|continue` grammar, stop-early, baseline-by-reason confidence, thresholds. `repairComposability` makes invalid+send structurally impossible. Tests prove: invalid⇒never-send (Door 1), stop-early skips DNS, disposable⇒risky+skip (OQ-7), transient⇒unknown, provider⇒risky, clean⇒plausible-not-valid. **Dial note** below. |
 | 6 | **Orchestrator + real `/v1/verify` + LOG** — the full request lifecycle; every result logged | ⬜ pending | — |
 | 7 | **Config flags, docs, CI, final review** — every P1 manifest flag wired; PG in CI; final gate | ⬜ pending | — |
 
@@ -40,6 +40,16 @@ verifier-node ran for real, ground-truth fully real, and the Phase-0 sign-off is
   gem-unmodified CI assertion holds. Phase 1 is control-plane-side only (no verifier-node wrapper).
 
 ---
+
+## Implementation note: one policy `order` dial refined (not a spec change)
+
+The shipped `cold-email` policy runs **`null_mx` before `mx`**, where §7.2's *illustrative*
+`order` lists `mx` first. With `mx` first, the general `mx:fail` gate (→ `no_mx`) fires on a
+null-MX domain and **masks** the more specific `null_mx:pass` gate, so every RFC-7505 null-MX
+domain would be logged with reason `no_mx` instead of `null_mx`. The policy `order` is an
+explicit **DIAL** (config-manifest §1.3: "LOCKED shape / DIAL contents"), so ordering the
+most-specific detector first is *implementing* the dial correctly, not redesigning the spec.
+Caught by `TestInvalidNeverSaysSend/null_MX`. No frozen door or grammar changed.
 
 ## What Phase 1 does NOT build (correct scope — SEAM → stop)
 
