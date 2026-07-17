@@ -59,6 +59,7 @@ touching a one-way door or elevating/gating a cross-phase decision.
 | Doc | What it is |
 |---|---|
 | [`phase-1-status.md`](phase-1-status.md) | Live scorecard of the Phase-1 build against its "done-when" criteria. |
+| [`phase-1-to-2-handoff.md`](phase-1-to-2-handoff.md) | The Phase-1→Phase-2 handoff: what P1 locked, what P2 inherits, the `SEAM → P2` inbox, and the open LICENSE item. Readiness pass verified. |
 | [`../control-plane/migrations/`](../control-plane/migrations/) | The Supabase data model (§4) as forward-only SQL — the LOG (append-only via revoked grants), cache, lists, nodes, policies, empty P7 seam. See its `README.md`. |
 
 ## How the living-docs system stays honest (enforced, not asked)

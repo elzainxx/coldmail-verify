@@ -2,6 +2,9 @@
 
 **Status:** COMPLETE — source-read **and live run both done** (Phase-0 closeout, 2026-07-17). Every
 PENDING-RUN row is filled from **real captured output** of the genuinely-running forked verifier-node.
+**Updated 2026-07-17 (P1→P2 readiness):** the one row P0 deferred — GT-5 / GAP-14 `smtp_mock` accept-all —
+is **now captured live** against the real `smtpmock` v2.5.4 server (§3.4), so Phase 2 does not build the
+SMTP path on unverified engine behavior. One new non-door substrate delta flagged (blacklist→`421` not `554`).
 Verification artifact.
 **Purpose (Phase 0 deliverable #2):** reconcile **what the pinned engine actually is/emits** against
 **what the seven specs assumed**, for every field / endpoint / behavior a one-way door depends on.
@@ -164,16 +167,39 @@ noting the build-plan's `/validate` wording was never literal.** ✓
   **stock rack still exposes no `/audit` endpoint** (that wrapper is Phase 2, correctly not built). So
   the *shape* is now reality-confirmed for the P3 gate, while the *endpoint* remains a P2 activity.
 
-### 3.4 GAP-14 — smtp_mock accept-all behavior (the `valid`-path caveat) `LIVE (real-MX) ✓ / mock substrate → P2`
-- **What the live run showed:** validating a real address drove **real SMTP egress** — the fork reached
+### 3.4 GAP-14 — smtp_mock accept-all behavior (the `valid`-path caveat) `LIVE ✓ (captured 2026-07-17, P1→P2 readiness)`
+- **What the P0 live run showed:** validating a real address drove **real SMTP egress** — the fork reached
   gmail.com's MX list and (per the 1–2s policy timeout) returned `unknown`-shaped
-  (`errors:{:connection=>"server response timeout"}`), never a fabricated verdict. This **confirms the
-  fork genuinely performs SMTP** (not just cheap layers) and honors harden-toward-unknown on timeout.
-- **GAP-14 itself** (smtp_mock 250-accepts-all → the `valid`-path needs a *seeded* probe) is a property
-  of the **`smtp_mock` dev substrate**, which is a **Phase-2** wiring (the stock Phase-0 rack talks to
-  real DNS/MX, not the mock). So GAP-14's *substrate* behavior is correctly a P2 verification; Phase 0
-  confirmed the **real-MX** path instead, which is the stronger evidence that the engine runs. Flagged so
-  "the valid path is proven" is not overclaimed from a mock — it awaits the P2 seeded-probe fixture.
+  (`errors:{:connection=>"server response timeout"}`), never a fabricated verdict. This confirmed the
+  fork genuinely performs SMTP (not just cheap layers) and honors harden-toward-unknown on timeout.
+- **GAP-14 substrate behavior — NOW CAPTURED LIVE (was deferred to P2).** The P1→P2 readiness pass ran the
+  real `smtpmock` server (Go binary **v2.5.4**, the server the `smtp_mock` gem wraps) with
+  `-notRegisteredEmails "nx-seeded@example.test" -blacklistedRcpttoEmails "blocked@example.test"
+  -multipleRcptto`, and drove it over a raw socket. **Verbatim captured RCPT TO responses:**
+  ```text
+  RANDOM   924360…@example.test          -> 250 Received      # accept-all by default (GAP-14 CONFIRMED)
+  SEEDED   nx-seeded@example.test        -> 550 User not found # a pre-listed addr is really rejected
+  BLOCKED  blocked@example.test          -> 421 Service not available   # blacklisted rcptto (see note)
+  SAME-SESSION two-RCPT (multipleRcptto):
+    target 924360…@example.test          -> 250 Received      # catch-all probe: target accepted
+    probe  nx-seeded@example.test        -> 550 User not found # + probe rejected in the SAME session
+  ```
+- **What this proves for Phase 2 (so P2 does not build on unverified engine behavior):**
+  1. **Accept-all-by-default is REAL** — a random probe is always `250`, so the `valid` path (P2 §5.5 row 4)
+     is unreachable without a **seeded** probe pre-listed for rejection. GAP-14 confirmed against the real server.
+  2. The **seeded-probe path to `valid` works** — a pre-listed address returns a genuine `550`, so
+     target-250 + seeded-probe-550 is achievable (the only `valid` path on the mock).
+  3. The **same-session two-RCPT catch-all probe shape works** — `-multipleRcptto` lets one session carry
+     target + probe with distinct responses. This is the substrate proof for P2 §5.4 Option A (before the
+     GAP-13 spike decides whether the *wrapper* can drive it without a gem patch).
+- **⚠ New Phase-2 substrate delta (flagged, non-door): blacklisted rcptto returns `421`, not a `554`-class 5xx.**
+  P2 spec §6.1 / Appendix B row 3 illustrate the your-fault/policy-block case with a **`554` 5xx** →
+  `smtp_blocked`. The real `smtpmock` returns **`421 Service not available`** (a **4xx transient**) for a
+  blacklisted RCPT. Both map to **`unknown`** (harden-toward-unknown holds either way — no door touched), but
+  the *reason* differs: a 421 classifies as transient (`smtp_timeout`/`greylisted`-shaped) rather than
+  `smtp_blocked`. **Phase-2 build must reconcile this** — either craft a 5xx block via `-msgRcpttoBlacklistedEmail`
+  to exercise the `smtp_blocked` path, or accept that the stock blacklist knob yields a 4xx and test
+  `smtp_blocked` via a custom-message fixture. Flagged for the P2 §6.1 substrate matrix; **not** a P1 door issue.
 
 ---
 
@@ -199,7 +225,7 @@ Per the rule. None of these mutates a frozen door; each is surfaced for an expli
 | **GT-2** | rack version | appendices cite `rack@0.10.0` | **`v0.9.0`** (no `0.10.0` tag exists) | `engine_version = rack@0.9.0+gem@3.3.1` | Accept real version in provenance. Illustrative spec string; no door change. |
 | **GT-3** | `net-smtp` pin | (not in specs) | 3.3.1 forces `~> 0.5.0`; upstream rack pinned `~> 0.4.0` (conflict) | fork build resolvability | **Bump fork's net-smtp to 0.5.0** (FORK.md #2). Rack-side edit, not a gem patch. Owner: confirm acceptable. |
 | **GT-4** | `host_audit` live shape | P3 builds the audit gate on `{current_host_ip, warnings}` | **CONFIRMED LIVE** — real keys `[current_host_ip, warnings(+date,configuration)]`, `warnings` keys `["dns","ptr"]` (§3.3) | P3 audit gate | **Accept** — the gate anchor matches reality; see GT-6 for the extra keys. Resolved (no longer pending). |
-| **GT-5** | `smtp_mock` accept-all (P2 GAP-14) | P2 GAP-14 (seeded probe needed for `valid`) | **Deferred to P2 (correctly):** GAP-14 is a `smtp_mock` *dev-substrate* property; the Phase-0 stock rack drives **real DNS/MX** (live SMTP egress confirmed, §3.4), not the mock | P2 `valid`-path proof | **Accept the scope call** — Phase 0 proved the engine really does SMTP (real-MX); the mock seeded-probe fixture is a P2 verification. Not a Phase-0 gap. |
+| **GT-5** | `smtp_mock` accept-all (P2 GAP-14) | P2 GAP-14 (seeded probe needed for `valid`) | **NOW CAPTURED LIVE (2026-07-17, §3.4):** real `smtpmock` v2.5.4 — random RCPT→`250` (accept-all confirmed), seeded→`550`, same-session two-RCPT works. Plus a **new delta:** blacklisted rcptto→`421` (4xx), not the spec's `554` (5xx) — both `unknown`, reason differs. | P2 `valid`-path + `smtp_blocked` path | **Accept** — GAP-14 accept-all confirmed against the real server; seeded-probe `valid` path proven reachable. **P2 build must reconcile the 421-vs-554 block-code delta** (§3.4) — non-door. |
 | **GT-6** (new, from live run) | `host_audit.as_json` carries extra keys | Appendix A.6 shows minimal `{current_host_ip, warnings}` | live output **also** includes `date` + `configuration` | none (gate reads only `warnings`) | **Accept** — additive/ignorable; the P3 gate logic is unaffected. Non-door. Record only. |
 
 **Deliverable #2 is now FULLY met.** Every row is either `SOURCE ✓` or `LIVE ✓`; **no row remains

@@ -1,6 +1,15 @@
 // pgx-backed Store — the real Postgres/Supabase client (P1 §5.6). It writes ONLY via
 // INSERT on verifications (Door 2); the interface has no update/delete, and the DB grants
 // (migrations/0005) revoke UPDATE/DELETE from the runtime role as the physical backstop.
+//
+// P2 fidelity note (flagged by the P1→P2 readiness review): this store round-trips `Signals`
+// through JSON, so a numeric value written as a Go `int` reads back as `float64`, and a nil
+// flags/signals map is stored + returned as non-nil `{}` (via orEmpty*). In P1 this is inert
+// (signals are bool/string only, and the live path always sets from_cache so maps are non-nil).
+// When P2 adds NUMERIC signals (`smtp_code` is a string, but `retry_after_hint_s` is an int,
+// §8 of the P2 spec), a MemStore-backed test could pass with an `int` that real PG returns as
+// `float64` — masking a type-assertion bug. P2 must either round-trip the fake through JSON too,
+// or not assert on `Signals` value *types* in mem-fake tests. Recorded so it isn't discovered late.
 package store
 
 import (

@@ -98,9 +98,11 @@ func (m *MemStore) GetCachedVerdict(_ context.Context, emailHash []byte, cfg str
 	if !v.ExpiresAt.IsZero() && !m.now().Before(v.ExpiresAt) {
 		return CachedVerdict{}, ErrCacheMiss // expired => miss, never a stale verdict
 	}
-	// Return DEEP copies of the maps so a caller that mutates flags/signals (e.g. the verdict
-	// assembler sets flags["from_cache"]) cannot corrupt the stored entry. This mirrors the PG
-	// store, which unmarshals fresh maps on every read — the fake must not diverge from real.
+	// Return fresh (one-level) copies of the maps so a caller that mutates flags/signals (e.g.
+	// the verdict assembler sets flags["from_cache"]) cannot corrupt the stored entry. This
+	// mirrors PG's no-aliasing (it unmarshals fresh maps per read). A one-level copy suffices in
+	// P1 because signal/flag values are scalars (bool/string) — no nested containers to share; a
+	// P2 signal that becomes a container would need a deeper copy (see the P2 note in postgres.go).
 	v.Flags = copyBoolMap(v.Flags)
 	v.Signals = copyAnyMap(v.Signals)
 	return v, nil
