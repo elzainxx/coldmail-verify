@@ -19,9 +19,14 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
+	"strings"
+	"time"
 )
 
 // ── Kill-switch ladder (kill-switch-ladder.md) ──────────────────────────────────────
@@ -133,6 +138,7 @@ type Policy struct {
 type Config struct {
 	Env         string // "development" | "production"
 	ListenAddr  string // control-plane front door bind
+	DatabaseURL string // Postgres/Supabase DSN (empty => /v1/verify not-ready). Value is a secret-ish connection string, loaded from env, never committed.
 	KillSwitch  KillSwitch
 	ShadowModes ShadowModes
 	Dials       Dials
@@ -141,6 +147,42 @@ type Config struct {
 	// Node registry is a LIST from config (Door 5 — never a single hardcoded endpoint).
 	// Phase 0 ships zero or one mock entry; the list shape is what matters.
 	Nodes []NodeDescriptor
+}
+
+// CacheTTL returns the configured cache TTL as a duration, or 0 when the dial is UNSET
+// (OQ-9 — no owner value). Zero means "do not cache" (the orchestrator never writes a
+// guessed expires_at; §4.2 requires it NOT NULL). Value is in seconds (Dials.CacheTTLSeconds).
+func (c Config) CacheTTL() time.Duration {
+	if !c.Dials.CacheTTLSeconds.Set {
+		return 0
+	}
+	return time.Duration(c.Dials.CacheTTLSeconds.Value) * time.Second
+}
+
+// ConfigFingerprint returns the P1 config fingerprint (§3.2.5): a stable SHA-256 over the
+// verdict-affecting brain+policy config. In P1 there is no live engine, so the engine inputs
+// are marked "unconfigured"; the fingerprint covers the policy default + the enabled cheap
+// layers + the kill-switch rung. Recomputed deterministically from the config each call.
+func (c Config) ConfigFingerprint() string {
+	// Canonical, sorted-key serialization of the verdict-affecting inputs (§3.2.5).
+	parts := []string{
+		"engine=unconfigured", // P1: no live engine (SEAM → P2 adds the fork /config)
+		"policy=" + c.Policy.DefaultPolicyKey,
+		"layers=syntax,mx,null_mx,spam_trap,disposable,provider_classify,role,typo,free_corp",
+		"rung=" + rungName(c.KillSwitch),
+		"send=" + strconv.Itoa(c.Dials.RecommendationSend),
+		"review=" + strconv.Itoa(c.Dials.RecommendationReview),
+	}
+	sort.Strings(parts)
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	return "cfg_sha256:" + hex.EncodeToString(sum[:])[:16]
+}
+
+func rungName(k KillSwitch) string {
+	if k.CheapLayersOnly() {
+		return "cheap-layers-only"
+	}
+	return "other"
 }
 
 // NodeDescriptor is one entry in the node LIST (Door 5). Tokens are referenced by id
@@ -195,6 +237,17 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if v := getenv("TM_LISTEN_ADDR"); v != "" {
 		c.ListenAddr = v
+	}
+	if v := getenv("TM_DATABASE_URL"); v != "" {
+		c.DatabaseURL = v
+	}
+	// Cache TTL dial (OQ-9): an operator MAY set it; absent => stays UNSET (no caching).
+	if v := getenv("TM_CACHE_TTL_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return c, fmt.Errorf("config: invalid TM_CACHE_TTL_SECONDS %q", v)
+		}
+		c.Dials.CacheTTLSeconds = Dial{Value: n, Set: true}
 	}
 	// Kill-switch env overrides (operator can pull a rung without a redeploy).
 	if v := getenv("TM_SMTP_MODE"); v != "" {

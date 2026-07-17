@@ -184,3 +184,21 @@ func (m *MemStore) SeedPolicy(p PolicyRow) {
 		m.defaultKey = policyKey(p.Key, p.Version)
 	}
 }
+
+// CacheLen returns the number of cache entries (test-support: assert what was/wasn't cached).
+func (m *MemStore) CacheLen() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.cache)
+}
+
+// cacheContents returns a snapshot of the cache (internal test-support).
+func (m *MemStore) cacheContents() map[string]CachedVerdict {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]CachedVerdict, len(m.cache))
+	for k, v := range m.cache {
+		out[k] = v
+	}
+	return out
+}

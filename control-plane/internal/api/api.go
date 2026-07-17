@@ -9,28 +9,47 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/mnfi/codmailling/control-plane/internal/config"
 	"github.com/mnfi/codmailling/control-plane/internal/hash"
+	"github.com/mnfi/codmailling/control-plane/internal/orchestrator"
+	"github.com/mnfi/codmailling/control-plane/internal/policy"
 	"github.com/mnfi/codmailling/control-plane/internal/secrets"
 	"github.com/mnfi/codmailling/control-plane/internal/verdict"
 )
 
-// Server holds the wired dependencies. Deps are interfaces/values, so tests inject fakes.
-type Server struct {
-	cfg     config.Config
-	secrets *secrets.Secrets
-	hasher  *hash.Hasher // may be nil at P0 if no pepper loaded (readiness reports it)
-	now     func() time.Time
+// Verifier is the request-lifecycle dependency the front door delegates to (the orchestrator).
+// An interface so tests can inject a fake without a DB.
+type Verifier interface {
+	Verify(ctx context.Context, rawEmail string, def *policy.Definition) (verdict.Response, error)
 }
 
-// New wires the server. A nil hasher is allowed at Phase 0 (no pepper in a build smoke),
-// and /readyz reports "not ready" rather than pretending.
+// Server holds the wired dependencies. Deps are interfaces/values, so tests inject fakes.
+type Server struct {
+	cfg       config.Config
+	secrets   *secrets.Secrets
+	hasher    *hash.Hasher // may be nil if no pepper loaded (readiness reports it)
+	verifier  Verifier     // nil until the store+orchestrator are wired (readiness reports it)
+	defPolicy *policy.Definition
+	now       func() time.Time
+}
+
+// New wires the server. A nil hasher/verifier is allowed for a build smoke (no pepper / no
+// DB); /readyz reports "not ready" and /v1/verify returns 503 rather than pretending.
 func New(cfg config.Config, sec *secrets.Secrets, hasher *hash.Hasher) *Server {
 	return &Server{cfg: cfg, secrets: sec, hasher: hasher, now: time.Now}
+}
+
+// WithVerifier attaches the orchestrator + the default policy (the real /v1/verify path).
+func (s *Server) WithVerifier(v Verifier, def *policy.Definition) *Server {
+	s.verifier = v
+	s.defPolicy = def
+	return s
 }
 
 // Handler builds the mux. Kept explicit (stdlib) — no framework dependency at Phase 0.
@@ -63,15 +82,30 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Phase-0 lifecycle skeleton: derive the domain via the frozen normalizer if a pepper
-	// is present; otherwise leave domain empty. We do NOT score, route, or hit a verifier-node.
-	domain := ""
-	if s.hasher != nil {
-		if _, d, err := s.hasher.Normalize(req.Email); err == nil {
-			domain = d
-		}
+	// The real request lifecycle runs in the orchestrator (cache → policy → cheap layers →
+	// score → LOG → cache → respond). If it isn't wired (no DB/pepper), we are NOT ready —
+	// return 503 rather than a fabricated verdict (Door 2: never a verdict we can't log).
+	if s.verifier == nil || s.defPolicy == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "not ready"})
+		return
 	}
-	resp := verdict.NewCheapUnknown(req.Email, domain, newRequestID(s.now()), s.now().UTC().Format(time.RFC3339))
+	// P1 ships exactly one policy (the default). A request naming a different policy is
+	// not-found for now (the seam for multiple policies exists in the store/§4.6).
+	if req.Policy != "" && req.Policy != s.defPolicy.Key {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown policy"})
+		return
+	}
+
+	resp, err := s.verifier.Verify(r.Context(), req.Email, s.defPolicy)
+	if err != nil {
+		if errors.Is(err, orchestrator.ErrNotReady) {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "not ready"})
+			return
+		}
+		// A processing failure must NOT become a fabricated verdict — surface 500 honestly.
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "verification failed"})
+		return
+	}
 	if !resp.Valid() {
 		// Defensive: never emit an out-of-contract response (Door 1/4). Should be impossible.
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal contract violation"})

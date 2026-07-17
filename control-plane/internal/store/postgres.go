@@ -218,6 +218,35 @@ func (p *PG) GetPolicy(ctx context.Context, key string, version int) (PolicyRow,
 	return p.scanPolicy(p.pool.QueryRow(ctx, q, key, version))
 }
 
+// EnsurePolicy inserts a policy row if that (key, version) is not already present, and sets
+// it as the default when asDefault is true and no default yet exists. Idempotent: re-running
+// is a no-op. Policies are immutable (§4.6) — this never overwrites an existing definition.
+// It is how the code-owned default policy (the cold-email constant) reaches the store.
+func (p *PG) EnsurePolicy(ctx context.Context, key string, version int, definition []byte, asDefault bool) error {
+	// Insert the policy row if absent (immutable — ON CONFLICT DO NOTHING).
+	if _, err := p.pool.Exec(ctx,
+		`INSERT INTO policies (key, version, definition, is_default) VALUES ($1,$2,$3,false)
+		 ON CONFLICT (key, version) DO NOTHING`,
+		key, version, definition,
+	); err != nil {
+		return fmt.Errorf("store: ensure policy: %w", err)
+	}
+	if !asDefault {
+		return nil
+	}
+	// Set as default only if there is no default yet (the partial-unique index guarantees at
+	// most one; this avoids fighting an operator-chosen default).
+	if _, err := p.pool.Exec(ctx,
+		`UPDATE policies SET is_default=true
+		 WHERE key=$1 AND version=$2
+		   AND NOT EXISTS (SELECT 1 FROM policies WHERE is_default=true)`,
+		key, version,
+	); err != nil {
+		return fmt.Errorf("store: set default policy: %w", err)
+	}
+	return nil
+}
+
 func (p *PG) scanPolicy(row pgx.Row) (PolicyRow, error) {
 	var pr PolicyRow
 	err := row.Scan(&pr.Key, &pr.Version, &pr.Definition, &pr.IsDefault)
