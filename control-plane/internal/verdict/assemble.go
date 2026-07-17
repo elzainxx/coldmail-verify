@@ -42,6 +42,17 @@ type Provenance struct {
 	HashScheme            string
 	LocalPartLen          int
 	MXProvider            string
+
+	// Engine provenance (P2 §3.2.2) — NULL/empty in P1 (no engine consulted on the cheap path),
+	// populated when the SMTP stage consults a verifier-node. Additive: the LOG columns already
+	// existed (reserved in P1), they were just always NULL.
+	NodeID               string
+	VerifierIP           string
+	EngineVersion        string
+	EngineCoreVersion    string
+	EngineValidationType string
+	EngineSuccessSet     bool
+	EngineSuccess        bool
 }
 
 // Assemble builds the Door-1 Response and the append-only LOG row from ONE core verdict +
@@ -75,13 +86,13 @@ func Assemble(c Core, p Provenance) (Response, store.VerificationRow) {
 			LatencyMS:         p.LatencyMS,
 			Policy:            p.PolicyKey,
 			PolicyVersion:     p.PolicyVersion,
-			VerifierIP:        nil, // P1: no SMTP, no node consulted
-			NodeID:            nil,
-			EngineVersion:     nil, // no engine on the cheap path
+			VerifierIP:        strPtrOrNil(p.VerifierIP), // P2: set when a node was consulted
+			NodeID:            strPtrOrNil(p.NodeID),
+			EngineVersion:     strPtrOrNil(p.EngineVersion),
 			ConfigFingerprint: strPtrOrNil(p.ConfigFingerprint),
 			FromCache:         p.FromCache,
 		},
-		Raw: nil, // null when no engine consulted (P1 always)
+		Raw: nil, // the response's meta.raw stays null; the raw blob rides the sidecar (§6.4)
 	}
 
 	row := store.VerificationRow{
@@ -107,7 +118,14 @@ func Assemble(c Core, p Provenance) (Response, store.VerificationRow) {
 		ConfigFingerprint:     p.ConfigFingerprint,
 		FromCache:             p.FromCache,
 		LatencyMS:             p.LatencyMS,
-		// Engine provenance intentionally empty in P1 (=> SQL NULL).
+		// Engine provenance (P2): populated when the SMTP stage consulted a node; empty => NULL.
+		NodeID:               p.NodeID,
+		VerifierIP:           p.VerifierIP,
+		EngineVersion:        p.EngineVersion,
+		EngineCoreVersion:    p.EngineCoreVersion,
+		EngineValidationType: p.EngineValidationType,
+		EngineSuccessSet:     p.EngineSuccessSet,
+		EngineSuccess:        p.EngineSuccess,
 	}
 	return resp, row
 }

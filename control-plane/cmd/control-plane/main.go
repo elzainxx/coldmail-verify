@@ -17,8 +17,10 @@ import (
 	"github.com/mnfi/codmailling/control-plane/internal/api"
 	"github.com/mnfi/codmailling/control-plane/internal/config"
 	"github.com/mnfi/codmailling/control-plane/internal/hash"
+	"github.com/mnfi/codmailling/control-plane/internal/node"
 	"github.com/mnfi/codmailling/control-plane/internal/orchestrator"
 	"github.com/mnfi/codmailling/control-plane/internal/policy"
+	"github.com/mnfi/codmailling/control-plane/internal/router"
 	"github.com/mnfi/codmailling/control-plane/internal/secrets"
 	"github.com/mnfi/codmailling/control-plane/internal/store"
 )
@@ -108,13 +110,68 @@ func buildAPI(cfg config.Config, sec *secrets.Secrets, hasher *hash.Hasher) *api
 		log.Printf("verify: could not ensure default policy (%v) — /v1/verify not wired", err)
 		return srv
 	}
+	// Phase 2: wire the SMTP stage IF SMTP is enabled (kill-switch not Rung 1) AND a node list
+	// exists. Otherwise the orchestrator stays cheap-layers-only (P1 steady state / Rung 3).
+	smtpDeps, cfgFingerprint := buildSMTP(ctx, cfg, sec)
+
 	orch := orchestrator.New(orchestrator.Deps{
 		Hasher:            hasher,
 		Store:             pg,
 		CacheTTL:          cfg.CacheTTL(),
-		ConfigFingerprint: cfg.ConfigFingerprint(),
+		ConfigFingerprint: cfgFingerprint,
+		SMTP:              smtpDeps,
 	})
-	log.Printf("verify: orchestrator wired (cheap-layers-only, policy=%s v%d, cache_ttl=%s)",
-		def.Key, def.Version, cfg.CacheTTL())
+	mode := "cheap-layers-only"
+	if smtpDeps != nil {
+		mode = "SMTP-enabled (against node list)"
+	}
+	log.Printf("verify: orchestrator wired (%s, policy=%s v%d, cache_ttl=%s)",
+		mode, def.Key, def.Version, cfg.CacheTTL())
 	return srv.WithVerifier(orch, def)
+}
+
+// buildSMTP wires the Phase-2 SMTP stage when SMTP is enabled and a node list exists. It fetches
+// the fork's /v1/config (§4.6, GAP-3) from the first eligible node and computes the CANONICAL
+// config_fingerprint over the effective engine config — retiring the P1 "engine=unconfigured"
+// placeholder. If SMTP is off, no node exists, or the config fetch fails, it returns
+// (nil, P1-fingerprint): the brain degrades to cheap-layers-only rather than SMTP on an unknown
+// engine config (harden-toward-unknown / §4.6 "refuse a confident fingerprint" on failure).
+func buildSMTP(ctx context.Context, cfg config.Config, sec *secrets.Secrets) (*orchestrator.SMTPDeps, string) {
+	fallback := cfg.ConfigFingerprint() // P1 engine=unconfigured fingerprint
+	if !cfg.SMTPEnabled() || len(cfg.Nodes) == 0 {
+		return nil, fallback
+	}
+	reg := router.New(cfg.Nodes, nil)
+	plan := router.Plan{}
+	n, err := reg.Route(ctx, plan)
+	if err != nil {
+		log.Printf("verify: SMTP enabled but no eligible node — staying cheap-layers-only")
+		return nil, fallback
+	}
+	tokenFor := func(id string) string {
+		if t, ok := sec.NodeToken(id); ok {
+			return t
+		}
+		return ""
+	}
+	client := node.NewHTTPClient(cfg.SMTPClientDeadline())
+
+	// §4.6: fingerprint the engine's effective config. On failure, refuse a confident engine
+	// fingerprint — degrade to cheap-only (don't run SMTP against an unknown config).
+	fpCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	ec, ferr := client.FetchConfig(fpCtx, n.BaseURL, tokenFor(n.ID))
+	if ferr != nil {
+		log.Printf("verify: /v1/config fetch failed (%v) — cheap-layers-only (won't SMTP on an unknown engine config)", ferr)
+		return nil, fallback
+	}
+	fingerprint := cfg.EngineConfigFingerprint(ec.CanonicalFingerprint())
+	log.Printf("verify: SMTP node=%s config_fingerprint=%s", n.ID, fingerprint)
+	return &orchestrator.SMTPDeps{
+		Client:         client,
+		Registry:       reg,
+		TokenFor:       tokenFor,
+		SafeCheckOn:    false, // OQ-P2-7: smtp_safe_check OFF by default
+		ClientDeadline: cfg.SMTPClientDeadline(),
+	}, fingerprint
 }

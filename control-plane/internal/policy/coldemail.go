@@ -22,15 +22,28 @@ const (
 // null_mx:pass gate, making it unreachable. Checking the explicit RFC-7505 signal first
 // yields the correct, specific reason. This is a dial choice (surfaced in phase-1-status.md),
 // not a frozen-door change. All four cases verified: good / no-mx / null-mx / transient.
+// Phase-2 additive change (§7.3): `smtp` is appended to `order` and SMTP gates + confidence
+// baselines are added. This is ADDITIVE — the action grammar, the open-object shape, and every
+// reason used were all frozen/reserved in P1 (Door 4): ZERO new enum values, ZERO grammar change.
+// `smtp` in `order` is a Type-1 core layer the ORCHESTRATOR runs as a stage AFTER the cheap layers
+// (§7.1) — the engine skips it as a plain layer (no cheap `smtp` layer is registered), and the
+// orchestrator resolves the non-terminal residue against a verifier-node. The `smtp:*` gates
+// document the SMTP status→reason map (§7.2); the SMTP scorer emits these directly. OQ-P2-8:
+// smtp is enabled in the policy, routed to the mock node in P2; P3 flips the node to real.
 const ColdEmailDefinitionJSON = `{
-  "order": ["syntax", "null_mx", "mx", "spam_trap", "disposable", "provider_classify", "role", "typo", "free_corp"],
+  "order": ["syntax", "null_mx", "mx", "spam_trap", "disposable", "provider_classify", "role", "typo", "free_corp", "smtp"],
   "gates": {
     "syntax:fail":     "invalid:invalid_syntax:stop",
     "mx:fail":         "invalid:no_mx:stop",
     "mx:unknown":      "unknown:dns_error:stop",
     "null_mx:pass":    "invalid:null_mx:stop",
     "spam_trap:pass":  "invalid:spam_trap:stop",
-    "disposable:pass": "risky:disposable:stop"
+    "disposable:pass": "risky:disposable:stop",
+    "smtp:valid":         "valid:accepted:stop",
+    "smtp:invalid":       "invalid:mailbox_not_found:stop",
+    "smtp:catch_all":     "risky:catch_all:stop",
+    "smtp:mailbox_full":  "valid:mailbox_full:stop",
+    "smtp:unknown":       "unknown:smtp_error:stop"
   },
   "flags": ["role", "typo", "free_corp", "disposable"],
   "recommendation_overrides_by_reason": { "disposable": "skip" },
@@ -45,7 +58,16 @@ const ColdEmailDefinitionJSON = `{
       "dns_error": 10,
       "disposable": 40,
       "provider_no_smtp": 35,
-      "plausible": 40
+      "plausible": 40,
+      "accepted": 90,
+      "mailbox_not_found": 95,
+      "mailbox_full": 90,
+      "catch_all": 40,
+      "greylisted": 10,
+      "smtp_blocked": 10,
+      "smtp_timeout": 10,
+      "smtp_error": 10,
+      "connection_failed": 10
     },
     "flag_deltas": { "is_role": -5, "has_typo": -10 }
   },

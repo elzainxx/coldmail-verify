@@ -14,10 +14,10 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | bucket | count |
 |---|---|
 | secrets | 8 |
-| feature-flags | 138 |
+| feature-flags | 140 |
 | dials | 79 |
 | other/uncategorized | 2 |
-| **total knobs** | **227** |
+| **total knobs** | **229** |
 
 > One-way doors are **not** dials: the frozen contracts (response shape, LOG, hashing,
 > vocabulary, never-fork) live in code (`control-plane/internal/{vocab,hash,verdict,store,router}`),
@@ -37,7 +37,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | vendor API key (P6) | no rotation story; leak = budget-DoS + billed enumeration oracle (security F-6) | no rotation story; leak = budget-DoS + billed enumeration oracle (security F-6) |
 | front-door bearer token | no per-caller scoping/rotation brain-side; guards bulk-PII endpoint by P5 (security F-20) | no per-caller scoping/rotation brain-side; guards bulk-PII endpoint by P5 (security F-20) |
 
-## Feature-flags (138)
+## Feature-flags (140)
 
 | knob | default / state | source |
 |---|---|---|
@@ -78,7 +78,9 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | `smtp:*` policy gate entries (valid/invalid/catch_all/mailbox_full/unknown) | per §7.3 map | P2 §7.3 |
 | SMTP enabled in default policy (P2) | enabled, routed to mock node (OQ-P2-8) | P2 §7.3, OQ-P2-8 |
 | catch-all probe on/off (`probe_catchall`) | true for `:smtp` (§5) | P2 §4.1, §5.5 |
-| catch-all probe location (Option A same-session vs B two-session) | Option A, CONDITIONED on GAP-13 spike (OQ-P2-4) | P2 §5.4, OQ-P2-4/11 |
+| catch-all probe location (Option A same-session vs B two-session) | **Option B (two-session) — RESOLVED by the GAP-13 spike; gem exposes no reusable session, never patch it ([ADR-0007](adr/ADR-0007-gap13-catchall-session-two-session.md))** | P2 §5.4, OQ-P2-4/11, ADR-0007 |
+| SMTP enabled at the kill-switch (`TM_SMTP_MODE=enabled` + a node list) | SMTP wired only when Rung 1 not pulled AND ≥1 routable node; else cheap-layers-only (Rung 3) | P2 §7.1, kill-switch Rung 1/3 |
+| engine `config_fingerprint` source (`GET /v1/config`) | brain fetches full effective config; on fetch-fail → refuse a confident fingerprint, stay cheap-only | P2 §4.6, GAP-3 |
 | cache-only-settled-verdicts predicate | LOCKED: never cache transient/your-fault unknown (OQ-P2-6) | P2 §6.5, OQ-P2-6 |
 | wrapper endpoint namespacing | `/v1/` on the box (OQ-P2-1) | P2 §4.0, OQ-P2-1 |
 | `/config/reload` push vs pull | PULL (OQ-P2-2) | P2 §4.5, OQ-P2-2 |
@@ -207,7 +209,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | probe random local-part construction | 16+ random hex/base32, optional `nx-` prefix, lowercase; CSPRNG prod, seeded in tests (OQ-P2-3) | P2 §5.3, OQ-P2-3 |
 | number of probe RCPTs | 1 in P2; N-probe deferred P4 (OQ-P2-10) | P2 §5, OQ-P2-10 |
 | re-probe cadence / `catchall_domains.expires_at` | UNSET — SEAM (§5.6) | P2 §5.6 |
-| brain client-side deadline on `/v1/verify` | UNSET numeric (P5 lease TTL must *exceed* this — latent numeric coupling) | P2 §6.5 |
+| brain client-side deadline on `/v1/verify` (`TM_SMTP_CLIENT_DEADLINE_MS`) | UNSET numeric ⇒ client default 15s (P5 lease TTL must *exceed* this — latent numeric coupling) | P2 §6.5 |
 | greylist retry hint `retry_after_hint_s` | parsed from 4xx else policy default (SEAM to P5) | P2 §6.5 |
 | `/v1/stats` counter set | shape fixed, counters DIAL | P2 §4.4 |
 | scheduled re-audit cadence | hourly for first box | P3 §4.5 |

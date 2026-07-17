@@ -1,10 +1,9 @@
 # frozen_string_literal: true
 
 require 'truemail'
+require_relative 'engine_configurator'
 
-Truemail.configure do |config|
-  truemail_core_params = System::Configuration::COMMAND_LINE_ATTRS[0...-2]
-  System::Configuration.command_line_params
-    .slice(*truemail_core_params)
-    .each { |key, value| config.public_send("#{key}=", value) }
-end
+# FORK EDIT (Phase 2): the inline configure block moved into EngineConfigurator (so
+# POST /v1/config/reload can re-run it — §4.5). Behaviour at boot is identical: apply the
+# effective engine config from ENV to the pinned gem. The gem's public API is all that's called.
+TruemailServer::Services::EngineConfigurator.configure!

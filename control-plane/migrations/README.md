@@ -15,8 +15,9 @@
 | `0003_lists_nodes_policies.sql` | §4.3–§4.6 | `catchall_domains`, `disposable_domains`, `spam_trap_domains`, `nodes`, `policies` |
 | `0004_outcomes_seam.sql` | §4.7 (Phase 7 seam) | `send_outcomes`, `verification_outcomes` (empty in P1) |
 | `0005_grants.sql` | §3.2.1 (PN-9, Door 2 enforcement) | Role grants: `cp_runtime` (INSERT+SELECT only), `cp_admin` (DDL owner) |
+| `0006_catchall_write.sql` | P2 §5.6 (brain writes the catch-all probe result) | Grants `cp_runtime` INSERT+UPDATE on `catchall_domains` (DELETE stays `cp_admin`). Additive — NOT the append-only LOG. |
 
-**Apply order:** Run sequentially `0001` → `0002` → `0003` → `0004` → `0005`.
+**Apply order:** Run sequentially `0001` → `0002` → `0003` → `0004` → `0005` → `0006`.
 
 ---
 

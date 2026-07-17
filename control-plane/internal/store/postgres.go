@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -215,6 +216,32 @@ func (p *PG) CatchAllState(ctx context.Context, domain string) (bool, bool, erro
 		return false, false, nil // row exists but is_catchall NULL => still unknown
 	}
 	return *isCatchall, true, nil
+}
+
+// SetCatchAll upserts a domain's catch-all conclusion (P2 §5.6 — brain-side; migration 0006
+// grants cp_runtime INSERT+UPDATE, never DELETE). A nil isCatchall (inconclusive) is a NO-OP:
+// it must never overwrite a previously-determined value with unknown (§5.6). checked_at is now();
+// method ∈ probe|seed|manual. On conflict it updates is_catchall/detected_at/method/expires_at.
+func (p *PG) SetCatchAll(ctx context.Context, domain string, isCatchall *bool, method string, expiresAt time.Time) error {
+	if isCatchall == nil {
+		return nil // inconclusive → never overwrite a known value with NULL (§5.6)
+	}
+	const q = `
+INSERT INTO catchall_domains (domain, is_catchall, detected_at, method, expires_at)
+VALUES ($1, $2, now(), $3, $4)
+ON CONFLICT (domain) DO UPDATE SET
+  is_catchall = EXCLUDED.is_catchall,
+  detected_at = EXCLUDED.detected_at,
+  method      = EXCLUDED.method,
+  expires_at  = EXCLUDED.expires_at`
+	var exp any
+	if !expiresAt.IsZero() {
+		exp = expiresAt.UTC()
+	}
+	if _, err := p.pool.Exec(ctx, q, domain, *isCatchall, nullStr(method), exp); err != nil {
+		return fmt.Errorf("store: set catchall: %w", err)
+	}
+	return nil
 }
 
 func (p *PG) GetDefaultPolicy(ctx context.Context) (PolicyRow, error) {

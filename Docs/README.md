@@ -54,13 +54,22 @@ touching a one-way door or elevating/gating a cross-phase decision.
 | [`phase-0-status.md`](phase-0-status.md) | What Phase 0 delivered, what's verified, and what's honestly pending. |
 | [`phase-0-signoff-sheet.md`](phase-0-signoff-sheet.md) | The owner sign-off sheet — RESOLVED 2026-07-17 (GT-1…GT-6 accepted, Door-3 fix blessed, LICENSE deferred; recorded in [DECISIONS.md](DECISIONS.md) §6.1). |
 
-## Phase-1 artifacts (foundations build — in progress)
+## Phase-1 artifacts (foundations build — complete)
 
 | Doc | What it is |
 |---|---|
 | [`phase-1-status.md`](phase-1-status.md) | Live scorecard of the Phase-1 build against its "done-when" criteria. |
 | [`phase-1-to-2-handoff.md`](phase-1-to-2-handoff.md) | The Phase-1→Phase-2 handoff: what P1 locked, what P2 inherits, the `SEAM → P2` inbox, and the open LICENSE item. Readiness pass verified. |
 | [`../control-plane/migrations/`](../control-plane/migrations/) | The Supabase data model (§4) as forward-only SQL — the LOG (append-only via revoked grants), cache, lists, nodes, policies, empty P7 seam. See its `README.md`. |
+
+## Phase-2 artifacts (SMTP against mocks — complete)
+
+| Doc | What it is |
+|---|---|
+| [`phase-2-status.md`](phase-2-status.md) | Live scorecard of the Phase-2 build: the run-first GAP-13 spike, the wrapper endpoints, the SMTP scoring/classification, the three resolved seams, and the 8/8 socket-level proof. |
+| [`phase-2-to-3-handoff.md`](phase-2-to-3-handoff.md) | The Phase-2→Phase-3 handoff: what P2 locked/built, what P3 inherits, the `SEAM → P3` inbox (the `/v1/audit` enforcement gate), and the open LICENSE item. |
+| [`adr/ADR-0007-gap13-catchall-session-two-session.md`](adr/ADR-0007-gap13-catchall-session-two-session.md) | The GAP-13 spike ruling: the catch-all probe runs as two sessions (Option B); the gem is never patched (Door 5). |
+| [`../verifier-node/truemail-rack/test/p2/`](../verifier-node/truemail-rack/test/p2/) | The socket-level proof harness (real `smtp_mock`/`dns_mock`, Appendix B matrix) + the throwaway test-image Dockerfile. A test harness, not a deployable. |
 
 ## How the living-docs system stays honest (enforced, not asked)
 

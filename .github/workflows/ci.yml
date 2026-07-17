@@ -44,7 +44,7 @@ jobs:
       # Apply the P1 migrations to the CI Postgres so the gated store tests exercise real DDL.
       - name: apply migrations
         run: |
-          for f in migrations/0001_*.sql migrations/0002_*.sql migrations/0003_*.sql migrations/0004_*.sql; do
+          for f in migrations/0001_*.sql migrations/0002_*.sql migrations/0003_*.sql migrations/0004_*.sql migrations/0005_*.sql migrations/0006_*.sql; do
             PGPASSWORD=ci psql -h localhost -U postgres -d cptest -v ON_ERROR_STOP=1 -f "$f"
           done
       # The GAP harness tests SKIP with PENDING reasons — that is expected and honest
@@ -66,9 +66,26 @@ jobs:
       - name: Docker build resolves the pinned gem to 3.3.1
         run: |
           docker build -t truemail-verifier-node:ci verifier-node/truemail-rack
-          v="$(docker run --rm truemail-verifier-node:ci bundle list truemail | grep -oE '3\.3\.1' || true)"
-          test "$v" = "3.3.1" || { echo "FAIL: resolved truemail != 3.3.1 (got '$v')"; exit 1; }
+          v="$(docker run --rm truemail-verifier-node:ci bundle list | grep -oE 'truemail \(3\.3\.1\)' || true)"
+          test -n "$v" || { echo "FAIL: resolved truemail != 3.3.1 (got '$v')"; exit 1; }
           echo "OK: verifier-node resolved truemail 3.3.1"
+
+  verifier-node-rspec:
+    name: verifier-node (RSpec — stock + /v1 wrapper)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Run the fork's own RSpec suite (stock specs + the P2 /v1 wrapper specs). The gem is
+      # STUBBED here (fast, no socket) — the socket-level wire proof (test/p2) is a separate,
+      # Docker-heavy harness run out of band (Docs/phase-2-status.md). The fork's SimpleCov 100%
+      # line-coverage config is a pre-existing threshold; we assert on TEST FAILURES (behavior),
+      # not that threshold — COVERAGE=0 disables the SimpleCov exit-2 so a real spec failure is
+      # what fails this job, never the wrapper lowering the ratio.
+      - name: rspec in the built node image
+        run: |
+          docker build -t truemail-verifier-node:ci verifier-node/truemail-rack
+          docker run --rm -e VERIFIER_EMAIL=verifier@example.test -e ACCESS_TOKENS=token -e COVERAGE=0 \
+            truemail-verifier-node:ci sh -c 'cd /app && bundle config unset --local without && bundle install --jobs 2 --retry 3 >/dev/null 2>&1 && bundle exec rspec --no-color'
 
   docs-discipline:
     name: docs-updated + config-reference freshness

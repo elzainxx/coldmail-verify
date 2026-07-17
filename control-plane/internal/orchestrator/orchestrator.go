@@ -19,6 +19,7 @@ import (
 	"github.com/mnfi/codmailling/control-plane/internal/idgen"
 	"github.com/mnfi/codmailling/control-plane/internal/layers"
 	"github.com/mnfi/codmailling/control-plane/internal/policy"
+	"github.com/mnfi/codmailling/control-plane/internal/smtp"
 	"github.com/mnfi/codmailling/control-plane/internal/store"
 	"github.com/mnfi/codmailling/control-plane/internal/verdict"
 	"github.com/mnfi/codmailling/control-plane/internal/vocab"
@@ -38,9 +39,15 @@ type Orchestrator struct {
 	// NULL, §4.2). The verdict is still logged; only the cache write is skipped.
 	cacheTTL time.Duration
 
-	// cfgFingerprint is the P1 config fingerprint (§3.2.5): brain+policy config only (the
-	// engine inputs are "unconfigured" in P1 — no live engine). Precomputed at wire time.
+	// cfgFingerprint is the config fingerprint (§3.2.5). In P1 the engine inputs are
+	// "unconfigured"; in P2 the caller recomputes it over the fork's /v1/config effective config
+	// (§4.6, GAP-3) and passes it here. Precomputed at wire time.
 	cfgFingerprint string
+
+	// smtp is the OPTIONAL Phase-2 SMTP stage (§7.1). nil => cheap-layers-only (Phase-1 steady
+	// state / kill-switch Rung 3). When wired AND the cheap verdict is the non-terminal residue
+	// AND a node is routable, the SMTP stage resolves it against the verifier-node.
+	smtp *SMTPDeps
 }
 
 // Deps carries the orchestrator's dependencies.
@@ -51,6 +58,9 @@ type Deps struct {
 	Now               func() time.Time
 	CacheTTL          time.Duration
 	ConfigFingerprint string
+	// SMTP is the OPTIONAL Phase-2 stage. nil => cheap-layers-only (P1 steady state). Wire it
+	// only when SMTP is enabled (kill-switch not SMTP-off) and a node list exists.
+	SMTP *SMTPDeps
 }
 
 // New wires an orchestrator. Resolver defaults to the real net resolver; Now to time.Now.
@@ -72,6 +82,7 @@ func New(d Deps) *Orchestrator {
 		now:            now,
 		cacheTTL:       d.CacheTTL,
 		cfgFingerprint: d.ConfigFingerprint,
+		smtp:           d.SMTP,
 	}
 }
 
@@ -114,20 +125,78 @@ func (o *Orchestrator) Verify(ctx context.Context, rawEmail string, def *policy.
 		return verdict.Response{}, err
 	}
 
+	requestID := mustID(o.now())
+
+	// 3b. SMTP stage (Phase 2, §7.1). Runs ONLY when the cheap verdict is the non-terminal
+	//     residue (risky/plausible, no gate stopped it) AND SMTP is wired AND a node is routable.
+	//     A definitive cheap gate (invalid/no_mx, null_mx, disposable, spam_trap) or a :mx-routed
+	//     provider (provider_no_smtp) is already terminal → SMTP is skipped (cheapest-sufficient).
+	var rawBlob []byte
+	var nodeID string
+	if smtpEligible(v) {
+		if res, blob, nid, ran := o.runSMTP(ctx, normalized, domain, requestID, v); ran {
+			v = foldSMTP(v, res)
+			rawBlob, nodeID = blob, nid
+			o.persistCatchAll(ctx, domain, res)
+		}
+	}
+
 	// 4. Assemble (single source: response + LOG row), 5. LOG, 6. cache write, 7. respond.
 	prov := verdict.Provenance{
-		RequestID: mustID(o.now()), CheckedAt: start, LatencyMS: sinceMS(o.now(), start),
+		RequestID: requestID, CheckedAt: start, LatencyMS: sinceMS(o.now(), start),
 		PolicyKey: def.Key, PolicyVersion: def.Version, ConfigFingerprint: o.cfgFingerprint,
 		FromCache: false,
 		RawEmail:  rawEmail, NormalizedDomain: domain, EmailHash: emailHash,
 		HashScheme: hash.SchemeTag, LocalPartLen: len(localPart), MXProvider: mxProviderOf(v.Signals),
 		ProviderCanonicalHash: o.providerCanonical(normalized, v.Signals),
+		NodeID:                nodeID,
 	}
 	resp, row := verdict.Assemble(toCore(v), prov)
-	if err := o.logAndCache(ctx, resp, row, emailHash, domain, prov, false); err != nil {
+	// Cache only SETTLED verdicts (§6.5/OQ-P2-6): a transient/your-fault unknown from SMTP must
+	// NOT be cached (caching it would suppress the retry that resolves it). Cheap verdicts and
+	// settled SMTP verdicts are cacheable; the cheap residue never reaches here as unknown.
+	cacheable := smtp.CacheableReason(v.Status, v.Reason)
+	if err := o.logAndCacheRaw(ctx, resp, row, emailHash, domain, prov, cacheable, rawBlob); err != nil {
 		return verdict.Response{}, err
 	}
 	return resp, nil
+}
+
+// foldSMTP replaces the cheap residue with the scored SMTP verdict, MERGING the SMTP signals into
+// the existing signals bag (additive — §8) rather than discarding the cheap evidence. The SMTP
+// status/reason/confidence win (SMTP is the Type-1 core layer that resolves the residue, §7.1).
+func foldSMTP(cheap policy.Verdict, res smtp.Result) policy.Verdict {
+	signals := cheap.Signals
+	if signals == nil {
+		signals = map[string]any{}
+	}
+	for k, val := range res.Signals {
+		signals[k] = val // additive P2 signal keys (§8)
+	}
+	rec := recommendationFor(res.Status, res.Reason)
+	return policy.Verdict{
+		Status: res.Status, Reason: res.Reason, Confidence: res.Confidence,
+		Recommendation: rec, Flags: cheap.Flags, Signals: signals,
+		StoppedAt: "smtp",
+	}
+}
+
+// recommendationFor derives the recommendation from the SMTP status honoring the LOCKED
+// composability invariants (vocab.ComposabilityOK). 552 mailbox_full is valid but rec=review
+// (existence proven, deliver-now uncertain, §6.1.1). valid/accepted → send. Everything else →
+// the safe legal value. Never emits the forbidden invalid+send.
+func recommendationFor(status vocab.Status, reason vocab.Reason) vocab.Recommendation {
+	switch status {
+	case vocab.StatusValid:
+		if reason == vocab.ReasonMailboxFull {
+			return vocab.RecReview // "full now" caveat rides the recommendation (§6.1.1)
+		}
+		return vocab.RecSend
+	case vocab.StatusInvalid:
+		return vocab.RecSkip
+	default: // risky / unknown
+		return vocab.RecReview
+	}
 }
 
 // finishReject handles an un-addressable input: invalid/invalid_syntax, NULL hash, logged.
@@ -172,15 +241,19 @@ func (o *Orchestrator) finishFromCache(ctx context.Context, rawEmail, domain str
 	return resp, nil
 }
 
-// logAndCache assigns the LOG id, appends the row (Door 2), and — if a TTL is configured and
-// the address is hashable — writes the cache. writeCache=false skips the cache write.
-func (o *Orchestrator) logAndCache(ctx context.Context, resp verdict.Response, row store.VerificationRow, emailHash []byte, domain string, prov verdict.Provenance, _ bool) error {
-	if err := o.logOnly(ctx, resp, row); err != nil {
+// logAndCacheRaw assigns the LOG id, appends the row + optional raw engine sidecar blob (Door 2),
+// and — if the verdict is cacheable AND a TTL is configured AND the address is hashable — writes
+// the cache. cacheable=false skips the cache write (§6.5: never cache a transient unknown). The
+// raw blob (the fork's /v1/verify response incl. smtp_debug) rides the verification_raw sidecar
+// (§6.4 — no new column, no append-only violation).
+func (o *Orchestrator) logAndCacheRaw(ctx context.Context, resp verdict.Response, row store.VerificationRow, emailHash []byte, domain string, prov verdict.Provenance, cacheable bool, rawBlob []byte) error {
+	if err := o.logWithRaw(ctx, resp, row, rawBlob); err != nil {
 		return err
 	}
-	// Cache only settled cheap verdicts, and only when a TTL is set (expires_at is NOT NULL,
-	// §4.2). No TTL configured (OQ-9 unset) => skip caching, never write a guessed TTL.
-	if o.cacheTTL <= 0 || len(emailHash) == 0 {
+	// Cache only when the verdict is settled AND a TTL is set (expires_at is NOT NULL, §4.2). No
+	// TTL configured (OQ-9 unset) => skip caching, never write a guessed TTL. A transient unknown
+	// (cacheable=false) is never cached even with a TTL (§6.5/OQ-P2-6).
+	if !cacheable || o.cacheTTL <= 0 || len(emailHash) == 0 {
 		return nil
 	}
 	now := o.now()
@@ -194,9 +267,17 @@ func (o *Orchestrator) logAndCache(ctx context.Context, resp verdict.Response, r
 	return o.store.PutCachedVerdict(ctx, cv)
 }
 
-// logOnly assigns a fresh UUIDv7 id and appends the LOG row. A failure here FAILS the request
-// (Door 2: never return a verdict we couldn't log).
+// logOnly assigns a fresh UUIDv7 id and appends the LOG row with NO raw sidecar (cheap path,
+// rejects, cache re-logs). A failure here FAILS the request (Door 2: never return a verdict we
+// couldn't log).
 func (o *Orchestrator) logOnly(ctx context.Context, resp verdict.Response, row store.VerificationRow) error {
+	return o.logWithRaw(ctx, resp, row, nil)
+}
+
+// logWithRaw assigns a fresh UUIDv7 id and appends the LOG row plus an optional raw engine blob
+// (the fork's /v1/verify response) into the verification_raw sidecar (§6.4). The append is atomic
+// (the store wraps both in one tx). A failure FAILS the request (Door 2).
+func (o *Orchestrator) logWithRaw(ctx context.Context, resp verdict.Response, row store.VerificationRow, rawBlob []byte) error {
 	id, err := idgen.NewV7String(o.now())
 	if err != nil {
 		return err
@@ -206,7 +287,11 @@ func (o *Orchestrator) logOnly(ctx context.Context, resp verdict.Response, row s
 	if !resp.Valid() {
 		return errors.New("orchestrator: refusing to log an out-of-contract verdict")
 	}
-	return o.store.AppendVerification(ctx, row, nil) // no raw sidecar on the cheap path
+	var raw *store.RawRow
+	if len(rawBlob) > 0 {
+		raw = &store.RawRow{VerificationID: id, Raw: rawBlob}
+	}
+	return o.store.AppendVerification(ctx, row, raw)
 }
 
 func (o *Orchestrator) providerCanonical(normalized string, signals map[string]any) []byte {

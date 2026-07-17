@@ -126,14 +126,16 @@ It does not resolve open questions or set UNSET values — those are owner decis
 |---|---|---|---|---|---|
 | **catch-all probe on/off** (`probe_catchall`) | feature-flag | true for `:smtp` (§5) | off → can't mint `valid` on possibly-catch-all domain | per-verdict | P2 §4.1, §5.5 |
 | **probe random local-part construction** | dial | 16+ random hex/base32, optional `nx-` prefix, lowercase; CSPRNG prod, seeded in tests (OQ-P2-3) | non-random → collision with real mailbox; low entropy → false catch-all | per-verdict | P2 §5.3, OQ-P2-3 |
-| **catch-all probe location** (Option A same-session vs B two-session) | feature-flag | Option A, CONDITIONED on GAP-13 spike (OQ-P2-4) | Option B → weaker signal, 2× connections/reputation cost | pool / reputation | P2 §5.4, OQ-P2-4/11 |
+| **catch-all probe location** (Option A same-session vs B two-session) | feature-flag | **Option B (two-session) — RESOLVED by the GAP-13 spike; gem exposes no reusable session, never patch it ([ADR-0007](adr/ADR-0007-gap13-catchall-session-two-session.md))** | weaker signal, 2× connections/reputation cost (safe: can only miss a `valid`→`risky`, never mint a false `valid`) | pool / reputation | P2 §5.4, OQ-P2-4/11, ADR-0007 |
 | **number of probe RCPTs** | dial | 1 in P2; N-probe deferred P4 (OQ-P2-10) | — | per-verdict | P2 §5, OQ-P2-10 |
 | **re-probe cadence / `catchall_domains.expires_at`** | dial | UNSET — SEAM (§5.6) | — | brain-wide | P2 §5.6 |
 
 ### 2.4 Plumbing & caching discipline
 | name | type | default | mis-setting effect | blast radius | source |
 |---|---|---|---|---|---|
-| **brain client-side deadline on `/v1/verify`** | dial | UNSET numeric (P5 lease TTL must *exceed* this — latent numeric coupling) | too low → premature unknown; too high → brain hangs on wedged box | brain-wide | P2 §6.5 |
+| **brain client-side deadline on `/v1/verify`** (`TM_SMTP_CLIENT_DEADLINE_MS`) | dial | UNSET numeric ⇒ client default 15s (P5 lease TTL must *exceed* this — latent numeric coupling) | too low → premature unknown; too high → brain hangs on wedged box | brain-wide | P2 §6.5 |
+| **SMTP enabled at the kill-switch** (`TM_SMTP_MODE=enabled` + a node list) | feature-flag | SMTP wired only when Rung 1 not pulled AND ≥1 routable node; else cheap-layers-only (Rung 3) | wrongly on with no node → still degrades to cheap (never invents SMTP) | brain-wide | P2 §7.1, kill-switch Rung 1/3 |
+| **engine `config_fingerprint` source** (`GET /v1/config`) | feature-flag | brain fetches full effective config; on fetch-fail → refuse a confident fingerprint, stay cheap-only | fetch-fail silently trusting a stale hash → mis-bucketed cache | brain-wide (correctness) | P2 §4.6, GAP-3 |
 | **cache-only-settled-verdicts predicate** | feature-flag | LOCKED: never cache transient/your-fault unknown (OQ-P2-6) | caching transients → suppresses the retry that resolves them | brain-wide (correctness) | P2 §6.5, OQ-P2-6 |
 | **greylist retry hint** `retry_after_hint_s` | dial | parsed from 4xx else policy default (SEAM to P5) | — | per-verdict | P2 §6.5 |
 | **wrapper endpoint namespacing** | feature-flag | `/v1/` on the box (OQ-P2-1) | — | brain↔box contract | P2 §4.0, OQ-P2-1 |

@@ -162,6 +162,18 @@ func (m *MemStore) CatchAllState(_ context.Context, domain string) (bool, bool, 
 	return v, known, nil
 }
 
+// SetCatchAll upserts the tri-state conclusion (§5.6). A nil isCatchall (inconclusive) is a NO-OP
+// that never overwrites a known value with unknown — mirrors the PG upsert's WHERE guard.
+func (m *MemStore) SetCatchAll(_ context.Context, domain string, isCatchall *bool, _ string, _ time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if isCatchall == nil {
+		return nil // inconclusive → never overwrite a determined value (§5.6)
+	}
+	m.catchall[domain] = *isCatchall
+	return nil
+}
+
 func (m *MemStore) GetDefaultPolicy(_ context.Context) (PolicyRow, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

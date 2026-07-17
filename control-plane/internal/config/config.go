@@ -149,6 +149,21 @@ type Config struct {
 	Nodes []NodeDescriptor
 }
 
+// SMTPClientDeadline returns the brain-side SMTP client deadline (§6.5), or 0 when the dial is
+// UNSET (the node client falls back to its own safe default). This is the brain's own budget on a
+// /v1/verify call so a hung box can't hang the brain; a timeout maps to smtp_timeout/unknown.
+func (c Config) SMTPClientDeadline() time.Duration {
+	if !c.Dials.SMTPClientDeadlineMS.Set {
+		return 0
+	}
+	return time.Duration(c.Dials.SMTPClientDeadlineMS.Value) * time.Millisecond
+}
+
+// SMTPEnabled reports whether the SMTP path may run (kill-switch Rung 1 not pulled). Even when
+// true, SMTP only runs if a node is actually routable — otherwise the brain degrades to the cheap
+// verdict (never invents SMTP).
+func (c Config) SMTPEnabled() bool { return c.KillSwitch.SMTP == SMTPEnabled }
+
 // CacheTTL returns the configured cache TTL as a duration, or 0 when the dial is UNSET
 // (OQ-9 — no owner value). Zero means "do not cache" (the orchestrator never writes a
 // guessed expires_at; §4.2 requires it NOT NULL). Value is in seconds (Dials.CacheTTLSeconds).
@@ -169,6 +184,26 @@ func (c Config) ConfigFingerprint() string {
 		"engine=unconfigured", // P1: no live engine (SEAM → P2 adds the fork /config)
 		"policy=" + c.Policy.DefaultPolicyKey,
 		"layers=syntax,mx,null_mx,spam_trap,disposable,provider_classify,role,typo,free_corp",
+		"rung=" + rungName(c.KillSwitch),
+		"send=" + strconv.Itoa(c.Dials.RecommendationSend),
+		"review=" + strconv.Itoa(c.Dials.RecommendationReview),
+	}
+	sort.Strings(parts)
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	return "cfg_sha256:" + hex.EncodeToString(sum[:])[:16]
+}
+
+// EngineConfigFingerprint composes the P2 config fingerprint (§4.6, GAP-3): the same canonical
+// brain+policy inputs as ConfigFingerprint, but with the engine marker REPLACED by the engine's
+// own canonical fingerprint (fetched from the fork's /v1/config, computed brain-side). This
+// retires the P1 "engine=unconfigured" placeholder — from P2 the fingerprint covers the real
+// engine config, so a config-affecting engine change yields a new fingerprint that naturally
+// invalidates the (email_hash, config_fingerprint) cache. engineFP is the brain-computed hash.
+func (c Config) EngineConfigFingerprint(engineFP string) string {
+	parts := []string{
+		"engine=" + engineFP, // was "engine=unconfigured" in P1 (§4.6 resolves GAP-3)
+		"policy=" + c.Policy.DefaultPolicyKey,
+		"layers=syntax,mx,null_mx,spam_trap,disposable,provider_classify,role,typo,free_corp,smtp",
 		"rung=" + rungName(c.KillSwitch),
 		"send=" + strconv.Itoa(c.Dials.RecommendationSend),
 		"review=" + strconv.Itoa(c.Dials.RecommendationReview),
@@ -248,6 +283,14 @@ func Load(getenv func(string) string) (Config, error) {
 			return c, fmt.Errorf("config: invalid TM_CACHE_TTL_SECONDS %q", v)
 		}
 		c.Dials.CacheTTLSeconds = Dial{Value: n, Set: true}
+	}
+	// SMTP client deadline dial (P2 §6.5): the brain's own budget on a /v1/verify call.
+	if v := getenv("TM_SMTP_CLIENT_DEADLINE_MS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return c, fmt.Errorf("config: invalid TM_SMTP_CLIENT_DEADLINE_MS %q", v)
+		}
+		c.Dials.SMTPClientDeadlineMS = Dial{Value: n, Set: true}
 	}
 	// Kill-switch env overrides (operator can pull a rung without a redeploy).
 	if v := getenv("TM_SMTP_MODE"); v != "" {

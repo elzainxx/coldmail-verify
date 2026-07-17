@@ -192,14 +192,21 @@ noting the build-plan's `/validate` wording was never literal.** ✓
   3. The **same-session two-RCPT catch-all probe shape works** — `-multipleRcptto` lets one session carry
      target + probe with distinct responses. This is the substrate proof for P2 §5.4 Option A (before the
      GAP-13 spike decides whether the *wrapper* can drive it without a gem patch).
-- **⚠ New Phase-2 substrate delta (flagged, non-door): blacklisted rcptto returns `421`, not a `554`-class 5xx.**
+- **⚠ Phase-2 substrate delta (flagged, non-door): blacklisted rcptto returns `421`, not a `554`-class 5xx.**
   P2 spec §6.1 / Appendix B row 3 illustrate the your-fault/policy-block case with a **`554` 5xx** →
   `smtp_blocked`. The real `smtpmock` returns **`421 Service not available`** (a **4xx transient**) for a
   blacklisted RCPT. Both map to **`unknown`** (harden-toward-unknown holds either way — no door touched), but
   the *reason* differs: a 421 classifies as transient (`smtp_timeout`/`greylisted`-shaped) rather than
-  `smtp_blocked`. **Phase-2 build must reconcile this** — either craft a 5xx block via `-msgRcpttoBlacklistedEmail`
-  to exercise the `smtp_blocked` path, or accept that the stock blacklist knob yields a 4xx and test
-  `smtp_blocked` via a custom-message fixture. Flagged for the P2 §6.1 substrate matrix; **not** a P1 door issue.
+  `smtp_blocked`.
+- **✅ RECONCILED in Phase 2 (2026-07-17) — the delta is resolved, not just flagged.** The P2 build took
+  the "custom-message fixture" path: the socket proof harness (`verifier-node/truemail-rack/test/p2/`)
+  crafts a **554** via `msg_rcptto_blacklisted_email` to exercise the `smtp_blocked` path, AND separately
+  asserts the **stock** blacklist knob really returns **`421`** — confirming this delta empirically
+  (socket proof row 3 + the "delta" row, **8/8 passed**). The brain classifier
+  (`control-plane/internal/smtp/classify.go`) treats **both** 421 and 554-block as `unknown`
+  (harden-toward-unknown intact): a 421 → transient (`greylisted`-shaped, retry-eligible), a 554-policy →
+  `smtp_blocked`. Neither is ever `invalid`. No frozen door touched. This closes the P1→P2 handoff's
+  open "§6.1 must reconcile the 421-vs-554 delta" item.
 
 ---
 

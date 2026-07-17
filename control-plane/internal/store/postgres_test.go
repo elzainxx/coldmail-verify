@@ -101,3 +101,70 @@ func TestPGNullHashRowInserts(t *testing.T) {
 		t.Fatalf("un-addressable reject row must insert with NULL hash (§3.2.7): %v", err)
 	}
 }
+
+// P2: the SMTP path writes the raw engine blob to the verification_raw sidecar (§6.4), atomically
+// with the LOG row. Proves the sidecar insert works against the real partitioned table.
+func TestPGAppendWithRawSidecar(t *testing.T) {
+	pg := testPG(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	id, _ := idgen.NewV7String(now)
+	reqID, _ := idgen.NewV7String(now)
+	row := VerificationRow{
+		ID: id, RequestID: reqID, CheckedAt: now, CreatedAt: now,
+		EmailHash: []byte{0x01, 0x02, 0x03, 0x04}, HashScheme: "norm/v1+hmac-sha256/v1",
+		Domain: "corp.test", Status: "valid", Reason: "accepted", Confidence: 90, Recommendation: "send",
+		Flags: map[string]bool{"from_cache": false}, Signals: map[string]any{"smtp_code": "250"},
+		PolicyKey: "cold-email", PolicyVersion: 1, APIVersion: "v1", ConfigFingerprint: "cfg_sha256:test",
+		NodeID: "n1", EngineVersion: "rack@0.9.0+gem@3.3.1", EngineValidationType: "smtp",
+		EngineSuccessSet: true, EngineSuccess: true,
+	}
+	raw := &RawRow{VerificationID: id, Raw: []byte(`{"wrapper_api_version":"v1","success":true}`)}
+	if err := pg.AppendVerification(ctx, row, raw); err != nil {
+		t.Fatalf("SMTP verdict + raw sidecar must insert atomically (§6.4): %v", err)
+	}
+}
+
+// P2 §5.6: the brain persists the catch-all conclusion (migration 0006 grants cp_runtime the
+// write). A definitive true/false upserts; an inconclusive (nil) is a NO-OP that never overwrites.
+func TestPGSetCatchAllTriState(t *testing.T) {
+	pg := testPG(t)
+	ctx := context.Background()
+	dom := "catchall-" + must(idgen.NewV7String(time.Now().UTC())) + ".test" // unique per run
+	tru := true
+
+	// First probe → catchall true.
+	if err := pg.SetCatchAll(ctx, dom, &tru, "probe", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("SetCatchAll(true): %v", err)
+	}
+	is, known, err := pg.CatchAllState(ctx, dom)
+	if err != nil || !known || !is {
+		t.Fatalf("after true probe want known=true is=true, got known=%v is=%v err=%v", known, is, err)
+	}
+
+	// Inconclusive (nil) must NOT overwrite the known value (§5.6).
+	if err := pg.SetCatchAll(ctx, dom, nil, "probe", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("SetCatchAll(nil) should be a no-op, got: %v", err)
+	}
+	is, known, _ = pg.CatchAllState(ctx, dom)
+	if !known || !is {
+		t.Fatal("inconclusive must NOT overwrite a known catch-all value (§5.6)")
+	}
+
+	// A definitive false re-probe updates it.
+	fal := false
+	if err := pg.SetCatchAll(ctx, dom, &fal, "probe", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("SetCatchAll(false): %v", err)
+	}
+	is, known, _ = pg.CatchAllState(ctx, dom)
+	if !known || is {
+		t.Fatalf("after false re-probe want known=true is=false, got known=%v is=%v", known, is)
+	}
+}
+
+func must(s string, err error) string {
+	if err != nil {
+		panic(err)
+	}
+	return s
+}

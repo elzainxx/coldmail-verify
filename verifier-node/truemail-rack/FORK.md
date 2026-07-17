@@ -27,14 +27,38 @@ list covers *rack-side* edits (which are allowed — the rack is what we fork).
 | 2 | `Gemfile` | `gem 'net-smtp', '~> 0.4.0'` → **`'~> 0.5.0'`** | **Forced, not cosmetic:** `truemail 3.3.1` declares `net-smtp '~> 0.5.0'` on Ruby ≥ 3.1 (we pin Ruby 3.2). Upstream's `~> 0.4.0` is a **disjoint range = hard resolver conflict**. Rack-side edit only. |
 | 3 | `Gemfile.lock` | **deleted**, regenerated in Docker | The upstream lock pinned `truemail 3.1.0`; invalid after the exact 3.3.1 pin. Host has no Ruby + rubygems HTTPS is blocked here, so the lock is resolved at `docker build` time (`bundle lock`) and becomes the build artifact. |
 | 4 | `Dockerfile` (new) | added | Build + run the stock pinned rack (host has no Ruby). |
-| — | everything else | **unchanged** | Stock fork. No wrapper endpoints, no gem patch. |
 
-### NOT changed (deliberately — these are Phase 2, not Phase 0)
+### Phase-2 modifications (the `/v1` wrapper — rack-side, **gem still untouched**)
 
-- **No wrapper endpoints.** Stock rack serves only `/` (validation), `/version`, `/healthcheck`
-  (confirmed in `app/truemail_server/router.rb`). The Phase-2 `/verify`, `/audit`,
-  `/catchall/:domain`, `/config`, `/config/reload`, `/stats` endpoints are **not** added here.
-- **No gem patch.** All validation behavior is the pinned `truemail 3.3.1`, unmodified.
+Every Phase-2 change lives in the **fork wrapper or config**, never the gem (Door 5). The
+gem-unmodified CI check still passes. The wrapper calls the gem's PUBLIC API
+(`Truemail.validate` / `.host_audit` / `.configuration`) and serializes facts — it renders no
+verdict (all interpretation is control-plane-side).
+
+| # | File | Change | Why |
+|---|---|---|---|
+| 5 | `config.ru` | mount `map '/v1' { run TruemailServer::Wrapper::App.new }` **before** the stock `run RackCascade` (URLMap) | Adds the `/v1/*` endpoints alongside the byte-identical stock app. Stock `/`, `/version`, `/healthcheck` route through unchanged. OQ-P2-1 (namespace under `/v1`). |
+| 6 | `app/truemail_server/wrapper/app.rb` (new) | the wrapper app: `POST /v1/verify`, `GET /v1/audit`, `GET /v1/catchall/:domain`, `GET /v1/stats`, `POST /v1/config/reload`, `GET /v1/config` | §4 endpoint contracts. Node-token auth (reuses stock `AccessToken`), `wrapper_api_version`, additive superset of stock JSON. |
+| 7 | `app/truemail_server/wrapper/serializer.rb` (new) | rich `smtp_debug` (full per-host transcript incl. helo/mailfrom/rcptto) + `mx` block | The stock gem serializer drops these (GAP-2/§6.2 parse target). Reads live gem result objects; no gem change. |
+| 8 | `app/truemail_server/wrapper/catchall_probe.rb` (new) | the catch-all probe — a **second** `Truemail.validate` for a nonexistent probe local-part (Option B) | §5 / [ADR-0007](../../Docs/adr/ADR-0007-gap13-catchall-session-two-session.md): the pinned gem exposes no reusable same-session → two sessions, gem never patched. |
+| 9 | `app/truemail_server/wrapper/config_view.rb` (new) | full effective config from `Truemail.configuration` + advisory fingerprint | §4.6 (closes GAP-3/OQ-11). The brain computes the canonical fingerprint; the box's is advisory. |
+| 10 | `app/truemail_server/wrapper/counters.rb` (new) | process-local `/v1/stats` counters | §4.4 raw feed (no alerting — SEAM → P4). |
+| 11 | `config/initializers/engine_configurator.rb` (new) + `config/initializers/truemail.rb` | factored the inline `Truemail.configure` into `EngineConfigurator.configure!`/`reload!` | So `POST /v1/config/reload` can PULL-reload (OQ-P2-2). Boot behaviour identical; only the gem's public `Truemail.configure` is called. |
+| 12 | `spec/requests/wrapper_spec.rb` (new) + `spec/support/helpers/request_helpers_spec.rb` (1 line) | wrapper request specs; relaxed the `#app` helper assertion (URLMap, not the bare `Application`) | Test the wrapper; the stock request specs pass verbatim. |
+| 13 | `test/p2/` (new) | socket-level proof harness (`socket_proof.rb`, `Dockerfile`, `README.md`) | The §3.5/Appendix B end-to-end wire proof against real `smtp_mock`/`dns_mock`. A **test harness, not a deployable** — production image has none of it. |
+
+| — | everything else | **unchanged** | Stock fork. **No gem patch** — the engine is the pinned `truemail 3.3.1`, byte-identical. |
+
+### NOT changed (deliberately — still out of scope)
+
+- **No gem patch.** All validation behavior is the pinned `truemail 3.3.1`, unmodified — the
+  gem-unmodified CI check (`bin/assert-gem-unmodified.sh`) guarantees it. The wrapper adds behavior
+  the gem doesn't offer (2nd-RCPT probe, full-config exposure, richer serialization) using the
+  gem's own primitives, never by editing it.
+- **No wrapper-owned SMTP client / no same-session (Option A).** Per ADR-0007 the catch-all probe
+  is two `Truemail.validate` calls; the wrapper does **not** open its own `Net::SMTP` session.
+- **The fork `Gemfile` is not extended** for the mock substrate — `smtp_mock`/`dns_mock` and the
+  `smtpmock` binary live only in the throwaway `test/p2` image, never the production image.
 
 ## Spec-vs-reality notes surfaced by the fork (flagged, see Docs/truemail-ground-truth.md)
 

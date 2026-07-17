@@ -119,6 +119,12 @@ type Store interface {
 	// CatchAllState returns (isCatchall, known). known=false => never probed (§4.3 tri-state).
 	CatchAllState(ctx context.Context, domain string) (isCatchall bool, known bool, err error)
 
+	// SetCatchAll upserts a domain's catch-all conclusion (P2 §5.6 — the BRAIN persists, never
+	// the box). isCatchall is tri-state via a *bool: nil == inconclusive, which is a NO-OP that
+	// NEVER overwrites a previously-determined value with unknown (§5.6). method ∈ probe|seed|manual.
+	// It is a mutation of brain STATE, not the append-only LOG — permitted (migration 0006 grant).
+	SetCatchAll(ctx context.Context, domain string, isCatchall *bool, method string, expiresAt time.Time) error
+
 	// GetDefaultPolicy / GetPolicy load policy definitions (§4.6).
 	GetDefaultPolicy(ctx context.Context) (PolicyRow, error)
 	GetPolicy(ctx context.Context, key string, version int) (PolicyRow, error)
@@ -140,6 +146,9 @@ func (StubStore) PutCachedVerdict(context.Context, CachedVerdict) error       { 
 func (StubStore) IsDisposable(context.Context, string) (bool, error)          { return false, ErrNotWired }
 func (StubStore) IsSpamTrap(context.Context, string) (bool, error)            { return false, ErrNotWired }
 func (StubStore) CatchAllState(context.Context, string) (bool, bool, error)   { return false, false, ErrNotWired }
+func (StubStore) SetCatchAll(context.Context, string, *bool, string, time.Time) error {
+	return ErrNotWired
+}
 func (StubStore) GetDefaultPolicy(context.Context) (PolicyRow, error)         { return PolicyRow{}, ErrNotWired }
 func (StubStore) GetPolicy(context.Context, string, int) (PolicyRow, error)   { return PolicyRow{}, ErrNotWired }
 func (StubStore) Ping(context.Context) error                                 { return ErrNotWired }

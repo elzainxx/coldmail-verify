@@ -167,6 +167,23 @@ is unmodified — Door 5 intact); the Door-3 blessing is a refuse-not-mint tight
 frozen `norm/v1+hmac-sha256/v1` scheme verbatim (Door 3 intact). No frozen door is reopened. The **§5
 parked sub-decisions remain parked** — this ruling touches none of them.
 
+### 6.2 Phase-2 sign-off resolutions (owner ruling 2026-07-17, P2→P3 readiness pass)
+
+The Phase-2 build produced two door-referencing ADRs. On **2026-07-17** the owner, in the P2→P3
+readiness pass, explicitly authorized ratifying **ADR-0008** and applying its spec-text amendment
+(and no other re-decision). Recorded here so the ratification is discoverable in one place.
+
+| Item | Touches a door? | Ruling (2026-07-17) | Recorded in |
+|---|---|---|---|
+| **ADR-0007** — catch-all probe = two sessions (Option B); gem never patched | **Door 5 territory** — affirms never-fork; the gem is byte-identical | **ACCEPTED** (carries the P2 Appendix-D owner sign-off; the GAP-13 spike confirmed the gem exposes no reusable same-session) | [ADR-0007](adr/ADR-0007-gap13-catchall-session-two-session.md) |
+| **ADR-0008** — `verification_raw` redacts the plaintext address; the P2 "store verbatim" text is narrowed | **Door 3** — a conformance/tightening that AFFIRMS the frozen scheme (the door governs a spec instruction that contradicted it) | **RATIFIED** — the P2 spec (§4.1/§6.4/OQ-P2-5 + Appendix D) is amended to "verbatim except the redacted address identity" so spec and code agree; redaction confirmed at the persistence boundary on all paths (email field, 5xx bodies, short local-parts, case-variant echoes, nested fields), case-insensitive, fail-verified by four regression tests | [ADR-0008](adr/ADR-0008-door3-raw-blob-address-redaction.md) |
+
+**Door standing after these rulings:** unchanged. ADR-0007 keeps the gem byte-identical (Door 5
+intact, CI-asserted). ADR-0008 is a refuse-to-persist-plaintext tightening that leaves the frozen
+`norm/v1+hmac-sha256/v1` scheme, the `bytea` key, and the pepper verbatim (Door 3 intact) — the raw
+full email is now genuinely never persisted in a durable store. No frozen door is reopened; the §5
+parked sub-decisions remain parked. This is the only re-decision the owner authorized in this pass.
+
 ---
 
 *This log records acceptances, routes, and (Phase 0) an owner-OQ pointer register; it builds nothing
