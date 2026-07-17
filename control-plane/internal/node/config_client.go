@@ -78,6 +78,30 @@ func (ec EffectiveConfig) CanonicalFingerprint() string {
 	return "cfg_sha256:" + hex.EncodeToString(sum[:])[:16]
 }
 
+// ValidationTypeFor extracts the engine's validation_type_for map (domain → validation-type) from
+// the effective config (§5.1). It is the box's REPORTED provider-routing backstop — the brain
+// compares it against the render of its authoritative policy source (provrouting.Drift) and logs a
+// drift alarm on mismatch (GAP-19/OQ-P3-8). Returns an empty map if the box publishes none. Values
+// that aren't string→string (a malformed engine config) are skipped defensively — a partial read
+// still lets the drift check flag what's missing, never fabricates agreement.
+func (ec EffectiveConfig) ValidationTypeFor() map[string]string {
+	out := map[string]string{}
+	raw, ok := ec.Raw["validation_type_for"]
+	if !ok {
+		return out
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return out
+	}
+	for domain, v := range m {
+		if s, ok := v.(string); ok {
+			out[domain] = s
+		}
+	}
+	return out
+}
+
 // canonicalValue renders a config value deterministically (maps sorted, arrays sorted) so the
 // fingerprint is stable regardless of JSON key/element order.
 func canonicalValue(v any) string {

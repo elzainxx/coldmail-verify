@@ -295,6 +295,129 @@ func (p *PG) scanPolicy(row pgx.Row) (PolicyRow, error) {
 	return pr, nil
 }
 
+// ── Phase 3 (§4.3/§4.4/§5.2) — node health, append-only audit history, durable warmup ──────
+
+// AppendNodeAudit INSERTs the append-only audit-history row AND upserts the node's summary health
+// columns (audit_status/last_audit_at/current_host_ip) in ONE transaction so the latest-audit
+// summary on `nodes` and the `node_audits` history can never diverge (P3 §4.3). It does NOT touch
+// status/port25_open — those move via UpsertNodeState (lifecycle) / the egress smoke test (§3.4).
+// current_host_ip is written as inet; "" => NULL (§6.6.1 anchor, cross-checked at routing time).
+func (p *PG) AppendNodeAudit(ctx context.Context, row NodeAuditRow) error {
+	warningsJSON, err := json.Marshal(orEmptySignals(row.Warnings))
+	if err != nil {
+		return fmt.Errorf("store: marshal audit warnings: %w", err)
+	}
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: begin node audit: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // rollback after a successful commit is a no-op
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO node_audits (id, node_id, audited_at, audit_status, warnings, current_host_ip)
+		 VALUES ($1,$2,$3,$4,$5,$6)`,
+		row.ID, row.NodeID, row.AuditedAt.UTC(), row.AuditStatus, warningsJSON, nullStr(row.CurrentHostIP),
+	); err != nil {
+		return fmt.Errorf("store: insert node audit: %w", err)
+	}
+	// Update the summary columns on `nodes` (row must already exist via UpsertNodeState at boot).
+	// This never creates the row — an audit for an unregistered node is a no-op on the summary
+	// (the history row is still recorded). The gate reads GetNodeHealth, backed by these columns.
+	if _, err := tx.Exec(ctx,
+		`UPDATE nodes SET audit_status=$2, last_audit_at=$3 WHERE id=$1`,
+		row.NodeID, row.AuditStatus, row.AuditedAt.UTC(),
+	); err != nil {
+		return fmt.Errorf("store: update node audit summary: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+// GetNodeHealth reads the gate-relevant state. It joins the `nodes` summary with the latest
+// node_audits row for the current_host_ip (the §6.6.1 GAP-24 anchor lives only in the history).
+func (p *PG) GetNodeHealth(ctx context.Context, nodeID string) (NodeHealth, bool, error) {
+	const q = `
+SELECT n.status, COALESCE(n.audit_status,''), n.last_audit_at, COALESCE(n.port25_open,false),
+       COALESCE(host(a.current_host_ip),'')
+FROM nodes n
+LEFT JOIN LATERAL (
+  SELECT current_host_ip FROM node_audits WHERE node_id = n.id ORDER BY audited_at DESC LIMIT 1
+) a ON true
+WHERE n.id=$1`
+	var h NodeHealth
+	var lastAuditAt *time.Time
+	err := p.pool.QueryRow(ctx, q, nodeID).Scan(&h.Status, &h.AuditStatus, &lastAuditAt, &h.Port25Open, &h.LastAuditHostIP)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return NodeHealth{}, false, nil // never mirrored/audited → router treats as not eligible
+	}
+	if err != nil {
+		return NodeHealth{}, false, fmt.Errorf("store: node health read: %w", err)
+	}
+	h.NodeID = nodeID
+	if lastAuditAt != nil {
+		h.LastAuditAt = *lastAuditAt
+	}
+	return h, true, nil
+}
+
+// UpsertNodeState mirrors the config descriptor + writes lifecycle status/port25_open (§3.6/§4.5).
+// It preserves audit_status/last_audit_at (a separate write path). Never deletes (migration 0007).
+func (p *PG) UpsertNodeState(ctx context.Context, nodeID, baseURL, status string, port25Open bool) error {
+	const q = `
+INSERT INTO nodes (id, base_url, status, port25_open, enabled)
+VALUES ($1,$2,$3,$4,true)
+ON CONFLICT (id) DO UPDATE SET
+  base_url = EXCLUDED.base_url,
+  status = EXCLUDED.status,
+  port25_open = EXCLUDED.port25_open`
+	if _, err := p.pool.Exec(ctx, q, nodeID, baseURL, status, port25Open); err != nil {
+		return fmt.Errorf("store: upsert node state: %w", err)
+	}
+	return nil
+}
+
+// ReserveWarmupSlot atomically reserves one :smtp slot against the window cap (§5.2). The
+// increment is a single atomic upsert: it creates the window row at count=1 if absent, else
+// increments count ONLY while count < cap (the WHERE guard). RowsAffected==0 on the UPDATE path
+// means the window is at cap → Allowed=false (caller degrades to cheap, warmup_cap). Durable in
+// Postgres so a brain restart can't reset a fresh IP's ramp mid-warmup (§5.2 LOCKED / PM4).
+func (p *PG) ReserveWarmupSlot(ctx context.Context, nodeID string, windowStart time.Time, cap int) (WarmupDecision, error) {
+	ws := windowStart.UTC()
+	if cap <= 0 {
+		// A cap of 0 means "no :smtp allowance" — deny without an INSERT (the INSERT path below has
+		// no WHERE guard, so a fresh count=1 would otherwise slip past a 0 cap). Never create a row.
+		return WarmupDecision{Allowed: false, Count: 0, Cap: cap, WindowStart: ws}, nil
+	}
+	// Single statement: INSERT ... ON CONFLICT DO UPDATE with a guard that only increments below
+	// cap, and RETURNING the resulting count so we know whether the reservation was granted.
+	const q = `
+INSERT INTO node_warmup (node_id, window_start, count, cap, updated_at)
+VALUES ($1, $2, 1, $3, now())
+ON CONFLICT (node_id, window_start) DO UPDATE SET
+  count = node_warmup.count + 1,
+  cap = EXCLUDED.cap,
+  updated_at = now()
+WHERE node_warmup.count < EXCLUDED.cap
+RETURNING count, cap`
+	var count, gotCap int
+	err := p.pool.QueryRow(ctx, q, nodeID, ws, cap).Scan(&count, &gotCap)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The WHERE guard blocked the UPDATE (window at cap). Read back the current count for the
+		// denied decision (cap<=0 was already handled above, so a row exists here).
+		var curCount, curCap int
+		rerr := p.pool.QueryRow(ctx,
+			`SELECT count, cap FROM node_warmup WHERE node_id=$1 AND window_start=$2`, nodeID, ws).
+			Scan(&curCount, &curCap)
+		if rerr != nil {
+			return WarmupDecision{}, fmt.Errorf("store: warmup read-after-deny: %w", rerr)
+		}
+		return WarmupDecision{Allowed: false, Count: curCount, Cap: curCap, WindowStart: ws}, nil
+	}
+	if err != nil {
+		return WarmupDecision{}, fmt.Errorf("store: reserve warmup: %w", err)
+	}
+	return WarmupDecision{Allowed: true, Count: count, Cap: gotCap, WindowStart: ws}, nil
+}
+
 func orEmptyFlags(f map[string]bool) map[string]bool {
 	if f == nil {
 		return map[string]bool{}

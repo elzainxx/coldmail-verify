@@ -125,6 +125,12 @@ type Dials struct {
 	RecommendationReview   int  // P1: 30
 	SMTPClientDeadlineMS   Dial // P2 §6.5: UNSET; P5 lease TTL must EXCEED this (X-7 coupling).
 	BrainMaxSMTPDeadlineMS Dial // mirror used by the P5 lease-TTL invariant (kept explicit).
+
+	// Phase 3 (§4.5/§5.2) — the audit/warmup DIALs (volumes are dials; existence is locked).
+	AuditIntervalSeconds int // §4.5 scheduled re-audit cadence; recommend hourly (3600) for a first box.
+	AuditMaxAgeSeconds   int // §4.5 staleness window; recommend 2× the interval. A green older than this → not fresh → excluded.
+	AuditRecoverGreens   int // §4.5 OQ-P3-7: consecutive greens to auto-recover from quarantine (asymmetric; quarantine on first red).
+	WarmupDailyCap       int // §5.2 per-node/per-day :smtp verification ceiling; 0 => warmup NOT enforced (a mature node). Counts verifications (catch-all ≈ 2 connections — GAP-13/§5.2).
 }
 
 // ── Policy / structural feature-flags (shape frozen, contents dial) ─────────────────
@@ -163,6 +169,15 @@ func (c Config) SMTPClientDeadline() time.Duration {
 // true, SMTP only runs if a node is actually routable — otherwise the brain degrades to the cheap
 // verdict (never invents SMTP).
 func (c Config) SMTPEnabled() bool { return c.KillSwitch.SMTP == SMTPEnabled }
+
+// AuditInterval / AuditMaxAge / WarmupDailyCap / AuditRecoverGreens are the Phase-3 §4.5/§5.2 DIALs
+// as typed accessors (the scheduler + the router filter read these).
+func (c Config) AuditInterval() time.Duration {
+	return time.Duration(c.Dials.AuditIntervalSeconds) * time.Second
+}
+func (c Config) AuditMaxAge() time.Duration {
+	return time.Duration(c.Dials.AuditMaxAgeSeconds) * time.Second
+}
 
 // CacheTTL returns the configured cache TTL as a duration, or 0 when the dial is UNSET
 // (OQ-9 — no owner value). Zero means "do not cache" (the orchestrator never writes a
@@ -227,6 +242,15 @@ type NodeDescriptor struct {
 	BaseURL  string
 	TokenRef string // key into secrets.NodeToken(...)
 	Enabled  bool
+
+	// PublicEgressIP is the node's KNOWN public egress IP — the IP its outbound SMTP actually
+	// originates from and that PTR resolves to (P3 §5.4 OQ-P3-11: the brain registry is authoritative
+	// for verifier_ip; the box never self-reports its reputation-bearing identity). It is the GAP-24
+	// cross-check anchor (§6.6.1): the router refuses :smtp unless the audit's self-detected
+	// current_host_ip EQUALS this value, so a multi-homed box can't pass green on its private IP.
+	// PENDING-REAL-BOX: the VALUE is set once a real host is provisioned; empty here (local build) →
+	// the GAP-24 conjunct fails safe (no :smtp on a green whose IP we can't confirm).
+	PublicEgressIP string
 }
 
 // Defaults returns the built-in safe configuration. Notably it places the kill-switch at
@@ -255,6 +279,11 @@ func Defaults() Config {
 			RecommendationSend:   70,               // P1 §7.2
 			RecommendationReview: 30,               // P1 §7.2
 			SMTPClientDeadlineMS: Dial{Set: false}, // P2 §6.5 owner OQ (X-7 coupling)
+			// Phase-3 audit/warmup dials (§4.5/§5.2). Conservative defaults (OQ-P3-7/OQ-P3-10):
+			AuditIntervalSeconds: 3600, // hourly re-audit for a first box (§4.5)
+			AuditMaxAgeSeconds:   7200, // 2× the interval → a stale green is excluded (§4.5)
+			AuditRecoverGreens:   3,    // 3 consecutive greens to auto-recover (§4.5 asymmetric)
+			WarmupDailyCap:       50,   // §5.2 conservative day-1 start (~50/day, OQ-P3-10 dial)
 		},
 		Policy: Policy{DefaultPolicyKey: "cold-email"},
 		Nodes:  nil, // node LIST, empty at P0. Door 5: a list even when length 0/1.
@@ -309,7 +338,41 @@ func Load(getenv func(string) string) (Config, error) {
 			BaseURL:  getenv("TM_NODE_BASE_URL"),
 			TokenRef: id,
 			Enabled:  getenv("TM_NODE_ENABLED") == "true",
+			// P3 §5.4/GAP-24: the node's KNOWN public egress IP (== the PTR'd/audited IP). PENDING-
+			// REAL-BOX — set once a real host is provisioned; empty in the local build → the GAP-24
+			// conjunct fails safe (no :smtp on a green whose IP the brain can't confirm).
+			PublicEgressIP: getenv("TM_NODE_PUBLIC_EGRESS_IP"),
 		})
+	}
+
+	// Phase-3 audit/warmup dial overrides (§4.5/§5.2). Each is optional; absent => the safe default.
+	if v := getenv("TM_AUDIT_INTERVAL_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return c, fmt.Errorf("config: invalid TM_AUDIT_INTERVAL_SECONDS %q", v)
+		}
+		c.Dials.AuditIntervalSeconds = n
+	}
+	if v := getenv("TM_AUDIT_MAX_AGE_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return c, fmt.Errorf("config: invalid TM_AUDIT_MAX_AGE_SECONDS %q", v)
+		}
+		c.Dials.AuditMaxAgeSeconds = n
+	}
+	if v := getenv("TM_AUDIT_RECOVER_GREENS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return c, fmt.Errorf("config: invalid TM_AUDIT_RECOVER_GREENS %q (must be >= 1)", v)
+		}
+		c.Dials.AuditRecoverGreens = n
+	}
+	if v := getenv("TM_WARMUP_DAILY_CAP"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return c, fmt.Errorf("config: invalid TM_WARMUP_DAILY_CAP %q", v)
+		}
+		c.Dials.WarmupDailyCap = n
 	}
 
 	return c, c.Validate()

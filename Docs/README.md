@@ -72,6 +72,16 @@ touching a one-way door or elevating/gating a cross-phase decision.
 | [`adr/ADR-0007-gap13-catchall-session-two-session.md`](adr/ADR-0007-gap13-catchall-session-two-session.md) | The GAP-13 spike ruling: the catch-all probe runs as two sessions (Option B); the gem is never patched (Door 5). |
 | [`../verifier-node/truemail-rack/test/p2/`](../verifier-node/truemail-rack/test/p2/) | The socket-level proof harness (real `smtp_mock`/`dns_mock`, Appendix B matrix) + the throwaway test-image Dockerfile. A test harness, not a deployable. |
 
+## Phase-3 artifacts (first real box — local build complete)
+
+| Doc | What it is |
+|---|---|
+| [`phase-3-status.md`](phase-3-status.md) | Live scorecard of the Phase-3 local build: the `/audit` gate, the GAP-24 four-way invariant, selective routing, warmup, `node_audits` history + the minimal re-audit scheduler, the PENDING-REAL-BOX ledger, and the grants proven live against real Postgres. |
+| [`phase-3-cutover-runbook.md`](phase-3-cutover-runbook.md) | The real-box cutover runbook: the V1–V5 vetting checklist, the ordered config-only flip, the PENDING-REAL-BOX proofs (each with its exact command), and the go-live acceptance list. **The system is one config flip + this runbook away from a real box.** |
+| [`phase-3-to-4-handoff.md`](phase-3-to-4-handoff.md) | The Phase-3→Phase-4 handoff: what P3 locked/built, what P4 inherits (the `Strategy` seam, the `node_audits` flap history, the warmup counter, the lifecycle machine), the `SEAM → P4` inbox (continuous health-watcher, block-rate quarantine, the pool, rotation), and the cutover gates carried forward. |
+| [`adr/ADR-0009-gap24-egress-ip-invariant-runtime-enforcement.md`](adr/ADR-0009-gap24-egress-ip-invariant-runtime-enforcement.md) | GAP-24 four-way egress-IP invariant runtime-enforced (eligibility gate + re-audit scheduler); `verifier_ip` sourced from the brain registry; the P3 additive surface (one `signals` key, `node_audits`/`node_warmup` tables) — additive against all five doors. |
+| [`../control-plane/migrations/0007_node_audits_warmup.sql`](../control-plane/migrations/0007_node_audits_warmup.sql) | `node_audits` (append-only audit history, OQ-P3-5) + `node_warmup` (durable ramp counter, §5.2) + the `nodes` INSERT/UPDATE grant. Append-only posture on `node_audits` proven live. |
+
 ## How the living-docs system stays honest (enforced, not asked)
 
 - **Behavior change ⇒ doc/ADR change**, in the same commit — [`../scripts/check-docs-updated.sh`](../scripts/check-docs-updated.sh) fails CI otherwise.

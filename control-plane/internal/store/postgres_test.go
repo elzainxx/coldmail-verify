@@ -162,6 +162,165 @@ func TestPGSetCatchAllTriState(t *testing.T) {
 	}
 }
 
+// ── Phase 3 (§4.3/§4.4/§5.2) — node health, append-only audit history, durable warmup ──────
+// These require migration 0007 (node_audits, node_warmup, nodes UPDATE grant) applied.
+
+func TestPGNodeStateAndAudit(t *testing.T) {
+	pg := testPG(t)
+	ctx := context.Background()
+	nodeID := "n-" + must(idgen.NewV7String(time.Now().UTC()))
+	url := "http://" + nodeID + ".test"
+
+	// Register provisioning (mirrors the boot upsert).
+	if err := pg.UpsertNodeState(ctx, nodeID, url, "provisioning", false); err != nil {
+		t.Fatalf("UpsertNodeState: %v", err)
+	}
+	h, known, err := pg.GetNodeHealth(ctx, nodeID)
+	if err != nil || !known {
+		t.Fatalf("health must be known after register, got known=%v err=%v", known, err)
+	}
+	if h.Status != "provisioning" || h.Port25Open {
+		t.Fatalf("want provisioning/port25=false, got %+v", h)
+	}
+
+	// Append a green audit — the summary (audit_status/last_audit_at/current_host_ip) must update.
+	now := time.Now().UTC().Truncate(time.Second)
+	auditID := must(idgen.NewV7String(now))
+	if err := pg.AppendNodeAudit(ctx, NodeAuditRow{
+		ID: auditID, NodeID: nodeID, AuditedAt: now, AuditStatus: "green",
+		Warnings: map[string]any{}, CurrentHostIP: "203.0.113.10",
+	}); err != nil {
+		t.Fatalf("AppendNodeAudit: %v", err)
+	}
+	h, _, _ = pg.GetNodeHealth(ctx, nodeID)
+	if h.AuditStatus != "green" || h.LastAuditHostIP != "203.0.113.10" {
+		t.Fatalf("audit summary must reflect the green audit + host IP, got %+v", h)
+	}
+
+	// Promote to active via UpsertNodeState with port25 proven — audit columns must SURVIVE.
+	if err := pg.UpsertNodeState(ctx, nodeID, url, "active", true); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	h, _, _ = pg.GetNodeHealth(ctx, nodeID)
+	if h.Status != "active" || !h.Port25Open || h.AuditStatus != "green" {
+		t.Fatalf("promotion must keep the audit summary, got %+v", h)
+	}
+}
+
+// Door-2-style append-only: node_audits DELETE is REVOKED from cp_runtime (migration 0007). This
+// requires connecting AS cp_runtime; if the test DSN is a superuser the REVOKE won't bite, so this
+// test only asserts the migration ran (the grant is proven in the migration itself + CI). Here we
+// prove the HISTORY accumulates (multiple rows for one node), which is the append-only behavior.
+func TestPGNodeAuditHistoryAccumulates(t *testing.T) {
+	pg := testPG(t)
+	ctx := context.Background()
+	nodeID := "n-" + must(idgen.NewV7String(time.Now().UTC()))
+	if err := pg.UpsertNodeState(ctx, nodeID, "http://"+nodeID+".test", "provisioning", true); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	base := time.Now().UTC().Truncate(time.Second)
+	for i, st := range []string{"green", "red", "green"} {
+		w := map[string]any{}
+		if st == "red" {
+			w = map[string]any{"ptr": "PTR mismatch"}
+		}
+		if err := pg.AppendNodeAudit(ctx, NodeAuditRow{
+			ID: must(idgen.NewV7String(base.Add(time.Duration(i) * time.Second))), NodeID: nodeID,
+			AuditedAt: base.Add(time.Duration(i) * time.Second), AuditStatus: st, Warnings: w, CurrentHostIP: "203.0.113.10",
+		}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	// The latest-audit summary must be the LAST row (green), proving the join reads latest-per-node.
+	h, _, _ := pg.GetNodeHealth(ctx, nodeID)
+	if h.AuditStatus != "green" {
+		t.Fatalf("summary must reflect the LATEST audit (green), got %q", h.AuditStatus)
+	}
+}
+
+func TestPGWarmupReserveAtomicCap(t *testing.T) {
+	pg := testPG(t)
+	ctx := context.Background()
+	nodeID := "n-" + must(idgen.NewV7String(time.Now().UTC()))
+	window := time.Now().UTC().Truncate(24 * time.Hour)
+
+	// Cap of 2 → first two reservations granted, third denied.
+	d1, err := pg.ReserveWarmupSlot(ctx, nodeID, window, 2)
+	if err != nil || !d1.Allowed || d1.Count != 1 {
+		t.Fatalf("reservation 1 want allowed count=1, got %+v err=%v", d1, err)
+	}
+	d2, _ := pg.ReserveWarmupSlot(ctx, nodeID, window, 2)
+	if !d2.Allowed || d2.Count != 2 {
+		t.Fatalf("reservation 2 want allowed count=2, got %+v", d2)
+	}
+	d3, _ := pg.ReserveWarmupSlot(ctx, nodeID, window, 2)
+	if d3.Allowed {
+		t.Fatalf("reservation 3 must be DENIED (over cap), got %+v", d3)
+	}
+	if d3.Count != 2 {
+		t.Fatalf("denied decision must report the current count 2, got %d", d3.Count)
+	}
+
+	// A NEW window (next day) resets the allowance — the ramp is per-window.
+	d4, _ := pg.ReserveWarmupSlot(ctx, nodeID, window.Add(24*time.Hour), 2)
+	if !d4.Allowed || d4.Count != 1 {
+		t.Fatalf("a new window must reset the allowance, got %+v", d4)
+	}
+
+	// Cap of 0 → never allowed, no row created.
+	d0, _ := pg.ReserveWarmupSlot(ctx, "n-zero-cap", window, 0)
+	if d0.Allowed {
+		t.Fatal("cap<=0 must never grant a slot")
+	}
+}
+
+// PG↔Mem parity (the P3 review divergence findings, now fixed both sides). These assert PG's exact
+// behavior so the Mem fake's mirroring is anchored to reality, not to itself.
+
+// An audit for an UNREGISTERED node updates history but NOT the summary → GetNodeHealth known=false
+// (PG's `UPDATE nodes WHERE id=$1` matches 0 rows). Mem now mirrors this (TestMemAppendNodeAudit_…).
+func TestPGAppendNodeAudit_UnregisteredNodeNotKnown(t *testing.T) {
+	pg := testPG(t)
+	ctx := context.Background()
+	nodeID := "ghost-" + must(idgen.NewV7String(time.Now().UTC()))
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := pg.AppendNodeAudit(ctx, NodeAuditRow{
+		ID: must(idgen.NewV7String(now)), NodeID: nodeID, AuditedAt: now, AuditStatus: "green",
+		Warnings: map[string]any{}, CurrentHostIP: "203.0.113.10",
+	}); err != nil {
+		t.Fatalf("append (unregistered): %v", err)
+	}
+	_, known, err := pg.GetNodeHealth(ctx, nodeID)
+	if err != nil {
+		t.Fatalf("health: %v", err)
+	}
+	if known {
+		t.Fatal("PG: an audit for an unregistered node must leave GetNodeHealth known=false (no nodes row)")
+	}
+}
+
+// The warmup deny-path returns the STORED cap unchanged when the caller passes a lower cap (PG's
+// ON CONFLICT SET, incl. cap, does not apply on deny). Mem now mirrors this.
+func TestPGReserveWarmup_DenyReportsStoredCap(t *testing.T) {
+	pg := testPG(t)
+	ctx := context.Background()
+	nodeID := "n-" + must(idgen.NewV7String(time.Now().UTC()))
+	w := time.Now().UTC().Truncate(24 * time.Hour)
+	if d, _ := pg.ReserveWarmupSlot(ctx, nodeID, w, 2); !d.Allowed || d.Count != 1 {
+		t.Fatalf("res1 %+v", d)
+	}
+	if d, _ := pg.ReserveWarmupSlot(ctx, nodeID, w, 2); !d.Allowed || d.Count != 2 {
+		t.Fatalf("res2 %+v", d)
+	}
+	d, _ := pg.ReserveWarmupSlot(ctx, nodeID, w, 1) // lower cap → deny
+	if d.Allowed {
+		t.Fatalf("over stored cap must deny, got %+v", d)
+	}
+	if d.Cap != 2 {
+		t.Fatalf("PG deny must report the STORED cap 2, got %d", d.Cap)
+	}
+}
+
 func must(s string, err error) string {
 	if err != nil {
 		panic(err)

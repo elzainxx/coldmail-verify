@@ -107,8 +107,8 @@ func TestMemCacheMapsAreCopiedNotAliased(t *testing.T) {
 	src := CachedVerdict{
 		EmailHash: eh, ConfigFingerprint: "cfg", Domain: "b.co",
 		Status: "risky", Reason: "plausible", Confidence: 30, Recommendation: "review",
-		Flags:   map[string]bool{"from_cache": false, "is_role": true},
-		Signals: map[string]any{"mx_found": true},
+		Flags:     map[string]bool{"from_cache": false, "is_role": true},
+		Signals:   map[string]any{"mx_found": true},
 		ExpiresAt: time.Unix(1_000_000, 0).Add(time.Hour),
 	}
 	if err := m.PutCachedVerdict(ctx, src); err != nil {
@@ -136,6 +136,73 @@ func TestMemCacheMapsAreCopiedNotAliased(t *testing.T) {
 	}
 	if got2.Flags["from_cache"] != false || got2.Signals["mx_found"] != true {
 		t.Errorf("stored entry was corrupted by mutating a returned map (read must copy): %+v / %+v", got2.Flags, got2.Signals)
+	}
+}
+
+// ── Phase 3: test-double fidelity — Mem must mirror PG semantics (P3 review findings) ──────
+
+// An audit that arrives for a node with NO `nodes` row must update the append-only history but NOT
+// create a health summary — GetNodeHealth returns known=false — EXACTLY as PG does (its
+// `UPDATE nodes WHERE id=$1` matches 0 rows, and GetNodeHealth hits ErrNoRows). Locks review finding.
+func TestMemAppendNodeAudit_UnregisteredNodeNotKnown(t *testing.T) {
+	m := NewMem(nil)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := m.AppendNodeAudit(ctx, NodeAuditRow{ID: "a1", NodeID: "ghost", AuditedAt: now, AuditStatus: "green", Warnings: map[string]any{}, CurrentHostIP: "203.0.113.10"}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	// History accumulates (truth)...
+	if len(m.NodeAudits) != 1 {
+		t.Fatalf("audit history must record even for an unregistered node, got %d", len(m.NodeAudits))
+	}
+	// ...but the summary is NOT known (mirrors PG — no `nodes` row).
+	_, known, _ := m.GetNodeHealth(ctx, "ghost")
+	if known {
+		t.Fatal("an audit for an unregistered node must NOT make GetNodeHealth known=true (PG returns known=false)")
+	}
+	// After registration, a subsequent audit DOES update the summary.
+	if err := m.UpsertNodeState(ctx, "ghost", "http://g", "provisioning", false); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := m.AppendNodeAudit(ctx, NodeAuditRow{ID: "a2", NodeID: "ghost", AuditedAt: now, AuditStatus: "green", Warnings: map[string]any{}, CurrentHostIP: "203.0.113.10"}); err != nil {
+		t.Fatalf("append2: %v", err)
+	}
+	h, known, _ := m.GetNodeHealth(ctx, "ghost")
+	if !known || h.AuditStatus != "green" {
+		t.Fatalf("after registration the summary must update, got known=%v status=%q", known, h.AuditStatus)
+	}
+}
+
+// The warmup deny-path must NOT mutate or return a lowered cap when the caller passes a smaller cap
+// than the stored one — mirroring PG (its ON CONFLICT SET, including cap, does not apply on deny).
+// Locks the review finding: Mem previously set w.cap=caller unconditionally and returned it.
+func TestMemReserveWarmup_DenyPathDoesNotLowerStoredCap(t *testing.T) {
+	m := NewMem(nil)
+	ctx := context.Background()
+	w := time.Now().UTC().Truncate(24 * time.Hour)
+	// Fill a window to cap=2.
+	if d, _ := m.ReserveWarmupSlot(ctx, "n1", w, 2); !d.Allowed || d.Count != 1 {
+		t.Fatalf("res1 want allowed count=1, got %+v", d)
+	}
+	if d, _ := m.ReserveWarmupSlot(ctx, "n1", w, 2); !d.Allowed || d.Count != 2 {
+		t.Fatalf("res2 want allowed count=2, got %+v", d)
+	}
+	// Re-request with a LOWER cap (1). Deny must report the STORED cap (2), not the caller's (1),
+	// and must not mutate the stored cap — exactly what PG's read-after-deny returns.
+	d, _ := m.ReserveWarmupSlot(ctx, "n1", w, 1)
+	if d.Allowed {
+		t.Fatalf("over-stored-cap must deny, got %+v", d)
+	}
+	if d.Cap != 2 {
+		t.Fatalf("deny must report the STORED cap 2 (PG parity), got %d", d.Cap)
+	}
+	if d.Count != 2 {
+		t.Fatalf("deny must report the stored count 2, got %d", d.Count)
+	}
+	// A subsequent request at the original cap still sees count=2 (stored cap not corrupted to 1).
+	d2, _ := m.ReserveWarmupSlot(ctx, "n1", w, 2)
+	if d2.Allowed {
+		t.Fatalf("still at cap 2 → deny, got %+v", d2)
 	}
 }
 

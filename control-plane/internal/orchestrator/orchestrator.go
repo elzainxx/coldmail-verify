@@ -127,18 +127,35 @@ func (o *Orchestrator) Verify(ctx context.Context, rawEmail string, def *policy.
 
 	requestID := mustID(o.now())
 
-	// 3b. SMTP stage (Phase 2, §7.1). Runs ONLY when the cheap verdict is the non-terminal
-	//     residue (risky/plausible, no gate stopped it) AND SMTP is wired AND a node is routable.
-	//     A definitive cheap gate (invalid/no_mx, null_mx, disposable, spam_trap) or a :mx-routed
-	//     provider (provider_no_smtp) is already terminal → SMTP is skipped (cheapest-sufficient).
+	// 3b. SMTP stage (§7.1, gated by the Phase-3 §4.4 eligibility rule). Runs ONLY when the cheap
+	//     verdict is the non-terminal residue (risky/plausible, no gate stopped it) AND SMTP is
+	//     wired AND a node is :smtp-ELIGIBLE (active ∧ green ∧ port25_open ∧ fresh ∧ GAP-24
+	//     egress-match) AND under the warmup cap. A definitive cheap gate (invalid/no_mx, null_mx,
+	//     disposable, spam_trap) or a :mx-routed provider (provider_no_smtp) is already terminal →
+	//     SMTP is skipped. When the residue was SMTP-eligible but no node could serve it (red / no
+	//     eligible node / warmup cap), the cheap verdict STANDS with an additive smtp_skipped_reason
+	//     signal (§8) and is marked PROVISIONAL → non-cacheable (PB1). Never invalid (OQ-P3-6).
 	var rawBlob []byte
-	var nodeID string
+	var nodeID, verifierIP string
+	provisional := false
 	if smtpEligible(v) {
-		if res, blob, nid, ran := o.runSMTP(ctx, normalized, domain, requestID, v); ran {
-			v = foldSMTP(v, res)
-			rawBlob, nodeID = blob, nid
-			o.persistCatchAll(ctx, domain, res)
+		out := o.runSMTP(ctx, normalized, domain, requestID, v)
+		switch {
+		case out.Ran:
+			v = foldSMTP(v, out.Result)
+			rawBlob, nodeID, verifierIP = out.RawBlob, out.NodeID, out.VerifierIP
+			o.persistCatchAll(ctx, domain, out.Result)
+		case out.SkipReason != "":
+			// Eligible residue, but no node ran it. Keep the cheap verdict; record WHY SMTP was
+			// skipped (frozen §8 token) and carry the PB1 provisional flag to suppress caching.
+			setSkipSignal(&v, out.SkipReason)
+			provisional = out.Provisional
 		}
+	} else if v.Reason == vocab.ReasonProviderNoSMTP {
+		// A :mx-routed big provider (Gmail/O365/Yahoo, §5.1) never reaches the SMTP call — its
+		// verdict is risky/provider_no_smtp. Record the frozen §8 token so the LOG shows SMTP was
+		// skipped by ROUTING (a SETTLED outcome → remains cacheable, unlike a capacity gap — PB1).
+		setSkipSignal(&v, reasonProviderMX)
 	}
 
 	// 4. Assemble (single source: response + LOG row), 5. LOG, 6. cache write, 7. respond.
@@ -150,16 +167,32 @@ func (o *Orchestrator) Verify(ctx context.Context, rawEmail string, def *policy.
 		HashScheme: hash.SchemeTag, LocalPartLen: len(localPart), MXProvider: mxProviderOf(v.Signals),
 		ProviderCanonicalHash: o.providerCanonical(normalized, v.Signals),
 		NodeID:                nodeID,
+		VerifierIP:            verifierIP, // §5.4: real SMTP egress IP (== audited IP); "" when SMTP didn't run
 	}
 	resp, row := verdict.Assemble(toCore(v), prov)
-	// Cache only SETTLED verdicts (§6.5/OQ-P2-6): a transient/your-fault unknown from SMTP must
-	// NOT be cached (caching it would suppress the retry that resolves it). Cheap verdicts and
-	// settled SMTP verdicts are cacheable; the cheap residue never reaches here as unknown.
-	cacheable := smtp.CacheableReason(v.Status, v.Reason)
+	// Cache only SETTLED verdicts (§6.5/OQ-P2-6 + PB1): a transient/your-fault unknown from SMTP is
+	// non-cacheable, AND a capacity-gap fallback (SMTP was eligible but no node served it —
+	// provisional=true) is non-cacheable even though its cheap reason looks settled. Caching a
+	// capacity-gap verdict would freeze a lower-quality answer and suppress the SMTP verdict once the
+	// node recovers / the cap lifts (PB1). A provider_mx_routed skip is NOT provisional (settled).
+	cacheable := smtp.CacheableReason(v.Status, v.Reason) && !provisional
 	if err := o.logAndCacheRaw(ctx, resp, row, emailHash, domain, prov, cacheable, rawBlob); err != nil {
 		return verdict.Response{}, err
 	}
 	return resp, nil
+}
+
+// setSkipSignal records the frozen §8 signals.smtp_skipped_reason (additive to the open signals
+// bag, Door 1 — no reason/status/recommendation change). It never overwrites a status/reason; it
+// only annotates WHY SMTP didn't run so the LOG (and P4/P7) can see it.
+func setSkipSignal(v *policy.Verdict, reason string) {
+	if reason == "" {
+		return
+	}
+	if v.Signals == nil {
+		v.Signals = map[string]any{}
+	}
+	v.Signals[signalSMTPSkipped] = reason
 }
 
 // foldSMTP replaces the cheap residue with the scored SMTP verdict, MERGING the SMTP signals into

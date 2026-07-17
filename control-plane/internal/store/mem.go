@@ -26,6 +26,19 @@ type MemStore struct {
 	catchall   map[string]bool // present => probed; value => is_catchall
 	policies   map[string]PolicyRow
 	defaultKey string
+
+	// Phase 3 (§4.3/§4.4/§5.2) — node health, append-only audit history, durable warmup counters.
+	NodeAudits []NodeAuditRow          // append-only; tests read this to assert history
+	health     map[string]NodeHealth   // node_id -> latest health summary (the `nodes` row mirror)
+	registered map[string]struct{}     // node_ids with a `nodes` row (mirrors PG: only UpsertNodeState creates it)
+	warmup     map[string]warmupWindow // node_id + "\x00" + windowStart -> counter
+}
+
+// warmupWindow mirrors one node_warmup row (per node, per window).
+type warmupWindow struct {
+	windowStart time.Time
+	count       int
+	cap         int
 }
 
 // NewMem builds an empty MemStore. now may be nil (defaults to time.Now).
@@ -40,7 +53,14 @@ func NewMem(now func() time.Time) *MemStore {
 		spamTrap:   map[string]struct{}{},
 		catchall:   map[string]bool{},
 		policies:   map[string]PolicyRow{},
+		health:     map[string]NodeHealth{},
+		registered: map[string]struct{}{},
+		warmup:     map[string]warmupWindow{},
 	}
+}
+
+func warmupKey(nodeID string, windowStart time.Time) string {
+	return nodeID + "\x00" + windowStart.UTC().Format(time.RFC3339Nano)
 }
 
 func cacheKey(emailHash []byte, cfg string) string {
@@ -193,8 +213,93 @@ func (m *MemStore) GetPolicy(_ context.Context, key string, version int) (Policy
 	return p, nil
 }
 
+// ── Phase 3 (§4.3/§4.4/§5.2) — node health, audit history, warmup ──────────────────────
+
+// AppendNodeAudit appends the audit-history row (append-only) and updates the node's latest health
+// summary — but ONLY when a `nodes` row exists (registered via UpsertNodeState). This mirrors PG
+// EXACTLY: there, AppendNodeAudit's `UPDATE nodes ... WHERE id=$1` matches 0 rows when the node was
+// never registered, so the summary is NOT created and GetNodeHealth returns known=false. An audit
+// that arrives before boot registration therefore updates the history (truth) but NOT the summary,
+// in both stores (test-double fidelity — P3 review finding, low but real). It never touches
+// status/port25_open (lifecycle/egress own those).
+func (m *MemStore) AppendNodeAudit(_ context.Context, row NodeAuditRow) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.NodeAudits = append(m.NodeAudits, row)
+	if _, ok := m.registered[row.NodeID]; !ok {
+		return nil // no `nodes` row → summary UPDATE is a no-op (mirrors PG's WHERE id=$1 matching 0)
+	}
+	h := m.health[row.NodeID]
+	h.NodeID = row.NodeID
+	h.AuditStatus = row.AuditStatus
+	h.LastAuditAt = row.AuditedAt
+	h.LastAuditHostIP = row.CurrentHostIP
+	m.health[row.NodeID] = h
+	return nil
+}
+
+// GetNodeHealth returns known iff a `nodes` row exists (registered) — mirroring PG, where known is
+// the `nodes` row's existence (pgx.ErrNoRows => known=false), NOT whether an audit ever arrived.
+func (m *MemStore) GetNodeHealth(_ context.Context, nodeID string) (NodeHealth, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.registered[nodeID]; !ok {
+		return NodeHealth{}, false, nil // no `nodes` row → not known (router treats as not eligible)
+	}
+	return m.health[nodeID], true, nil
+}
+
+// UpsertNodeState mirrors the descriptor + writes the lifecycle status/port25_open (§3.6/§4.5). It
+// CREATES the `nodes` row (registered), preserves the audit columns already present (audit is a
+// separate write path), and never deletes.
+func (m *MemStore) UpsertNodeState(_ context.Context, nodeID, _ /*baseURL*/, status string, port25Open bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.registered[nodeID] = struct{}{}
+	h := m.health[nodeID]
+	h.NodeID = nodeID
+	h.Status = status
+	h.Port25Open = port25Open
+	m.health[nodeID] = h
+	return nil
+}
+
+// ReserveWarmupSlot atomically reserves one :smtp slot against the window cap (§5.2). Denied when
+// the window is at cap (Allowed=false → caller degrades to cheap, warmup_cap). Durable-equivalent:
+// the counter survives as long as the (test) store lives, mirroring PG's per-window row.
+func (m *MemStore) ReserveWarmupSlot(_ context.Context, nodeID string, windowStart time.Time, cap int) (WarmupDecision, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if cap <= 0 {
+		// No allowance — deny without creating a row (mirrors the PG cap<=0 guard).
+		return WarmupDecision{Allowed: false, Count: 0, Cap: cap, WindowStart: windowStart.UTC()}, nil
+	}
+	key := warmupKey(nodeID, windowStart)
+	w, ok := m.warmup[key]
+	if !ok {
+		// Fresh window: PG's INSERT lands count=1,cap=<caller cap> (guaranteed under cap since cap>=1).
+		w = warmupWindow{windowStart: windowStart.UTC(), count: 1, cap: cap}
+		m.warmup[key] = w
+		return WarmupDecision{Allowed: true, Count: 1, Cap: cap, WindowStart: w.windowStart}, nil
+	}
+	// Existing window. PG evaluates the WHERE guard against the STORED cap semantics: the UPDATE
+	// applies `count=count+1, cap=EXCLUDED.cap` ONLY when the guard (stored count < caller cap)
+	// passes. On DENY (stored count >= caller cap) the whole SET — including cap — does NOT apply,
+	// and the read-after-deny returns the STORED row UNCHANGED. So we must NOT mutate the stored cap
+	// on the deny path; we return the stored count+cap (the P3 review finding — Mem previously
+	// lowered + returned the caller cap, diverging from PG).
+	if w.count >= cap {
+		return WarmupDecision{Allowed: false, Count: w.count, Cap: w.cap, WindowStart: w.windowStart}, nil
+	}
+	// Grant: mirror PG's `count=count+1, cap=EXCLUDED.cap` — the cap DOES update on the allow path.
+	w.count++
+	w.cap = cap
+	m.warmup[key] = w
+	return WarmupDecision{Allowed: true, Count: w.count, Cap: w.cap, WindowStart: w.windowStart}, nil
+}
+
 func (m *MemStore) Ping(context.Context) error { return nil }
-func (m *MemStore) Close()                      {}
+func (m *MemStore) Close()                     {}
 
 // ── Test seeding helpers (not part of the Store interface) ──────────────────────────
 
@@ -218,6 +323,22 @@ func (m *MemStore) SeedCatchAll(domain string, isCatchall bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.catchall[domain] = isCatchall
+}
+
+// SeedNodeHealth sets a node's full health summary directly (test-support: construct the
+// simulated audit surface — green, red, port25-blocked, egress-mismatch — without a real box).
+func (m *MemStore) SeedNodeHealth(h NodeHealth) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.registered[h.NodeID] = struct{}{} // seeding health implies the `nodes` row exists (GetNodeHealth => known)
+	m.health[h.NodeID] = h
+}
+
+// SeedWarmup sets a node's window counter directly (test-support: drive the cap-exceeded path).
+func (m *MemStore) SeedWarmup(nodeID string, windowStart time.Time, count, cap int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.warmup[warmupKey(nodeID, windowStart)] = warmupWindow{windowStart: windowStart.UTC(), count: count, cap: cap}
 }
 
 // SeedPolicy stores a policy; if isDefault, it becomes the default (last write wins).

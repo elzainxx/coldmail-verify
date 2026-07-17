@@ -22,10 +22,10 @@ import (
 // Pointer/typed-nil fields map to SQL NULL (invalid_syntax rows carry NULL email_hash — §3.2.7;
 // no empty-string sentinels — a "" domain is written NULL).
 type VerificationRow struct {
-	ID         string    // UUIDv7 (idgen) — frozen join anchor (§4.7)
-	RequestID  string    // correlates to meta.request_id; NOT unique (§3.2.7)
-	CheckedAt  time.Time // verdict time, stored UTC
-	CreatedAt  time.Time // insert time (== CheckedAt normally)
+	ID        string    // UUIDv7 (idgen) — frozen join anchor (§4.7)
+	RequestID string    // correlates to meta.request_id; NOT unique (§3.2.7)
+	CheckedAt time.Time // verdict time, stored UTC
+	CreatedAt time.Time // insert time (== CheckedAt normally)
 
 	// Door 3 identity. EmailHash nil => NULL (+ HashScheme "" and Domain "" also NULL).
 	EmailHash             []byte
@@ -95,6 +95,49 @@ type PolicyRow struct {
 	IsDefault  bool
 }
 
+// ── Phase 3: node health, audit history, warmup (all ADDITIVE — new tables, no frozen schema) ──
+
+// NodeAuditRow is one APPEND-ONLY /v1/audit result (P3 §4.3, OQ-P3-5; migration 0007 node_audits).
+// The gate reads the LATEST row per node; the flap history feeds the P4 health-watcher (SEAM → P4).
+// CurrentHostIP is host_audit's self-detected IP — the GAP-24 anchor (§6.6.1): the brain
+// cross-checks it against the node's expected public egress IP so a multi-homed box cannot pass
+// audit-green on its PRIVATE IP while the real egress IP is unaudited.
+type NodeAuditRow struct {
+	ID            string         // UUIDv7
+	NodeID        string         // FK-less (must survive node deletion)
+	AuditedAt     time.Time      // audit time, UTC
+	AuditStatus   string         // "green" (warnings=={}) | "red" — P3 §4.1
+	Warnings      map[string]any // raw host_audit warnings ({} == green)
+	CurrentHostIP string         // host_audit.current_host_ip; "" if undetectable (=> NULL)
+}
+
+// NodeHealth is the gate-relevant runtime state of a node (P3 §4.3/§4.4). It is read at routing
+// time to enforce the LOCKED eligibility rule (§4.4): :smtp-eligible iff status==active AND
+// audit_status==green AND port25_open AND audit-fresh AND (GAP-24) the audit ran on the expected
+// public egress IP. Status is the lifecycle (provisioning|active|quarantined); the operator on/off
+// switch is the config NodeDescriptor.Enabled (config-list authoritative, P1 OQ-5), NOT a status
+// value — so the spec's "disabled" state maps to Enabled=false, needing no schema/CHECK change.
+type NodeHealth struct {
+	NodeID          string
+	Status          string    // provisioning | active | quarantined (lifecycle, §4.5)
+	AuditStatus     string    // "green" | "red" | "" (never audited)
+	LastAuditAt     time.Time // zero => never audited
+	Port25Open      bool      // set by the egress smoke test (§3.4), NOT by /audit (GAP-15)
+	LastAuditHostIP string    // current_host_ip of the latest audit (the GAP-24 cross-check anchor)
+}
+
+// WarmupDecision is the outcome of reserving one :smtp slot against the ascending cap (P3 §5.2).
+// Allowed=false means the window is already at its cap → the caller sets
+// signals.smtp_skipped_reason="warmup_cap" and degrades to the cheap verdict (never queues — P5;
+// never invalid). The counter is DURABLE (Supabase), so a brain restart cannot reset a fresh IP's
+// ramp to full allowance mid-warmup (§5.2 LOCKED / PM4).
+type WarmupDecision struct {
+	Allowed     bool
+	Count       int       // count AFTER a granted reservation, or the current count when denied
+	Cap         int       // this window's ceiling
+	WindowStart time.Time // start of the window the reservation fell in (UTC)
+}
+
 // ErrNotWired marks the no-DB stub. ErrCacheMiss is a normal (non-error) cache absence.
 var (
 	ErrNotWired  = errors.New("store: no database wired")
@@ -129,6 +172,30 @@ type Store interface {
 	GetDefaultPolicy(ctx context.Context) (PolicyRow, error)
 	GetPolicy(ctx context.Context, key string, version int) (PolicyRow, error)
 
+	// ── Phase 3 (§4.3/§4.4/§4.5/§5.2) — all against NEW tables; the verdict LOG is untouched ──
+
+	// AppendNodeAudit INSERTs one audit-history row (append-only, node_audits) AND upserts the
+	// node's summary health columns (audit_status, last_audit_at, current_host_ip) on `nodes` in
+	// the SAME transaction — so the latest-audit summary and the history can never diverge. It does
+	// NOT touch status/port25_open (those move via the lifecycle transition / the egress test).
+	AppendNodeAudit(ctx context.Context, row NodeAuditRow) error
+
+	// GetNodeHealth returns the gate-relevant runtime state of a node (§4.4). known=false => the
+	// node has no `nodes` row yet (never mirrored/audited) — the router treats it as NOT eligible.
+	GetNodeHealth(ctx context.Context, nodeID string) (health NodeHealth, known bool, err error)
+
+	// UpsertNodeState mirrors the config node descriptor + writes the lifecycle status/port25_open
+	// (§3.6, §4.5). Used at boot (register provisioning) and on a lifecycle transition
+	// (active/quarantined). It NEVER deletes; DELETE is a cp_admin action (migration 0007).
+	UpsertNodeState(ctx context.Context, nodeID, baseURL, status string, port25Open bool) error
+
+	// ReserveWarmupSlot atomically reserves one :smtp slot for a node in the given window against
+	// `cap` (§5.2). It is the DURABLE ascending-cap gate: if the window is at cap it returns
+	// Allowed=false (caller degrades to cheap, smtp_skipped_reason="warmup_cap"); otherwise it
+	// increments the durable counter and returns Allowed=true. windowStart identifies the ramp
+	// window (e.g. the UTC day); cap is that window's ceiling (a DIAL). Restart-safe (§5.2 LOCKED).
+	ReserveWarmupSlot(ctx context.Context, nodeID string, windowStart time.Time, cap int) (WarmupDecision, error)
+
 	Ping(ctx context.Context) error
 	Close()
 }
@@ -138,18 +205,36 @@ type Store interface {
 // honestly not-ready rather than silently returning fake state.
 type StubStore struct{}
 
-func (StubStore) AppendVerification(context.Context, VerificationRow, *RawRow) error { return ErrNotWired }
+func (StubStore) AppendVerification(context.Context, VerificationRow, *RawRow) error {
+	return ErrNotWired
+}
 func (StubStore) GetCachedVerdict(context.Context, []byte, string) (CachedVerdict, error) {
 	return CachedVerdict{}, ErrNotWired
 }
-func (StubStore) PutCachedVerdict(context.Context, CachedVerdict) error       { return ErrNotWired }
-func (StubStore) IsDisposable(context.Context, string) (bool, error)          { return false, ErrNotWired }
-func (StubStore) IsSpamTrap(context.Context, string) (bool, error)            { return false, ErrNotWired }
-func (StubStore) CatchAllState(context.Context, string) (bool, bool, error)   { return false, false, ErrNotWired }
+func (StubStore) PutCachedVerdict(context.Context, CachedVerdict) error { return ErrNotWired }
+func (StubStore) IsDisposable(context.Context, string) (bool, error)    { return false, ErrNotWired }
+func (StubStore) IsSpamTrap(context.Context, string) (bool, error)      { return false, ErrNotWired }
+func (StubStore) CatchAllState(context.Context, string) (bool, bool, error) {
+	return false, false, ErrNotWired
+}
 func (StubStore) SetCatchAll(context.Context, string, *bool, string, time.Time) error {
 	return ErrNotWired
 }
-func (StubStore) GetDefaultPolicy(context.Context) (PolicyRow, error)         { return PolicyRow{}, ErrNotWired }
-func (StubStore) GetPolicy(context.Context, string, int) (PolicyRow, error)   { return PolicyRow{}, ErrNotWired }
-func (StubStore) Ping(context.Context) error                                 { return ErrNotWired }
-func (StubStore) Close()                                                      {}
+func (StubStore) GetDefaultPolicy(context.Context) (PolicyRow, error) {
+	return PolicyRow{}, ErrNotWired
+}
+func (StubStore) GetPolicy(context.Context, string, int) (PolicyRow, error) {
+	return PolicyRow{}, ErrNotWired
+}
+func (StubStore) AppendNodeAudit(context.Context, NodeAuditRow) error { return ErrNotWired }
+func (StubStore) GetNodeHealth(context.Context, string) (NodeHealth, bool, error) {
+	return NodeHealth{}, false, ErrNotWired
+}
+func (StubStore) UpsertNodeState(context.Context, string, string, string, bool) error {
+	return ErrNotWired
+}
+func (StubStore) ReserveWarmupSlot(context.Context, string, time.Time, int) (WarmupDecision, error) {
+	return WarmupDecision{}, ErrNotWired
+}
+func (StubStore) Ping(context.Context) error { return ErrNotWired }
+func (StubStore) Close()                     {}

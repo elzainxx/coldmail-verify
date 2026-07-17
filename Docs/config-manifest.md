@@ -189,6 +189,16 @@ It does not resolve open questions or set UNSET values — those are owner decis
 | **host-selection (port-25 ∧ PTR ∧ clean ∧ cheap)** | feature-flag | RECLASSIFIED to pre-provisioning research task (OQ-P3-1) | wrong host → phase can't proceed | provisioning (the wall) | P3 §3.1, OQ-P3-1, GAP-16 |
 | **deploy topology** | feature-flag | single container on VPS (OQ-P3-4) | — | single box | P3 §3.5, OQ-P3-4 |
 | **`node_audits` history table** (raw warnings) | feature-flag | new append-only table (OQ-P3-5) | mutable column → overwrites flap history P4 needs | data-integrity | P3 §4.3, §8, OQ-P3-5 |
+| **`node_warmup` counter table** (per-node/per-window) | feature-flag | new durable table (migration 0007) | in-memory → ramp resets on restart | single box / reputation | P3 §5.2, §8 |
+
+### 3.5 Concrete config keys (this build — the env vars the P3 code reads)
+| name | type | default | mis-setting effect | blast radius | source |
+|---|---|---|---|---|---|
+| **`TM_NODE_PUBLIC_EGRESS_IP`** (node's public egress IP) | feature-flag | empty ⇒ GAP-24 conjunct fails safe (no `:smtp`) | wrong IP → egress-mismatch excludes node, or (if unset) never eligible | single box / reputation | P3 §5.4, §6.6.1, GAP-24 |
+| **`TM_AUDIT_INTERVAL_SECONDS`** (re-audit cadence) | dial | 3600 (hourly) | too slow → silent breakage undetected; too fast → load | single box | P3 §4.5 |
+| **`TM_AUDIT_MAX_AGE_SECONDS`** (staleness window) | dial | 7200 (2× interval) | too small → green flaps ineligible; too large → stale green trusted | single box | P3 §4.5 |
+| **`TM_AUDIT_RECOVER_GREENS`** (consecutive greens to recover) | dial | 3 | too few → flapping recovers too fast | single box | P3 §4.5, OQ-P3-7 |
+| **`TM_WARMUP_DAILY_CAP`** (per-node/per-day `:smtp` cap) | dial | 50 (conservative day-1; 0 ⇒ warmup off) | 0→full → fresh IP looks like spam, blocked | single box / reputation | P3 §5.2, OQ-P3-10, GAP-20 |
 
 ---
 

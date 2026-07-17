@@ -24,7 +24,8 @@ silently rewrite (mirror Door 2).
 | [ADR-0005](ADR-0005-deployable-naming.md) | Deployables named: "brain"→`control-plane`, "box"→`verifier-node` | naming (durable) | **No** — a total rename, no contract changed | ACCEPTED |
 | [ADR-0006](ADR-0006-door3-nonascii-localpart-refusal.md) | Non-ASCII local parts refused until NFC/IDNA is wired (P1) | **Door 3** (hashing) | **No** — a tightening that affirms Door 3; refuses, never mis-hashes | ACCEPTED |
 | [ADR-0007](ADR-0007-gap13-catchall-session-two-session.md) | Catch-all probe runs as two sessions (Option B); gem not patched for same-session (GAP-13 spike) | **Door 5** (never-fork) | **No** — enforces Door 5; the gem stays unmodified, wrapper calls `Truemail.validate` twice | ACCEPTED |
-| [ADR-0008](ADR-0008-door3-raw-blob-address-redaction.md) | `verification_raw` blob redacts the plaintext address; narrows the P2 "store verbatim" text (spec-internal contradiction) | **Door 3** (hashing / no-plaintext) | **No** — enforces Door 3; conforms code to the frozen door, redacts one leak the spec missed | ACCEPTED (owner ratification of the spec-text amendment pending) |
+| [ADR-0008](ADR-0008-door3-raw-blob-address-redaction.md) | `verification_raw` blob redacts the plaintext address; narrows the P2 "store verbatim" text (spec-internal contradiction) | **Door 3** (hashing / no-plaintext) | **No** — enforces Door 3; conforms code to the frozen door, redacts one leak the spec missed | ACCEPTED (owner-ratified 2026-07-17, DECISIONS §6.2) |
+| [ADR-0009](ADR-0009-gap24-egress-ip-invariant-runtime-enforcement.md) | GAP-24 four-way egress-IP invariant runtime-enforced (gate + scheduler); `verifier_ip` sourced from the brain registry; the P3 additive surface (one `signals` key, `node_audits`/`node_warmup` tables) | **Door 2** (LOG provenance) + Door-1/4 additivity | **No** — enforces the doors; populates reserved fields, adds append-only tables, zero vocab change | ACCEPTED |
 
 ## Owner-OQ rulings that became records
 
@@ -34,4 +35,4 @@ Per-phase-only sign-offs remain in each spec's Appendix C/D.
 
 ## Next number
 
-The next ADR is **ADR-0009**. Increment monotonically; never reuse a number.
+The next ADR is **ADR-0010**. Increment monotonically; never reuse a number.

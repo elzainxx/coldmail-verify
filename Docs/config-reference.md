@@ -14,10 +14,10 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | bucket | count |
 |---|---|
 | secrets | 8 |
-| feature-flags | 140 |
-| dials | 79 |
+| feature-flags | 142 |
+| dials | 83 |
 | other/uncategorized | 2 |
-| **total knobs** | **229** |
+| **total knobs** | **235** |
 
 > One-way doors are **not** dials: the frozen contracts (response shape, LOG, hashing,
 > vocabulary, never-fork) live in code (`control-plane/internal/{vocab,hash,verdict,store,router}`),
@@ -37,7 +37,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | vendor API key (P6) | no rotation story; leak = budget-DoS + billed enumeration oracle (security F-6) | no rotation story; leak = budget-DoS + billed enumeration oracle (security F-6) |
 | front-door bearer token | no per-caller scoping/rotation brain-side; guards bulk-PII endpoint by P5 (security F-20) | no per-caller scoping/rotation brain-side; guards bulk-PII endpoint by P5 (security F-20) |
 
-## Feature-flags (140)
+## Feature-flags (142)
 
 | knob | default / state | source |
 |---|---|---|
@@ -107,6 +107,8 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | host-selection (port-25 ∧ PTR ∧ clean ∧ cheap) | RECLASSIFIED to pre-provisioning research task (OQ-P3-1) | P3 §3.1, OQ-P3-1, GAP-16 |
 | deploy topology | single container on VPS (OQ-P3-4) | P3 §3.5, OQ-P3-4 |
 | `node_audits` history table (raw warnings) | new append-only table (OQ-P3-5) | P3 §4.3, §8, OQ-P3-5 |
+| `node_warmup` counter table (per-node/per-window) | new durable table (migration 0007) | P3 §5.2, §8 |
+| `TM_NODE_PUBLIC_EGRESS_IP` (node's public egress IP) | empty ⇒ GAP-24 conjunct fails safe (no `:smtp`) | P3 §5.4, §6.6.1, GAP-24 |
 | router strategy set (sticky-by-domain default + least-inflight fallback) | sticky-first, least-inflight fallback (behind unchanged P1 interface) | P4 §3, §3.3 |
 | sticky affinity mapping (HRW vs ring vs stored table) | rendezvous/HRW hashing (OQ-P4-1) | P4 §3.2, OQ-P4-1 |
 | eligibility filter predicates (active∧green∧port25∧fresh∧warmup-headroom∧rate-headroom) | LOCKED conjunction | P4 §3.3 |
@@ -182,7 +184,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | `unknown` not pressured to `valid` | LOCKED — first-class unknown survives flywheel | P7 §8.4 |
 | platform "your sends train our accuracy" disclosure | surface it (OQ-P7-8), disclose-don't-hide | P7 §14, OQ-P7-8 |
 
-## Dials (79)
+## Dials (83)
 
 | knob | default / state | source |
 |---|---|---|
@@ -217,6 +219,10 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | auto-recovery threshold (N consecutive greens) | N-consecutive-green (asymmetric, OQ-P3-7) | P3 §4.5, OQ-P3-7 |
 | warmup ascending daily cap schedule | UNSET (OQ-P3-10) illustrative D1~50/D2~100/D3~250/D4~500/wk2~1–2k | P3 §5.2, OQ-P3-10, GAP-20 |
 | warmup health-checkpoint gate | step up only on prior-day low smtp_blocked + green audit | P3 §5.2, OQ-P3-10 |
+| `TM_AUDIT_INTERVAL_SECONDS` (re-audit cadence) | 3600 (hourly) | P3 §4.5 |
+| `TM_AUDIT_MAX_AGE_SECONDS` (staleness window) | 7200 (2× interval) | P3 §4.5 |
+| `TM_AUDIT_RECOVER_GREENS` (consecutive greens to recover) | 3 | P3 §4.5, OQ-P3-7 |
+| `TM_WARMUP_DAILY_CAP` (per-node/per-day `:smtp` cap) | 50 (conservative day-1; 0 ⇒ warmup off) | P3 §5.2, OQ-P3-10, GAP-20 |
 | `max_inflight` (per node×provider concurrency cap) | small, 1–3 | P4 §4.2 |
 | `max_starts_per_window` (rate cap) | ~N/min conservative | P4 §4.2 |
 | `window_s` (rate window) | 60 | P4 §4.2, §4.7 |

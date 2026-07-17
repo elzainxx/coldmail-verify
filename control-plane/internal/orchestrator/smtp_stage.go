@@ -29,6 +29,29 @@ type SMTPDeps struct {
 	TokenFor       func(nodeID string) string // resolves a node's token from secrets (never in config)
 	SafeCheckOn    bool                       // whether the engine runs smtp_safe_check (§6.8; config_fingerprint)
 	ClientDeadline time.Duration              // brain-side deadline mirror (used by the caller when building Client)
+
+	// Phase 3 (§4.4/§4.5/§5.2). Health drives the eligibility gate; MaxAuditAge is the §4.5
+	// staleness window; WarmupCap is the §5.2 per-window ascending cap (<=0 => NOT enforced — a
+	// mature node past warmup). Health is usually the store itself; injected so tests use a fake.
+	Health      router.HealthSource
+	MaxAuditAge time.Duration // §4.5 staleness window (DIAL); <=0 disables the freshness conjunct
+	WarmupCap   int           // §5.2 per-node/per-day :smtp cap; <=0 => warmup not enforced
+}
+
+// smtpStageOutcome is runSMTP's result. When Ran, the SMTP verdict + its provenance replace the
+// cheap residue. When !Ran, SMTP was eligible-but-couldn't-run: the cheap verdict STANDS, SkipReason
+// (a frozen §8 token, "" if none) is attached to signals, and Provisional=true marks a CAPACITY-GAP
+// fallback that must NOT be cached (PB1 — caching it would freeze a lower-quality answer and
+// suppress the SMTP verdict that becomes available once the node recovers / the cap lifts). Never
+// invalid (OQ-P3-6).
+type smtpStageOutcome struct {
+	Ran         bool
+	Result      smtp.Result
+	RawBlob     []byte
+	NodeID      string
+	VerifierIP  string // the node's public egress IP (== audited IP, GAP-24-verified); logged as verifier_ip
+	SkipReason  string // frozen §8 signals.smtp_skipped_reason ("" => none)
+	Provisional bool   // PB1: capacity-gap fallback → non-cacheable
 }
 
 // smtpEligible reports whether the cheap verdict is the non-terminal residue that SMTP should
@@ -41,19 +64,45 @@ func smtpEligible(v policy.Verdict) bool {
 	return v.StoppedAt == "" && v.Reason == vocab.ReasonPlausible
 }
 
-// runSMTP performs the SMTP stage. It returns (smtpResult, rawBlob, ok). ok=false means the stage
-// did not run or could not reach a node — the caller keeps the cheap verdict. A node failure that
-// DID occur mid-flight returns an unknown verdict (ok=true) so the honest degradation is logged.
-func (o *Orchestrator) runSMTP(ctx context.Context, normalized, domain, requestID string, cheap policy.Verdict) (smtp.Result, []byte, string, bool) {
+// runSMTP performs the Phase-3 SMTP stage. It applies the §4.4 eligibility gate (via the router's
+// health-aware SMTPRoute), the §5.2 warmup cap, then calls the node and scores the transcript. Its
+// outcome tells the caller exactly what happened: Ran (SMTP verdict replaces the residue) or not
+// (cheap verdict stands, with a frozen §8 smtp_skipped_reason and the PB1 cacheability flag). It
+// NEVER fabricates valid/invalid — a node/transport failure degrades to unknown; a gate/cap skip
+// keeps the honest cheap verdict.
+func (o *Orchestrator) runSMTP(ctx context.Context, normalized, domain, requestID string, cheap policy.Verdict) smtpStageOutcome {
 	if o.smtp == nil || o.smtp.Client == nil || o.smtp.Registry == nil {
-		return smtp.Result{}, nil, "", false // SMTP not wired → cheap verdict stands
+		return smtpStageOutcome{} // SMTP not wired → cheap verdict stands (no skip signal in P1/Rung3)
 	}
 
-	// Route to a node (Door 5: a LIST via Strategy; empty list → degrade, never invalid).
-	n, err := o.smtp.Registry.Route(ctx, router.Plan{Domain: domain, Provider: mxProviderOf(cheap.Signals)})
-	if err != nil {
-		// No eligible node → cheap verdict stands (harden-toward-unknown: we do NOT invent SMTP).
-		return smtp.Result{}, nil, "", false
+	// §4.4 eligibility gate + Door-5 routing: only nodes that are active ∧ green ∧ port25_open ∧
+	// fresh ∧ (GAP-24) egress-IP-matched are candidates; the Strategy picks one. No eligible node →
+	// degrade to cheap with a frozen §8 skip token (audit_red vs no_eligible_node); this is a
+	// CAPACITY-GAP fallback → PROVISIONAL/non-cacheable (PB1). Never invalid (OQ-P3-6).
+	rr := o.smtp.Registry.SMTPRoute(ctx,
+		router.Plan{Domain: domain, Provider: mxProviderOf(cheap.Signals)},
+		o.smtp.Health,
+		router.SMTPFilterConfig{MaxAuditAge: o.smtp.MaxAuditAge, Now: o.now},
+	)
+	if rr.Err != nil {
+		return smtpStageOutcome{SkipReason: rr.SkipToken, Provisional: true}
+	}
+	n := rr.Node
+
+	// §5.2 warmup ramp: reserve one :smtp slot against the node's per-window ascending cap. Over the
+	// cap → degrade to cheap with smtp_skipped_reason="warmup_cap" (PROVISIONAL/non-cacheable, PB1 —
+	// the SMTP verdict becomes available once the window rolls). NEVER queue (P5) or invalid (§5.2).
+	// Cap<=0 means warmup is not enforced (a mature node) — skip the reservation entirely.
+	if o.smtp.WarmupCap > 0 {
+		dec, werr := o.store.ReserveWarmupSlot(ctx, n.ID, o.warmupWindow(), o.smtp.WarmupCap)
+		if werr != nil {
+			// A warmup-store error must NOT silently send over-cap (reputation hazard) — fail closed
+			// to the cheap verdict, marked provisional. The verdict is still honest (cheap), just no SMTP.
+			return smtpStageOutcome{SkipReason: reasonWarmupCap, Provisional: true}
+		}
+		if !dec.Allowed {
+			return smtpStageOutcome{SkipReason: reasonWarmupCap, Provisional: true}
+		}
 	}
 
 	token := ""
@@ -73,14 +122,19 @@ func (o *Orchestrator) runSMTP(ctx context.Context, normalized, domain, requestI
 	// — the spec's "join gold" (§6.4) minus only the frozen-door leak the spec itself missed
 	// (see ADR-0008). Applied to EVERY return path below, including the error paths.
 	raw = redactAddress(raw, normalized)
+	// §5.4/OQ-P3-11: verifier_ip is sourced from the BRAIN REGISTRY (n.PublicEgressIP), never
+	// self-reported by the box. Because the §4.4 gate already required the audit's current_host_ip
+	// == n.PublicEgressIP (GAP-24), the logged verifier_ip is the IP that actually made the SMTP
+	// connection. Empty in the local build (PENDING-REAL-BOX) — a real box sets it at provisioning.
+	verifierIP := n.PublicEgressIP
 	if callErr != nil {
-		return o.smtpFromNodeError(callErr, cheap), raw, n.ID, true
+		return smtpStageOutcome{Ran: true, Result: o.smtpFromNodeError(callErr, cheap), RawBlob: raw, NodeID: n.ID, VerifierIP: verifierIP}
 	}
 
 	var wr smtp.WrapperResponse
 	if err := json.Unmarshal(raw, &wr); err != nil {
 		// Unparseable node response → unknown/smtp_error (never a guessed verdict).
-		return unknownResult(vocab.ReasonSMTPError), raw, n.ID, true
+		return smtpStageOutcome{Ran: true, Result: unknownResult(vocab.ReasonSMTPError), RawBlob: raw, NodeID: n.ID, VerifierIP: verifierIP}
 	}
 
 	parsed := smtp.ParseTranscript(wr.SMTPDebug, wr.Success)
@@ -96,8 +150,26 @@ func (o *Orchestrator) runSMTP(ctx context.Context, normalized, domain, requestI
 		in.EngineMXHosts = wr.MX.MailServers
 	}
 	res := smtp.Score(in)
-	return res, raw, n.ID, true
+	return smtpStageOutcome{Ran: true, Result: res, RawBlob: raw, NodeID: n.ID, VerifierIP: verifierIP}
 }
+
+// warmupWindow returns the start of the current warmup window (the UTC day, §5.2). The window is a
+// DIAL shape; a day is the minimal ascending-cap unit. Truncating to the UTC day makes the durable
+// per-window counter deterministic across brain restarts.
+func (o *Orchestrator) warmupWindow() time.Time {
+	n := o.now().UTC()
+	return time.Date(n.Year(), n.Month(), n.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+// reasonWarmupCap / reasonSMTPSkipped is the frozen §8 signals.smtp_skipped_reason enum (additive
+// to the open signals bag — Door 1). Only these four tokens are ever written.
+const (
+	reasonNoEligibleNode = "no_eligible_node"
+	reasonAuditRed       = "audit_red"
+	reasonProviderMX     = "provider_mx_routed"
+	reasonWarmupCap      = "warmup_cap"
+	signalSMTPSkipped    = "smtp_skipped_reason"
+)
 
 // smtpFromNodeError maps a node call failure to an honest unknown (§4.1 failure modes / §6.5):
 // a transport timeout → smtp_timeout; a non-2xx HTTP status → connection_failed/unknown. It never

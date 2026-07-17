@@ -37,8 +37,17 @@ func (f fakeNode) Verify(_ context.Context, _, _, _ string) (node.RawEngineResul
 	return f.body, f.err
 }
 
+// testEgressIP is the node's public egress IP used across the SMTP-stage tests. Because the P3
+// §4.4 gate now requires an ELIGIBLE node (active ∧ green ∧ port25_open ∧ fresh ∧ GAP-24 egress
+// match), smtpSetup seeds the node's health as fully eligible so the SMTP-PATH behaviors (valid /
+// invalid / catch-all / 552 / timeout / redaction) are still exercised. The gate itself is proven
+// separately (audit + router tests, and the P3 skip tests below).
+const testEgressIP = "203.0.113.10"
+
 // smtpSetup builds an orchestrator whose cheap path yields the SMTP-eligible residue (a clean
-// corp domain → risky/plausible), wired to a fake node returning `body`.
+// corp domain → risky/plausible), wired to a fake node returning `body`, with the node seeded as
+// a fully :smtp-ELIGIBLE, warmed-up box (P3 §4.4). Freshness is disabled (MaxAuditAge=0) so these
+// behavioral tests don't depend on wall-clock; the freshness conjunct is proven in the audit pkg.
 func smtpSetup(t *testing.T, body []byte, nodeErr error, ttl time.Duration) (*Orchestrator, *store.MemStore, *policy.Definition) {
 	t.Helper()
 	h, err := hash.NewHasher([]byte("smtp-stage-pepper"))
@@ -46,18 +55,25 @@ func smtpSetup(t *testing.T, body []byte, nodeErr error, ttl time.Duration) (*Or
 		t.Fatalf("hasher: %v", err)
 	}
 	mem := store.NewMem(nil)
+	// Seed the node as eligible: active, audit-green, egress-25 proven, audited on its expected IP.
+	mem.SeedNodeHealth(store.NodeHealth{
+		NodeID: "n1", Status: "active", AuditStatus: "green", Port25Open: true,
+		LastAuditAt: time.Now(), LastAuditHostIP: testEgressIP,
+	})
 	def, err := policy.ColdEmailDefinition()
 	if err != nil {
 		t.Fatalf("policy: %v", err)
 	}
-	nodes := []router.Node{{ID: "n1", BaseURL: "http://mock", TokenRef: "n1", Enabled: true}}
+	nodes := []router.Node{{ID: "n1", BaseURL: "http://mock", TokenRef: "n1", Enabled: true, PublicEgressIP: testEgressIP}}
 	o := New(Deps{
 		Hasher: h, Store: mem, Resolver: corpResolver(), CacheTTL: ttl,
 		ConfigFingerprint: "cfg_sha256:test",
 		SMTP: &SMTPDeps{
-			Client:   fakeNode{body: body, err: nodeErr},
-			Registry: router.New(nodes, nil),
-			TokenFor: func(string) string { return "tok" },
+			Client:      fakeNode{body: body, err: nodeErr},
+			Registry:    router.New(nodes, nil),
+			TokenFor:    func(string) string { return "tok" },
+			Health:      mem,
+			MaxAuditAge: 0, // freshness disabled for behavioral tests (proven in the audit pkg)
 		},
 	})
 	return o, mem, def
@@ -347,6 +363,147 @@ func TestSMTPStage_RawBlobRedactsSpecialCharLocalParts(t *testing.T) {
 				t.Fatal("domain (Door-3-clear) must remain")
 			}
 		})
+	}
+}
+
+// ── Phase 3: the eligibility gate + skip reasons + PB1 cacheability + verifier_ip ──────────────
+
+// p3Setup builds an orchestrator with an explicit node health + descriptor so a test can drive the
+// §4.4 gate to each non-eligible outcome. warmupCap<=0 disables warmup; freshness is disabled.
+func p3Setup(t *testing.T, health store.NodeHealth, egressIP string, warmupCap int, body []byte) (*Orchestrator, *store.MemStore, *policy.Definition) {
+	t.Helper()
+	h, err := hash.NewHasher([]byte("p3-pepper"))
+	if err != nil {
+		t.Fatalf("hasher: %v", err)
+	}
+	mem := store.NewMem(nil)
+	mem.SeedNodeHealth(health)
+	def, _ := policy.ColdEmailDefinition()
+	nodes := []router.Node{{ID: "n1", BaseURL: "http://mock", TokenRef: "n1", Enabled: true, PublicEgressIP: egressIP}}
+	o := New(Deps{
+		Hasher: h, Store: mem, Resolver: corpResolver(), CacheTTL: time.Hour,
+		ConfigFingerprint: "cfg_sha256:test",
+		SMTP: &SMTPDeps{
+			Client:      fakeNode{body: body},
+			Registry:    router.New(nodes, nil),
+			TokenFor:    func(string) string { return "tok" },
+			Health:      mem,
+			MaxAuditAge: 0,
+			WarmupCap:   warmupCap,
+		},
+	})
+	return o, mem, def
+}
+
+// validBody is a clean-250 + probe-rejected body → valid/accepted when SMTP runs.
+var validBody = []byte(`{
+  "wrapper_api_version":"v1","email":"jane@acmecorp.com","validation_type":"smtp","success":true,
+  "smtp_debug":null,
+  "catchall":{"probed":true,"probe_local_part":"nx","accepted":false,"conclusion":"not_catchall"},
+  "mx":{"domain":"acmecorp.com","mail_servers":["1.2.3.4"]}}`)
+
+// OQ-P3-6 + PB1: when the only node's audit is RED, the SMTP-eligible residue degrades to the CHEAP
+// verdict (risky/plausible) — NEVER invalid — with smtp_skipped_reason=audit_red, and is NOT cached
+// (capacity gap → provisional). verifier_ip is null (SMTP never ran).
+func TestSMTPStage_RedNode_DegradesToCheapNotInvalid(t *testing.T) {
+	o, mem, def := p3Setup(t, store.NodeHealth{
+		NodeID: "n1", Status: "active", AuditStatus: "red", Port25Open: true,
+		LastAuditAt: time.Now(), LastAuditHostIP: testEgressIP,
+	}, testEgressIP, 0, validBody)
+	resp, err := o.Verify(context.Background(), "jane@acmecorp.com", def)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if resp.Status == vocab.StatusInvalid {
+		t.Fatal("OQ-P3-6 VIOLATION: a red node must NEVER make the address invalid")
+	}
+	if resp.Status != vocab.StatusRisky || resp.Reason != vocab.ReasonPlausible {
+		t.Fatalf("red node → cheap residue risky/plausible, got %s/%s", resp.Status, resp.Reason)
+	}
+	if s, _ := resp.Signals["smtp_skipped_reason"].(string); s != "audit_red" {
+		t.Fatalf("smtp_skipped_reason must be audit_red, got %q", s)
+	}
+	if mem.CacheLen() != 0 {
+		t.Fatalf("PB1: a capacity-gap fallback must NOT be cached, got cache len %d", mem.CacheLen())
+	}
+	if len(mem.Log) != 1 {
+		t.Fatalf("the degraded verdict must still be LOGged (Door 2), got %d", len(mem.Log))
+	}
+	if resp.Meta.VerifierIP != nil {
+		t.Fatalf("verifier_ip must be null when SMTP didn't run, got %v", *resp.Meta.VerifierIP)
+	}
+	// No node was consulted → no raw sidecar blob.
+	if len(mem.Raw) != 0 {
+		t.Fatal("SMTP must not have run against a red node (no sidecar)")
+	}
+}
+
+// PB1: the warmup-cap overflow degrades to the cheap verdict with smtp_skipped_reason=warmup_cap,
+// non-cacheable, never queued/invalid (§5.2).
+func TestSMTPStage_WarmupCapExceeded_DegradesNonCacheable(t *testing.T) {
+	o, _, def := p3Setup(t, store.NodeHealth{
+		NodeID: "n1", Status: "active", AuditStatus: "green", Port25Open: true,
+		LastAuditAt: time.Now(), LastAuditHostIP: testEgressIP,
+	}, testEgressIP, 1, validBody) // cap of 1
+	// 1st request consumes the single slot → SMTP runs → valid.
+	r1, _ := o.Verify(context.Background(), "a@acmecorp.com", def)
+	if r1.Status != vocab.StatusValid {
+		t.Fatalf("first request under cap should run SMTP → valid, got %s/%s", r1.Status, r1.Reason)
+	}
+	// 2nd request is over the cap → degrade to cheap, warmup_cap, non-cacheable.
+	r2, err := o.Verify(context.Background(), "b@acmecorp.com", def)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if r2.Status == vocab.StatusInvalid {
+		t.Fatal("over-cap must NEVER be invalid (§5.2)")
+	}
+	if s, _ := r2.Signals["smtp_skipped_reason"].(string); s != "warmup_cap" {
+		t.Fatalf("over-cap smtp_skipped_reason must be warmup_cap, got %q", s)
+	}
+	if r2.Status != vocab.StatusRisky || r2.Reason != vocab.ReasonPlausible {
+		t.Fatalf("over-cap → cheap residue, got %s/%s", r2.Status, r2.Reason)
+	}
+}
+
+// §5.4: a real SMTP verdict logs a non-null verifier_ip sourced from the brain registry (the node's
+// public egress IP == the audited IP, GAP-24), not self-reported by the box.
+func TestSMTPStage_VerifierIPLoggedFromRegistry(t *testing.T) {
+	o, mem, def := p3Setup(t, store.NodeHealth{
+		NodeID: "n1", Status: "active", AuditStatus: "green", Port25Open: true,
+		LastAuditAt: time.Now(), LastAuditHostIP: testEgressIP,
+	}, testEgressIP, 0, validBody)
+	resp, err := o.Verify(context.Background(), "jane@acmecorp.com", def)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if resp.Status != vocab.StatusValid {
+		t.Fatalf("eligible node should run SMTP → valid, got %s/%s", resp.Status, resp.Reason)
+	}
+	if resp.Meta.VerifierIP == nil || *resp.Meta.VerifierIP != testEgressIP {
+		t.Fatalf("verifier_ip must be the registry egress IP %q, got %v", testEgressIP, resp.Meta.VerifierIP)
+	}
+	if len(mem.Log) != 1 || mem.Log[0].VerifierIP != testEgressIP {
+		t.Fatalf("LOG row verifier_ip must be %q, got %q", testEgressIP, mem.Log[0].VerifierIP)
+	}
+}
+
+// GAP-24 at the orchestrator level: a multi-homed box audited GREEN on its private IP (LastAuditHostIP
+// != expected egress) must degrade to cheap — the silent-poisoning trap is blocked end-to-end.
+func TestSMTPStage_MultiHomedMismatch_DegradesNotPoisons_GAP24(t *testing.T) {
+	o, _, def := p3Setup(t, store.NodeHealth{
+		NodeID: "n1", Status: "active", AuditStatus: "green", Port25Open: true,
+		LastAuditAt: time.Now(), LastAuditHostIP: "10.0.0.5", // audited the PRIVATE interface
+	}, testEgressIP /* expected public egress */, 0, validBody)
+	resp, err := o.Verify(context.Background(), "jane@acmecorp.com", def)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if resp.Status == vocab.StatusValid || resp.Status == vocab.StatusInvalid {
+		t.Fatal("GAP-24: a box audited on the wrong IP must not produce an SMTP verdict")
+	}
+	if s, _ := resp.Signals["smtp_skipped_reason"].(string); s != "audit_red" {
+		t.Fatalf("GAP-24 mismatch is a health failure → skip reason audit_red, got %q", s)
 	}
 }
 
