@@ -98,12 +98,43 @@ func (m *MemStore) GetCachedVerdict(_ context.Context, emailHash []byte, cfg str
 	if !v.ExpiresAt.IsZero() && !m.now().Before(v.ExpiresAt) {
 		return CachedVerdict{}, ErrCacheMiss // expired => miss, never a stale verdict
 	}
+	// Return DEEP copies of the maps so a caller that mutates flags/signals (e.g. the verdict
+	// assembler sets flags["from_cache"]) cannot corrupt the stored entry. This mirrors the PG
+	// store, which unmarshals fresh maps on every read — the fake must not diverge from real.
+	v.Flags = copyBoolMap(v.Flags)
+	v.Signals = copyAnyMap(v.Signals)
 	return v, nil
+}
+
+func copyBoolMap(m map[string]bool) map[string]bool {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(m))
+	for k, val := range m {
+		out[k] = val
+	}
+	return out
+}
+
+func copyAnyMap(m map[string]any) map[string]any {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]any, len(m))
+	for k, val := range m {
+		out[k] = val
+	}
+	return out
 }
 
 func (m *MemStore) PutCachedVerdict(_ context.Context, v CachedVerdict) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// Copy maps on write too (PG serializes to JSON on write): the stored entry must not alias
+	// the caller's maps, or a later caller-side mutation would silently change the cache.
+	v.Flags = copyBoolMap(v.Flags)
+	v.Signals = copyAnyMap(v.Signals)
 	m.cache[cacheKey(v.EmailHash, v.ConfigFingerprint)] = v
 	return nil
 }
