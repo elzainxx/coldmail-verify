@@ -20,7 +20,7 @@ the specs for depth.
 |---|---|---|
 | 1 | [`phase-1-foundations-spec.md`](phase-1-foundations-spec.md) | Contracts (the 5 doors), data model, control-plane skeleton, cheap layers, policy engine |
 | 2 | [`phase-2-smtp-mocks-spec.md`](phase-2-smtp-mocks-spec.md) | Full SMTP path against mocks; catch-all probe; wrapper endpoints |
-| 3 | [`phase-3-first-real-verifier-node-spec.md`](phase-3-first-real-verifier-node-spec.md) | One real audited verifier-node; the `/audit` gate; selective go-live |
+| 3 | [`phase-3-first-real-box-spec.md`](phase-3-first-real-box-spec.md) | One real audited verifier-node ("box" in the design docs); the `/audit` gate; selective go-live |
 | 4 | [`phase-4-resilience-pool-spec.md`](phase-4-resilience-pool-spec.md) | Health-watcher, sticky routing, rate limiter, node #2 = +1 config line |
 | 5 | [`phase-5-queue-spec.md`](phase-5-queue-spec.md) | Async queue, greylist retry, idempotency (CAS), bulk job handle |
 | 6 | [`phase-6-fallback-spec.md`](phase-6-fallback-spec.md) | Third-party fallback on residue; anti-laundering; spend breaker |

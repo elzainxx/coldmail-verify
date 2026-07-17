@@ -71,7 +71,7 @@ accept-all pending. None mutates a frozen door.
 Phase 0 **decided nothing** that was owner-open. The parked sub-decisions in
 [DECISIONS.md §5](DECISIONS.md) remain parked; the [§6 owner-OQ register](DECISIONS.md) added
 this phase only *points* to where already-decided OQs live (P6-3, P6-6, P7-2, P7-8, and the P1
-mock-vs-live ruling → [ADR-0004](adr/ADR-0004-cheap-layers-control-plane-native.md)). The project's own
+mock-vs-live ruling → [ADR-0004](adr/ADR-0004-cheap-layers-brain-native.md)). The project's own
 **LICENSE is still an owner choice** (README.md "License posture") — third-party MIT respected in
 [NOTICE](../NOTICE), the project's own license deliberately not asserted.
 

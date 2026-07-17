@@ -14,7 +14,7 @@ blessing, (C) the LICENSE choice.
 
 ---
 
-## A. The five spec-vs-reality deltas (GT-1 … GT-5)
+## A. The six spec-vs-reality deltas (GT-1 … GT-6)
 
 | GT | The delta | Touches a door? | Blast radius | Recommendation | Your ruling |
 |---|---|---|---|---|---|
