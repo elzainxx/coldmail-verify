@@ -68,6 +68,7 @@ touching a one-way door or elevating/gating a cross-phase decision.
 |---|---|
 | [`phase-2-status.md`](phase-2-status.md) | Live scorecard of the Phase-2 build: the run-first GAP-13 spike, the wrapper endpoints, the SMTP scoring/classification, the three resolved seams, and the 8/8 socket-level proof. |
 | [`phase-2-to-3-handoff.md`](phase-2-to-3-handoff.md) | The Phase-2→Phase-3 handoff: what P2 locked/built, what P3 inherits, the `SEAM → P3` inbox (the `/v1/audit` enforcement gate), and the open LICENSE item. |
+| [`phase-3-readiness-assessment.md`](phase-3-readiness-assessment.md) | The honest P3 readiness assessment: the three P3 gates (host port25∧PTR∧clean-IP = the wall; GAP-13 2×-connection warmup factor; admin-audit-log before go-live), each ready / not-ready / needs-owner-action. |
 | [`adr/ADR-0007-gap13-catchall-session-two-session.md`](adr/ADR-0007-gap13-catchall-session-two-session.md) | The GAP-13 spike ruling: the catch-all probe runs as two sessions (Option B); the gem is never patched (Door 5). |
 | [`../verifier-node/truemail-rack/test/p2/`](../verifier-node/truemail-rack/test/p2/) | The socket-level proof harness (real `smtp_mock`/`dns_mock`, Appendix B matrix) + the throwaway test-image Dockerfile. A test harness, not a deployable. |
 
