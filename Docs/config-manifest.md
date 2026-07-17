@@ -92,6 +92,7 @@ It does not resolve open questions or set UNSET values — those are owner decis
 | **Supabase access model** | feature-flag | service-role only in P1, RLS deferred (OQ-20) | — | data-integrity | P1 §4, OQ-20 |
 | **`/verify` echo raw vs normalized email** | feature-flag | echo raw (OQ-4) | — | per-request (UX) | P1 §3.3.7, OQ-4 |
 | **`provider_canonical_hash` populate** | feature-flag | define + populate from row #1 (OQ-2) | — | data-integrity | P1 §3.3.5, OQ-2 |
+| **`TM_DATABASE_URL`** (Postgres/Supabase DSN) | feature-flag | empty ⇒ `/v1/verify` not-ready (503); health still served | missing ⇒ no verify; wrong ⇒ no state | brain-wide | P1 §5.6 |
 
 ---
 

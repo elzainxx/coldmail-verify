@@ -1,6 +1,8 @@
 # Phase 1 — status: foundations build (live scorecard)
 
 **Date:** 2026-07-17 · **Phase:** 1 (Foundations) · **Spec:** [`phase-1-foundations-spec.md`](phase-1-foundations-spec.md)
+**Status: ✅ COMPLETE** — all 7 increments done; the done-when is demonstrated against real
+Postgres + real DNS (see increment 6). Pending owner review of the phase.
 **What Phase 1 is:** make the five doors *real* (Phase 0 encoded their shapes), stand up the Supabase
 data model, build the control-plane skeleton + cheap layers + one policy — so you can **POST an address
 and get a scored, logged verdict using cheap layers only, no port 25 anywhere.**
@@ -21,7 +23,7 @@ verifier-node ran for real, ground-truth fully real, and the Phase-0 sign-off is
 | 4 | **Cheap layers** — 9 brain-native layers (syntax, typo, role, free/corp, MX/DNS, null-MX, disposable, spam-trap, provider-classify) | ✅ **done** | `internal/layers/{layers,resolver,cheap_layers,dns_layers}.go`. Each emits a `LayerOutput`, none gates alone. DNS layers share ONE memoized lookup via injectable `Resolver`; **harden-toward-unknown proven** (transient DNS → Unknown, only NXDOMAIN → Fail). OQ-7 disposable = Flag (never invalid). Full fixture-resolver tests, no network. |
 | 5 | **Policy engine + `cold-email`** — table-driven, action grammar, cheapest-sufficient, confidence baseline | ✅ **done** | `internal/policy/{policy,coldemail}.go`. Open-object definition (OQ-25), `status:reason:stop\|continue` grammar, stop-early, baseline-by-reason confidence, thresholds. `repairComposability` makes invalid+send structurally impossible. Tests prove: invalid⇒never-send (Door 1), stop-early skips DNS, disposable⇒risky+skip (OQ-7), transient⇒unknown, provider⇒risky, clean⇒plausible-not-valid. **Dial note** below. |
 | 6 | **Orchestrator + real `/v1/verify` + LOG** — the full request lifecycle; every result logged | ✅ **done** | `internal/orchestrator` + `internal/verdict/assemble.go` (single-source response+LOG) + api wired. **Proven against real PG+DNS**: 4 POSTs → gmail `risky/provider_no_smtp`, mailinator `risky/disposable+skip`, garbage `invalid/invalid_syntax` (NULL hash), NXDOMAIN `invalid/no_mx` — all logged (Door 2), cache re-logs `from_cache=true`, reject not cached. A real UUID bug (req-prefixed request_id rejected by PG) was caught here and regression-pinned. |
-| 7 | **Config flags, docs, CI, final review** — every P1 manifest flag wired; PG in CI; final gate | ⬜ pending | — |
+| 7 | **Config flags, docs, CI, final review** — every P1 manifest flag wired; PG in CI; final gate | ✅ **done** | `TM_DATABASE_URL` + `TM_CACHE_TTL_SECONDS` wired + in manifest/example-env; config-reference regenerated + fresh; CI runs a real Postgres service + applies migrations so the Door-2 append-only + store tests RUN on every push (not skip); final code-reviewer pass over the whole phase. |
 
 ---
 

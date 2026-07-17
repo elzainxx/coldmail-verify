@@ -14,10 +14,10 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | bucket | count |
 |---|---|
 | secrets | 8 |
-| feature-flags | 137 |
+| feature-flags | 138 |
 | dials | 79 |
 | other/uncategorized | 2 |
-| **total knobs** | **226** |
+| **total knobs** | **227** |
 
 > One-way doors are **not** dials: the frozen contracts (response shape, LOG, hashing,
 > vocabulary, never-fork) live in code (`control-plane/internal/{vocab,hash,verdict,store,router}`),
@@ -37,7 +37,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | vendor API key (P6) | no rotation story; leak = budget-DoS + billed enumeration oracle (security F-6) | no rotation story; leak = budget-DoS + billed enumeration oracle (security F-6) |
 | front-door bearer token | no per-caller scoping/rotation brain-side; guards bulk-PII endpoint by P5 (security F-20) | no per-caller scoping/rotation brain-side; guards bulk-PII endpoint by P5 (security F-20) |
 
-## Feature-flags (137)
+## Feature-flags (138)
 
 | knob | default / state | source |
 |---|---|---|
@@ -68,6 +68,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | Supabase access model | service-role only in P1, RLS deferred (OQ-20) | P1 §4, OQ-20 |
 | `/verify` echo raw vs normalized email | echo raw (OQ-4) | P1 §3.3.7, OQ-4 |
 | `provider_canonical_hash` populate | define + populate from row #1 (OQ-2) | P1 §3.3.5, OQ-2 |
+| `TM_DATABASE_URL` (Postgres/Supabase DSN) | empty ⇒ `/v1/verify` not-ready (503); health still served | P1 §5.6 |
 | `smtp_safe_check` (engine) | OFF (OQ-P2-7) | P2 §6.8, OQ-P2-7, App A.1 |
 | `smtp_fail_fast` (engine) | false (gem default) | P2 §6.7, App A.1 |
 | `smtp_port` (engine) | 25 (mock port in P2) | P2 §6.7, App A.1 |
