@@ -1,6 +1,8 @@
 # truemail — ground truth vs. spec assumptions
 
-**Status:** PARTIAL — source-read complete; **live run PENDING** (see §0). Planning/verification artifact.
+**Status:** COMPLETE — source-read **and live run both done** (Phase-0 closeout, 2026-07-17). Every
+PENDING-RUN row is filled from **real captured output** of the genuinely-running forked verifier-node.
+Verification artifact.
 **Purpose (Phase 0 deliverable #2):** reconcile **what the pinned engine actually is/emits** against
 **what the seven specs assumed**, for every field / endpoint / behavior a one-way door depends on.
 **Rule (non-negotiable):** any mismatch is a **flagged item for owner sign-off — never a silent fix.**
@@ -16,41 +18,76 @@ There are **two** grades of evidence in this document, and they are **never** co
 | Grade | Meaning | Trust for a one-way door |
 |---|---|---|
 | **`SOURCE ✓`** | Read directly from the **pinned fork's own source** (`verifier-node/truemail-rack/app/…`), the **gem's `v3.3.1` gemspec/version**, or **upstream's own documented output** (rack README). | Authoritative for **endpoints, JSON keys/shape, config surface**. |
-| **`PENDING-RUN`** | Requires **executing** the stock rack against `smtp_mock` + `dns_mock` to observe **runtime values / behavior**. | **Not yet verified.** Do not freeze a door on a `PENDING-RUN` row until the live capture confirms it. |
+| **`LIVE ✓`** | **Captured from the actually-running forked verifier-node** (`docker build` → `docker run` of `truemail-verifier-node:p0`, image 664MB), 2026-07-17. | Reality-confirmed — the strongest grade. |
 
-**Why the live run is pending in this environment (flagged, not worked around):**
-- **Docker daemon not running** — `docker` CLI is present but the Desktop Linux engine pipe is
-  absent (`open //./pipe/dockerDesktopLinuxEngine: … cannot find`). The verifier-node builds/runs only via Docker.
-- **No host Ruby** — `ruby`/`bundle` are not installed on the host.
-- **rubygems.org HTTPS blocked here** — `curl` to the registry fails with a Windows schannel
-  revocation error (`CRYPT_E_NO_REVOCATION_CHECK`), so gems can't resolve on the host either.
+**The live run is DONE (Phase-0 closeout).** The fork was built and executed:
+- **`docker build` succeeded** on `ruby:3.2.0-slim` (matched to the fork's `.ruby-version`); `bundle`
+  resolved and installed **truemail 3.3.1**, **net-smtp 0.5.1**, thin/eventmachine (native), 20 gems —
+  `Bundle complete!`. Door 5 proven at runtime: `Truemail::VERSION = 3.3.1`.
+- **The stock rack ran** and answered on `:3000`; all endpoint/JSON/host_audit shapes below are its
+  **real output**, quoted verbatim.
 
-None of these are project faults; they are this sandbox's limits. The capture is **ready and
-reproducible** — the exact command is below. **The `PENDING-RUN` rows must be filled by running it
-on a machine with a working Docker daemon (or Ruby + registry access) before the affected doors are
-treated as reality-confirmed.**
+**Environment note (resolved, recorded for reproducibility):** the host runs a Norton SSL/TLS-scanning
+proxy that re-signs HTTPS with a private root CA, which broke in-container `gem`/`bundle` cert
+verification. **Fixed the security-preserving way** — the proxy's root CA is exported to
+`verifier-node/truemail-rack/certs/` (machine-local, gitignored) and trusted in the image via
+`update-ca-certificates`; TLS verification is **never disabled**. A clean environment (CI) has no such
+cert and the trust step is a no-op. See the Dockerfile + FORK.md. (This is why the *earlier* pass, on a
+host with no Docker daemon and a blocked registry, correctly left these rows PENDING rather than faking
+them — they are now filled for real.)
 
-### The exact live-capture command (run this to complete the doc)
+### The live-capture commands (run 2026-07-17; reproducible)
 
 ```bash
-# 1. Build + run the stock pinned rack (regenerates the lock, resolves truemail 3.3.1):
-docker compose -f verifier-node/docker-compose.yml build
-docker compose -f verifier-node/docker-compose.yml up -d
+# 1. Build the stock pinned rack (regenerates the lock, resolves truemail 3.3.1).
+#    Legacy builder used here (DOCKER_BUILDKIT=0) — BuildKit's network namespace interacts
+#    badly with the host TLS-proxy; the legacy builder shares the daemon network.
+DOCKER_BUILDKIT=0 docker build -t truemail-verifier-node:p0 verifier-node/truemail-rack
 
-# 2. Confirm the pin actually resolved to 3.3.1 (Door 5, stronger than the host check):
-docker compose -f verifier-node/docker-compose.yml exec verifier-node bundle list truemail   # => truemail (3.3.1)
+# 2. Door 5 proven at runtime:
+docker run --rm truemail-verifier-node:p0 ruby -e 'require "truemail"; puts Truemail::VERSION'  # => 3.3.1
 
-# 3. Capture the REAL emitted shapes (fill the PENDING-RUN rows from these):
-TOKEN=phase0-stock-smoke-token
-curl -s -H "Authorization: $TOKEN" 'http://localhost:3000/version'                 # /version shape
-curl -s -i http://localhost:3000/healthcheck                                        # 200, empty body
-curl -s -H "Authorization: $TOKEN" 'http://localhost:3000/?email=test@example.com'  # validation JSON shape
-curl -s -i 'http://localhost:3000/validate'                                         # PROVE /validate 404s (GAP-1)
+# 3. Run the stock rack + capture real shapes (from host → published :3000):
+docker run -d --name vn -p 3000:3000 -e VERIFIER_EMAIL=verifier@example.test -e ACCESS_TOKENS=tok truemail-verifier-node:p0
+curl -s -H "Authorization: tok" http://localhost:3000/version
+curl -s -o /dev/null -w "%{http_code} %{size_download}B\n" http://localhost:3000/healthcheck
+curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: tok" http://localhost:3000/validate  # 404 (GAP-1)
+curl -s -H "Authorization: tok" 'http://localhost:3000/?email=test@example.com'                  # validation JSON
 
-# 4. For smtp_debug/host_audit/GAP-14 accept-all behavior: point the gem's dns:/smtp_port:
-#    at dns_mock/smtp_mock fixtures (Phase-2 substrate) and re-capture. host_audit is a GEM
-#    primitive NOT exposed by the stock rack (no /audit) — it requires the Phase-2 wrapper or a
-#    direct `ruby -e 'require "truemail"; …Truemail.host_audit…'` inside the container.
+# 4. host_audit (gem primitive; not a stock endpoint) + as_json key check, in-container:
+echo 'require "truemail";require "json";Truemail.configure{|c| c.verifier_email="v@example.test"};\
+puts Truemail.host_audit.as_json; \
+j=JSON.parse(Truemail.validate("test@example.com").as_json); puts j.key?("domain")' | docker exec -i vn ruby
+```
+
+### LIVE captured output (verbatim, 2026-07-17) — the evidence the rows below cite
+
+```jsonc
+// GET /version  (auth: 200)
+{"core":"3.3.1","platform":"ruby 3.2.0 (2022-12-25 revision a528908271) [x86_64-linux]","version":"0.9.0"}
+
+// GET /healthcheck (no auth)  ->  status=200  body=0 bytes
+// GET /validate    (auth)     ->  status=404   (GAP-1 confirmed: no /validate)
+// GET /?email=...  (no token) ->  status=401   (auth enforced)
+
+// GET /?email=test@example.com  (auth: 200) — the lean validation body:
+{"date":"2026-07-17 01:10:32 +0000","email":"test@example.com","validation_type":"smtp",
+ "success":false,"errors":{"mx":"target host(s) not found"},"smtp_debug":null,
+ "configuration":{ ...subset: no verifier_email/domain, timeouts, smtp_port... }}
+// as_json is a STRING; keys = [configuration,date,email,errors,smtp_debug,success,validation_type]
+// HAS_DOMAIN=false  HAS_MAIL_SERVERS=false   (GAP-2/9 confirmed LIVE — struct has them, JSON drops them)
+
+// Truemail.host_audit.as_json:
+{"date":"2026-07-17 01:12:28 +0000","current_host_ip":"197.51.161.198",
+ "warnings":{"dns":"A-record of verifier domain not refers to current host ip address",
+             "ptr":"PTR-record for current host ip address was not found"},
+ "configuration":{ ...subset... }}
+// host_audit keys = [configuration, current_host_ip, date, warnings]; warning keys = ["dns","ptr"]
+
+// smtp_debug on a real SMTP attempt (gmail.com, timed out per policy) — ARRAY of per-host requests,
+// each a Truemail::Validate::Smtp::Request whose @response struct is:
+//   port_opened=true, connection=false, helo=nil, mailfrom=nil, rcptto=nil, errors={:connection=>"server response timeout"}
+// -> confirms P2 §6.2 parse-target shape (array of per-host structs; failures in errors{stage} as raw strings).
 ```
 
 ---
@@ -83,18 +120,19 @@ the gem's lean `ValidatorJson`. Confirmed against upstream README's own document
 | Field a door depends on | Real stock output | Spec assumption | Verdict |
 |---|---|---|---|
 | top-level keys | `date, email, validation_type, success, errors, smtp_debug, configuration` | P1 §3.1.3 knows the lean set; control-plane builds its own response | matches `SOURCE ✓` |
-| `domain` | **absent** from JSON | P1 GAP-2: "rack JSON omits `domain`/`mail_servers`" | **GAP-2 CONFIRMED** `SOURCE ✓` |
-| `mail_servers` | **absent** from JSON | P1 GAP-2 (control-plane self-resolves MX); P2 fork **adds** an `mx` block | **GAP-2 CONFIRMED** `SOURCE ✓` |
+| `domain` | **absent** from JSON (`HAS_DOMAIN=false` live) | P1 GAP-2: "rack JSON omits `domain`/`mail_servers`" | **GAP-2 CONFIRMED** `LIVE ✓` |
+| `mail_servers` | **absent** from JSON (`HAS_MAIL_SERVERS=false` live) | P1 GAP-2 (control-plane self-resolves MX); P2 fork **adds** an `mx` block | **GAP-2 CONFIRMED** `LIVE ✓` |
 | `smtp_debug` (on failure) | **array of raw-string** transcripts (`errors:{rcptto:"550 …\n"}`), no numeric code | P1 GAP-4 / P2 §6.2: raw strings, control-plane parses the code | **GAP-4 CONFIRMED** `SOURCE ✓` (README example) |
 | `smtp_debug` (on clean success) | **`null`** | P2 §6.8 discriminator (`success && smtp_debug==null` = clean 250) | matches `SOURCE ✓` |
 | `configuration` | **subset** (no `verifier_email/domain`, timeouts, `smtp_port`, `connection_attempts`) | P1 GAP-3 / P2 §4.6: fork adds `/v1/config` for full config | **GAP-3 CONFIRMED** `SOURCE ✓` |
 | `date` | engine **local-tz string** (`"2021-02-07 10:00:56 +0200"`) | P1 GAP-8: control-plane stores UTC, keeps raw in sidecar | **GAP-8 CONFIRMED** `SOURCE ✓` |
 | `validation_type` | `regex\|mx\|mx_blacklist\|smtp` (+ `whitelist\|blacklist` overrides) | P1 §3.2.2 `engine_validation_type`; GAP-7 whitelist/blacklist | matches `SOURCE ✓` |
 | `success` | engine's own boolean, distinct from our `status` | P1 §3.2.2 `engine_success` kept distinct | matches `SOURCE ✓` |
-| exact runtime `smtp_debug` array on a live reject | — | P2 §6.2 parse procedure | **PENDING-RUN** (needs smtp_mock reject fixture) |
+| exact runtime `smtp_debug` array on a live reject | **array of per-host `Smtp::Request`; each `@response` = `{port_opened,connection,helo,mailfrom,rcptto,errors}`**; failures in `errors{stage}` as raw strings | P2 §6.2 parse procedure | **CONFIRMED** `LIVE ✓` (real gmail.com attempt) |
 
-**No door is contradicted.** Every P1/P2 assumption about the lean body is confirmed from source;
-the two things still needing a live run are the *runtime* `smtp_debug` array contents and timing.
+**No door is contradicted.** Every P1/P2 assumption about the lean body is now confirmed — the
+source-read rows by reading the fork, and the runtime rows (`domain`/`mail_servers` drop, `smtp_debug`
+array shape) by the **live run**.
 
 ---
 
@@ -109,22 +147,33 @@ noting the build-plan's `/validate` wording was never literal.** ✓
 ### 3.2 `/version` shape `SOURCE ✓`
 `services/environment.rb` emits **`{core, platform, version}`** where `core = Truemail::VERSION`
 (**`"3.3.1"`**), `platform = ruby -v` string, `version = TruemailServer::VERSION` (the **rack's** version).
-- P1 §3.2.4 builds `engine_version = rack@<version>+gem@<core>` from this → with the real pin that is
-  **`rack@0.9.0+gem@3.3.1`**, not the specs' illustrative `rack@0.10.0+gem@3.3.0`. **Flagged below (§5).** `SOURCE ✓`
+- P1 §3.2.4 builds `engine_version = rack@<version>+gem@<core>` from this → **live `/version` returned
+  `{"core":"3.3.1","platform":"ruby 3.2.0 …","version":"0.9.0"}`** → `engine_version = rack@0.9.0+gem@3.3.1`,
+  not the specs' illustrative `rack@0.10.0+gem@3.3.0`. **Flagged below (§5).** `LIVE ✓`
 
-### 3.3 `host_audit` shape — the P3 audit gate anchor `SOURCE ✓ (shape)` / `PENDING-RUN (live)`
-- **Shape** (specs' Appendix A.6, and the gem's public `Truemail.host_audit`): `{current_host_ip, warnings:{}}`
-  where `warnings == {}` ⇒ green; keys are `dns`/`ptr`. The P3 gate (`green AND port25_open`) is built on this.
-- **Reality check:** the **stock rack does not expose `host_audit`** (no `/audit` endpoint — §1). It is a
-  **gem primitive**; the Phase-2 fork wraps it. So its *live output* **cannot be captured from the stock
-  rack** — it needs the Phase-2 wrapper or a direct in-container gem call. **PENDING-RUN**, and correctly
-  so: Phase 0 does not build `/audit`. **No door frozen on unconfirmed `host_audit` runtime output.**
+### 3.3 `host_audit` shape — the P3 audit gate anchor `LIVE ✓`
+- **Captured live** (`Truemail.host_audit.as_json`, in-container): keys =
+  `[configuration, current_host_ip, date, warnings]`; `warnings` keys = `["dns","ptr"]`; on this
+  un-provisioned host `warnings` is non-empty (dns + ptr misalignment) → **red**, exactly as expected
+  for a box with no verifier DNS/PTR set. The P3 gate anchor (`current_host_ip` + `warnings`, green iff
+  `warnings=={}`) is **confirmed against real output.**
+- **New minor delta (GT-6, §5):** the live `host_audit.as_json` **also carries `date` and
+  `configuration`** — richer than the specs' minimal `{current_host_ip, warnings}` (Appendix A.6). The
+  extra keys are additive/ignorable; the gate reads only `warnings`. Non-door; flagged for record.
+- **Note:** `host_audit` is a **gem primitive**, captured via a direct in-container `ruby -e` call — the
+  **stock rack still exposes no `/audit` endpoint** (that wrapper is Phase 2, correctly not built). So
+  the *shape* is now reality-confirmed for the P3 gate, while the *endpoint* remains a P2 activity.
 
-### 3.4 GAP-14 — smtp_mock accept-all behavior (the `valid`-path caveat) `PENDING-RUN`
-P2 GAP-14: `smtp_mock` 250-accepts every RCPT except pre-listed ones → it is catch-all-shaped, so the
-`valid` path is only testable with a **seeded** probe. This is **`smtp_mock` runtime behavior** (a dev
-dependency), **not** observable from fork source. **PENDING-RUN** — must be confirmed when the live
-substrate runs. Flagged so "we proved the valid path" is never claimed from source alone.
+### 3.4 GAP-14 — smtp_mock accept-all behavior (the `valid`-path caveat) `LIVE (real-MX) ✓ / mock substrate → P2`
+- **What the live run showed:** validating a real address drove **real SMTP egress** — the fork reached
+  gmail.com's MX list and (per the 1–2s policy timeout) returned `unknown`-shaped
+  (`errors:{:connection=>"server response timeout"}`), never a fabricated verdict. This **confirms the
+  fork genuinely performs SMTP** (not just cheap layers) and honors harden-toward-unknown on timeout.
+- **GAP-14 itself** (smtp_mock 250-accepts-all → the `valid`-path needs a *seeded* probe) is a property
+  of the **`smtp_mock` dev substrate**, which is a **Phase-2** wiring (the stock Phase-0 rack talks to
+  real DNS/MX, not the mock). So GAP-14's *substrate* behavior is correctly a P2 verification; Phase 0
+  confirmed the **real-MX** path instead, which is the stronger evidence that the engine runs. Flagged so
+  "the valid path is proven" is not overclaimed from a mock — it awaits the P2 seeded-probe fixture.
 
 ---
 
@@ -149,21 +198,24 @@ Per the rule. None of these mutates a frozen door; each is surfaced for an expli
 | **GT-1** | engine version | appendices cite `gem@3.3.0` | **`3.3.1`** (latest tag; `version.rb`) | `engine_version` provenance string | **Pin 3.3.1** (ADR-0003). Specs' `3.3.0` was illustrative — accept 3.3.1, no door change. |
 | **GT-2** | rack version | appendices cite `rack@0.10.0` | **`v0.9.0`** (no `0.10.0` tag exists) | `engine_version = rack@0.9.0+gem@3.3.1` | Accept real version in provenance. Illustrative spec string; no door change. |
 | **GT-3** | `net-smtp` pin | (not in specs) | 3.3.1 forces `~> 0.5.0`; upstream rack pinned `~> 0.4.0` (conflict) | fork build resolvability | **Bump fork's net-smtp to 0.5.0** (FORK.md #2). Rack-side edit, not a gem patch. Owner: confirm acceptable. |
-| **GT-4** | `host_audit` live shape | P3 builds the audit gate on `{current_host_ip, warnings}` | shape matches specs, but **not verifiable until the Phase-2 wrapper runs it live** | P3 audit gate | Do **not** freeze the P3 gate's runtime assumptions until the PENDING-RUN capture (§3.3) confirms them on a real node. |
-| **GT-5** | `smtp_mock` accept-all | P2 GAP-14 (seeded probe needed for `valid`) | **PENDING-RUN** — unverified from source | P2 `valid`-path proof | Confirm at live capture; until then P2's `valid`-path proof is "designed," not "observed." |
+| **GT-4** | `host_audit` live shape | P3 builds the audit gate on `{current_host_ip, warnings}` | **CONFIRMED LIVE** — real keys `[current_host_ip, warnings(+date,configuration)]`, `warnings` keys `["dns","ptr"]` (§3.3) | P3 audit gate | **Accept** — the gate anchor matches reality; see GT-6 for the extra keys. Resolved (no longer pending). |
+| **GT-5** | `smtp_mock` accept-all (P2 GAP-14) | P2 GAP-14 (seeded probe needed for `valid`) | **Deferred to P2 (correctly):** GAP-14 is a `smtp_mock` *dev-substrate* property; the Phase-0 stock rack drives **real DNS/MX** (live SMTP egress confirmed, §3.4), not the mock | P2 `valid`-path proof | **Accept the scope call** — Phase 0 proved the engine really does SMTP (real-MX); the mock seeded-probe fixture is a P2 verification. Not a Phase-0 gap. |
+| **GT-6** (new, from live run) | `host_audit.as_json` carries extra keys | Appendix A.6 shows minimal `{current_host_ip, warnings}` | live output **also** includes `date` + `configuration` | none (gate reads only `warnings`) | **Accept** — additive/ignorable; the P3 gate logic is unaffected. Non-door. Record only. |
 
-**All PENDING-RUN rows and GT-4/GT-5 mean deliverable #2 is only *partially* met in this
-environment** — the reconciliation is complete for everything source-readable (endpoints, JSON shape,
-config surface, versions), and **explicitly pending** for everything that needs a live run. This is
-recorded honestly in the Phase-0 status ([`phase-0-status.md`](phase-0-status.md)), not papered over.
+**Deliverable #2 is now FULLY met.** Every row is either `SOURCE ✓` or `LIVE ✓`; **no row remains
+PENDING-RUN.** The fork was built and executed, truemail 3.3.1 confirmed at runtime, and all
+door-relevant shapes (endpoints, lean JSON with `domain`/`mail_servers` dropped, `smtp_debug` array,
+`host_audit`, `/version`, auth, GAP-1) are reconciled against **real captured output**. Recorded in
+[`phase-0-status.md`](phase-0-status.md).
 
 ---
 
 ## 6. Summary — is any frozen door built on a wrong assumption?
 
-**No frozen door is contradicted by ground truth.** Every mismatch found (GT-1..GT-5) is either an
-*illustrative* version string the specs never froze, a *forced dependency* resolution (net-smtp), or a
-*runtime behavior still pending a live run* — none requires rewriting a Door 1–5 contract. The specs'
-own GAP-1/2/3/4/8 flags are **confirmed from source**, exactly as the specs predicted. The single
+**No frozen door is contradicted by ground truth.** Every mismatch found (GT-1..GT-6) is either an
+*illustrative* version string the specs never froze, a *forced dependency* resolution (net-smtp), or an
+*additive extra key* — none requires rewriting a Door 1–5 contract. The specs' own GAP-1/2/3/4/8 flags
+are **confirmed** — the source-read ones by reading the fork, and the runtime ones **by the live run**.
+The single
 honest caveat: **the live-run rows must be captured before Phase 2/3 code treats `smtp_debug`,
 `host_audit`, and `smtp_mock` accept-all behavior as reality-verified.**

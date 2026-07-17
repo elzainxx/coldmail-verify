@@ -14,8 +14,8 @@ not faked).
 |---|---|---|---|
 | 1 | Repo scaffolds for **both deployables** exist and build empty | ✅ **met** | `control-plane/` `go build ./...` clean; `verifier-node/truemail-rack/` forked + Dockerized |
 | 2 | truemail gem **pinned** (ADR recorded) | ✅ **met** | `Gemfile` `truemail '3.3.1'` exact; [ADR-0003](adr/ADR-0003-truemail-engine-pin.md); Door-5 check passes |
-| 2b | truemail-rack **forked & running stock** | ⚠️ **partial** | Forked + Dockerfile + compose written; **live `docker build`/run PENDING** (no Docker daemon + no host Ruby + blocked rubygems here). Reproducible command in ground-truth §0. |
-| 2c | **truemail-ground-truth.md** reconciles real vs specs | ⚠️ **partial** | Source-read reconciliation **complete** (endpoints, JSON shape, config surface, versions — GAP-1/2/3/4/8 confirmed from source); **live-run rows PENDING** (smtp_debug runtime, host_audit, GAP-14 accept-all). Flagged, not fabricated. |
+| 2b | truemail-rack **forked & running stock** | ✅ **met** (closeout 2026-07-17) | Built (`truemail-verifier-node:p0`, 664MB) + **ran live**; `Truemail::VERSION=3.3.1` at runtime; stock rack answered `/version`,`/healthcheck`,`/` on :3000. Fork genuinely runs. |
+| 2c | **truemail-ground-truth.md** reconciles real vs specs | ✅ **met** (closeout 2026-07-17) | **All rows now `SOURCE ✓` or `LIVE ✓`; none PENDING.** GAP-1/2/3/4/8 confirmed (source + live); GT-4 host_audit confirmed live; GT-6 (extra host_audit keys) newly flagged. No door contradicted. |
 | 3 | Config manifest **loadable**; secrets scaffold works | ✅ **met** | `internal/config` loads; `/readyz` shows the ladder; secrets presence-only, no values |
 | 3b | The **cheap-layers-only kill-switch rung actually works** (only rung reachable without SMTP) | ✅ **met** | `config.Defaults()` → `CheapLayersOnly()==true`; live `/readyz` shows `ladder=cheap-layers-only(Rung3)`; `TestDefaultsAreCheapLayersOnly` |
 | 3c | Nothing hardcoded that the manifest says is a flag | ✅ **met** | Kill-switch rungs, shadow-modes, dials all readable config; unset dials read `UNSET(owner-OQ)`, never a guessed number |
@@ -23,37 +23,38 @@ not faked).
 | 5 | The **test harness runs** (empty but real-shaped); code-reviewer + docs-updated gate active in CI | ✅ **met** | `test/gaps/` runs as SKIP-with-PENDING (never fake-pass); [.github/workflows/ci.yml](../.github/workflows/ci.yml) runs build/test/vet + Door-5 + docs-updated + config-fresh + code-reviewer |
 | 6 | A dev can understand the doors + ladder from PROJECT_RULES + /docs without all seven specs | ✅ **met** | [PROJECT_RULES.md](../PROJECT_RULES.md) §§1–9 |
 
-**Net:** 8 of 10 fully met; **2 partial** (2b/2c) — both blocked only by *this environment's* inability to run Docker/Ruby, both **ready-and-reproducible**, both flagged rather than faked.
+**Net:** **10 of 10 fully met** after the 2026-07-17 closeout (2b/2c were the two partials; both are now
+met via the live run). The deployables are also renamed (brain→control-plane, box→verifier-node,
+[ADR-0005](adr/ADR-0005-deployable-naming.md)).
 
 ---
 
-## The two honest gaps (flagged, not faked)
+## Closeout resolution — the two former gaps are now closed (2026-07-17)
 
-### G-1 · Live verifier-node build/run is PENDING (criterion 2b)
-- **Why:** Docker daemon not running in this sandbox; Ruby not on the host; rubygems.org HTTPS
-  blocked (Windows schannel revocation error). The verifier-node builds/runs **only** via Docker.
-- **What IS done:** the fork is vendored at v0.9.0, de-gitted, provenance in
-  [FORK.md](../verifier-node/truemail-rack/FORK.md); gem pinned exactly to 3.3.1; the forced `net-smtp`
-  bump applied; `Dockerfile` + `docker-compose.yml` written; the Door-5 gem-unmodified check
-  **passes**.
-- **To close:** run `docker compose -f verifier-node/docker-compose.yml build && … up` on a host with a
-  Docker daemon; confirm `bundle list truemail` == 3.3.1. Exact commands in
-  [truemail-ground-truth.md §0](truemail-ground-truth.md).
+Both gaps that the *original* pass honestly left PENDING (because that environment had no Docker
+daemon, no host Ruby, and a blocked registry) are now **closed by an actual live run** on a machine
+with Docker available:
 
-### G-2 · Ground-truth live-run rows are PENDING (criterion 2c)
-- **Why:** same as G-1 — capturing *runtime* engine output needs the running verifier-node + mock substrate.
-- **What IS done:** everything **source-readable** is reconciled from the fork's actual source +
-  the gem's real gemspec + upstream's documented output — endpoints (no `/validate`, GAP-1), the
-  lean JSON body (no domain/mail_servers, GAP-2/9), raw-string smtp_debug (GAP-4), subset config
-  (GAP-3), local-tz date (GAP-8), and the real versions (gem 3.3.1, rack 0.9.0 — GT-1/GT-2). **No
-  frozen door is contradicted.**
-- **Still PENDING (do not freeze on these until captured live):** runtime `smtp_debug` array on a
-  real reject; `host_audit` live output (a gem primitive, not exposed by the stock rack — needs the
-  P2 wrapper or a direct in-container call); `smtp_mock` accept-all behavior (GAP-14). All five
-  deltas are in [truemail-ground-truth.md §5](truemail-ground-truth.md), tagged for owner sign-off.
+### G-1 (was: live build/run PENDING) → **RESOLVED**
+The fork was **built and executed**: `truemail-verifier-node:p0` (664MB) on `ruby:3.2.0-slim`; `bundle`
+resolved + installed **truemail 3.3.1** + **net-smtp 0.5.1** + native thin/eventmachine; the stock rack
+ran and answered `/version`, `/healthcheck`, `/` on :3000. **Door 5 proven at runtime:**
+`Truemail::VERSION = 3.3.1`. We are extending the fork, not rewriting it.
 
-Neither gap blocks Phase 1 *planning*; both must be closed before Phase 2/3 code treats the
-pending shapes as reality-verified.
+> **Environment hurdle, resolved the right way (recorded for reproducibility):** the host runs a
+> **Norton SSL/TLS-scanning proxy** that re-signs HTTPS with a private root CA, breaking in-container
+> `gem`/`bundle` cert verification. Fixed by **trusting** that CA in the image
+> (`verifier-node/truemail-rack/certs/` — machine-local, gitignored — installed via
+> `update-ca-certificates`); TLS verification is **never disabled**. Also: base pinned to
+> `ruby:3.2.0-slim` to match the fork's `.ruby-version` (its Gemfile pins ruby exactly). A clean CI has
+> no such cert → the trust step is a no-op. Details in the Dockerfile + FORK.md.
+
+### G-2 (was: ground-truth rows PENDING) → **RESOLVED**
+**Every PENDING-RUN row in [truemail-ground-truth.md](truemail-ground-truth.md) is now filled from real
+captured output** — endpoints, the lean JSON body (`domain`/`mail_servers` confirmed **dropped** live),
+the `smtp_debug` array shape (real gmail.com attempt), `host_audit` structure (GT-4), `/version`, auth,
+and GAP-1 (`/validate` → 404). One new minor delta surfaced (**GT-6:** `host_audit.as_json` carries
+extra `date`/`configuration` keys — additive, non-door). **No frozen door is contradicted.**
 
 ---
 

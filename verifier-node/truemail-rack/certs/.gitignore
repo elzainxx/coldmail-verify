@@ -1,0 +1,5 @@
+# Machine-specific TLS-proxy CAs live here for the Docker build to trust (see Dockerfile).
+# They are environment-local (e.g. a Norton/corporate SSL-interception root) and must NOT
+# be committed. The directory itself is kept via .keep so the Dockerfile COPY always works.
+*.crt
+!.keep
