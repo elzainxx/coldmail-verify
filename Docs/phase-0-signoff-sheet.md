@@ -1,11 +1,10 @@
 # Phase 0 — owner sign-off sheet
 
-**Status:** AWAITING OWNER SIGN-OFF. Nothing here is resolved by the build; each item is a
-decision **only the owner makes.** Each carries a recommendation but **none is pre-decided.**
-**How to use:** check the box (or write your ruling) next to each item. Items are grouped:
-(A) spec-vs-reality deltas GT-1…GT-5, (B) the Door-3 hashing-touching fix that needs conscious
-blessing, (C) the LICENSE choice.
-**Sources:** [`truemail-ground-truth.md`](truemail-ground-truth.md) · [`phase-0-status.md`](phase-0-status.md) · [ADR-0003](adr/ADR-0003-truemail-engine-pin.md) · [ADR-0005](adr/ADR-0005-deployable-naming.md)
+**Status:** ✅ RESOLVED (owner ruling 2026-07-17 — "accept all + record"; LICENSE deferred). The
+rulings are recorded in [`DECISIONS.md`](DECISIONS.md) §6.1; the boxes below are checked to match.
+Each item was a decision **only the owner makes**; the recommendations were **not** pre-decided —
+they were accepted on 2026-07-17.
+**Sources:** [`truemail-ground-truth.md`](truemail-ground-truth.md) · [`phase-0-status.md`](phase-0-status.md) · [`DECISIONS.md`](DECISIONS.md) §6.1 · [ADR-0003](adr/ADR-0003-truemail-engine-pin.md) · [ADR-0005](adr/ADR-0005-deployable-naming.md) · [ADR-0006](adr/ADR-0006-door3-nonascii-localpart-refusal.md)
 
 > **Discipline:** none of these mutate a frozen door. GT-3 and the Door-3 fix are the two that
 > *touch* hashing/dependency territory and are flagged loudest. The parked sub-decisions in
@@ -18,12 +17,12 @@ blessing, (C) the LICENSE choice.
 
 | GT | The delta | Touches a door? | Blast radius | Recommendation | Your ruling |
 |---|---|---|---|---|---|
-| **GT-1** | Engine version: specs' appendices cite `gem@3.3.0`; the real current release is **`3.3.1`**. | **No** — `3.3.0` was an *illustrative* README-capture string, never frozen. `engine_version` provenance is a LOG field, not a door value. | Provenance string only (`engine_version = rack@…+gem@3.3.1`). | **Accept 3.3.1** (pinned, ADR-0003). It's the current release; the spec string was illustrative. | ☐ accept ☐ other: ______ |
-| **GT-2** | Rack version: specs cite `rack@0.10.0`; the real latest release tag is **`v0.9.0`** (no `0.10.0` tag exists). | **No** — same: illustrative spec string. | Provenance string only. | **Accept v0.9.0** as the fork base (FORK.md). Revisit if upstream cuts a newer tag. | ☐ accept ☐ other: ______ |
-| **GT-3** | `net-smtp`: pinning gem `3.3.1` **forces** the fork's `net-smtp` from `~> 0.4.0` → **`~> 0.5.0`** (3.3.1 requires 0.5.0 on Ruby ≥3.1; upstream's 0.4.0 is a disjoint range = hard resolver conflict). | **Touches Door 5 territory** — but as a **rack-side (fork) dependency edit**, NOT a gem patch. The engine gem is byte-for-byte unmodified. | Fork build resolvability only. `net-smtp` is pure-Ruby; scoring-neutral. | **Accept the bump** — it's forced by the exact pin you asked for, is on the fork (which we *do* edit), and touches no gem code. Recorded in FORK.md #2 + ADR-0003. | ☐ accept ☐ other: ______ |
-| **GT-4** | `host_audit` live output shape. | **No** (informs the P3 audit gate; the gate itself is frozen design). | P3 audit gate design assumption. | **CONFIRMED LIVE** — keys `[current_host_ip, warnings, date, configuration]`, warning keys `["dns","ptr"]`. Gate anchor matches reality. **Accept.** | ☐ accept ☐ other: ______ |
-| **GT-5** | `smtp_mock` accept-all (P2 GAP-14 — `valid`-path needs a seeded probe). | **No** (a Phase-2 dev-substrate property; the `valid`-path invariant is frozen). | P2 test-substrate realism. | **Scope call:** GAP-14 is `smtp_mock` (P2); Phase-0 stock rack drove **real DNS/MX** (live SMTP egress confirmed), not the mock. **Accept** — engine-does-SMTP proven; mock fixture is a P2 verification. | ☐ accept ☐ other: ______ |
-| **GT-6** | `host_audit.as_json` carries **extra** keys (`date`, `configuration`) beyond the specs' minimal `{current_host_ip, warnings}`. | **No** — additive; the P3 gate reads only `warnings`. | none. | **Accept** — additive/ignorable, gate logic unaffected. Record only. | ☐ accept ☐ other: ______ |
+| **GT-1** | Engine version: specs' appendices cite `gem@3.3.0`; the real current release is **`3.3.1`**. | **No** — `3.3.0` was an *illustrative* README-capture string, never frozen. `engine_version` provenance is a LOG field, not a door value. | Provenance string only (`engine_version = rack@…+gem@3.3.1`). | **Accept 3.3.1** (pinned, ADR-0003). It's the current release; the spec string was illustrative. | ☑ **accepted 2026-07-17** |
+| **GT-2** | Rack version: specs cite `rack@0.10.0`; the real latest release tag is **`v0.9.0`** (no `0.10.0` tag exists). | **No** — same: illustrative spec string. | Provenance string only. | **Accept v0.9.0** as the fork base (FORK.md). Revisit if upstream cuts a newer tag. | ☑ **accepted 2026-07-17** |
+| **GT-3** | `net-smtp`: pinning gem `3.3.1` **forces** the fork's `net-smtp` from `~> 0.4.0` → **`~> 0.5.0`** (3.3.1 requires 0.5.0 on Ruby ≥3.1; upstream's 0.4.0 is a disjoint range = hard resolver conflict). | **Touches Door 5 territory** — but as a **rack-side (fork) dependency edit**, NOT a gem patch. The engine gem is byte-for-byte unmodified. | Fork build resolvability only. `net-smtp` is pure-Ruby; scoring-neutral. | **Accept the bump** — it's forced by the exact pin you asked for, is on the fork (which we *do* edit), and touches no gem code. Recorded in FORK.md #2 + ADR-0003. | ☑ **accepted 2026-07-17** |
+| **GT-4** | `host_audit` live output shape. | **No** (informs the P3 audit gate; the gate itself is frozen design). | P3 audit gate design assumption. | **CONFIRMED LIVE** — keys `[current_host_ip, warnings, date, configuration]`, warning keys `["dns","ptr"]`. Gate anchor matches reality. **Accept.** | ☑ **accepted 2026-07-17** |
+| **GT-5** | `smtp_mock` accept-all (P2 GAP-14 — `valid`-path needs a seeded probe). | **No** (a Phase-2 dev-substrate property; the `valid`-path invariant is frozen). | P2 test-substrate realism. | **Scope call:** GAP-14 is `smtp_mock` (P2); Phase-0 stock rack drove **real DNS/MX** (live SMTP egress confirmed), not the mock. **Accept** — engine-does-SMTP proven; mock fixture is a P2 verification. | ☑ **accepted 2026-07-17** |
+| **GT-6** | `host_audit.as_json` carries **extra** keys (`date`, `configuration`) beyond the specs' minimal `{current_host_ip, warnings}`. | **No** — additive; the P3 gate reads only `warnings`. | none. | **Accept** — additive/ignorable, gate logic unaffected. Record only. | ☑ **accepted 2026-07-17** |
 
 ### A.1 GT-4 / GT-5 / GT-6 — completed from the live run (2026-07-17)
 
@@ -71,7 +70,7 @@ path), never mis-hashed.
 
 **Recommendation:** **bless the fix as-is.** It's the safe direction (refuse > mis-hash), it's
 locked with a test, and it changes no frozen scheme — it defers the non-ASCII path to P1 where NFC
-lands. **Your ruling:** ☐ bless ☐ other: ______
+lands. **Your ruling:** ☑ **blessed 2026-07-17** — recorded in [ADR-0006](adr/ADR-0006-door3-nonascii-localpart-refusal.md) + [`DECISIONS.md`](DECISIONS.md) §6.1.
 
 ---
 
@@ -85,15 +84,16 @@ asserted** — that is an owner/business decision, not something Phase 0 should 
 - **Recommendation:** **pick one before any external distribution.** If this stays proprietary,
   add a `LICENSE` stating "All rights reserved" / proprietary terms. If it's ever opened, MIT/Apache-2.0
   are compatible with the MIT third-party components. No recommendation on *which* — that's your call.
-- **Your ruling:** ☐ proprietary / all-rights-reserved ☐ MIT ☐ Apache-2.0 ☐ other: ______ ☐ defer (stays unlicensed for now)
+- **Your ruling:** ☑ **defer (stays unlicensed for now)** — ruled 2026-07-17. Does not block local Phase 1 (no external distribution this phase). Revisit before any external distribution.
 
 ---
 
 ## Sign-off
 
-By checking the boxes above you accept the deltas/fix/license as ruled. Anything you mark "other"
-or leave unchecked stays open and blocks nothing except its own dependent work. **None of these
-gates Phase 0 completion except your awareness of them** — Phase 0 is done when this sheet is in
-front of you, not when you've signed it.
+By checking the boxes above you accept the deltas/fix/license as ruled. **Ruled 2026-07-17:**
+GT-1…GT-6 **accepted**, the Door-3 local-part fix **blessed** (ADR-0006), LICENSE **deferred**.
+All rulings recorded in [`DECISIONS.md`](DECISIONS.md) §6.1. This satisfies the Phase-1 prerequisite
+that the sign-off be resolved in DECISIONS.md; the only item left open is LICENSE (deferred by
+choice — blocks nothing until external distribution).
 
-**Owner:** __________________  **Date:** __________
+**Owner:** _(owner, via "accept all + record")_  **Date:** 2026-07-17

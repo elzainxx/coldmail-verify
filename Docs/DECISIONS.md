@@ -143,6 +143,30 @@ The four remaining P1-named OQs the specs still hold as *decided-with-standing-c
 custody, OQ-7 disposable-risky, OQ-3 local-part case, OQ-23 single-default) are recorded in P1 Appendix
 C and restated as rules in [`../PROJECT_RULES.md`](../PROJECT_RULES.md); they are not re-opened.
 
+### 6.1 Phase-0 sign-off resolutions (owner ruling 2026-07-17)
+
+The Phase-0 closeout produced [`phase-0-signoff-sheet.md`](phase-0-signoff-sheet.md) — the six
+spec-vs-reality deltas (GT-1…GT-6), the Door-3 local-part fix, and the LICENSE. On **2026-07-17**
+the owner ruled **"accept all + record"** on the deltas and the fix, and **deferred** LICENSE.
+Recorded here so the Phase-1 prerequisite ("sign-off resolved in DECISIONS.md") is satisfied; the
+sheet's boxes are checked to match. **Two of these touch door territory** and are flagged loudest.
+
+| Item | Touches a door? | Ruling (2026-07-17) | Recorded in |
+|---|---|---|---|
+| **GT-1** engine `3.3.0`→`3.3.1` | No (illustrative spec string; provenance only) | **ACCEPTED** — pin 3.3.1 | [ADR-0003](adr/ADR-0003-truemail-engine-pin.md) |
+| **GT-2** rack `0.10.0`→`0.9.0` | No (no `0.10.0` tag exists; provenance only) | **ACCEPTED** — fork base `v0.9.0` | [FORK.md](../verifier-node/truemail-rack/FORK.md) |
+| **GT-3** `net-smtp` `~>0.4.0`→`~>0.5.0` | **Door 5 territory** — fork-side dep edit, gem byte-for-byte unmodified | **ACCEPTED** — forced by the exact pin; rack-side edit, not a gem patch | [ADR-0003](adr/ADR-0003-truemail-engine-pin.md) §"One forced consequence"; FORK.md #2 |
+| **GT-4** `host_audit` live shape | No (informs P3 gate; gate design frozen) | **ACCEPTED** — gate anchor (`current_host_ip`+`warnings`) confirmed live | [truemail-ground-truth.md](truemail-ground-truth.md) §3.3 |
+| **GT-5** `smtp_mock` accept-all (P2 GAP-14) | No (P2 dev-substrate property) | **ACCEPTED** — scope call: real-MX path proven at P0; seeded-probe fixture is a P2 verification | truemail-ground-truth.md §3.4 |
+| **GT-6** `host_audit` extra `date`/`configuration` keys | No (additive; gate reads only `warnings`) | **ACCEPTED** — additive/ignorable, record only | truemail-ground-truth.md §3.3 |
+| **Door-3 fix** — refuse non-ASCII local part until NFC (P1) | **Door 3** — a *tightening* that affirms the frozen scheme (refuse > mis-hash) | **BLESSED** — safe direction, locked by `TestNonASCIILocalPartRefused`, no scheme change; P1 wires NFC/IDNA and may relax both guards *together* | **[ADR-0006](adr/ADR-0006-door3-nonascii-localpart-refusal.md)** |
+| **LICENSE** (project's own) | No (legal/distribution posture; no code impact) | **DEFERRED** — stays unasserted; third-party MIT respected in [NOTICE](../NOTICE). Pick one before any external distribution. Does not block local Phase 1. | [phase-0-signoff-sheet.md](phase-0-signoff-sheet.md) §C |
+
+**Door standing after these rulings:** unchanged. GT-3 is a fork-side dependency resolution (the gem
+is unmodified — Door 5 intact); the Door-3 blessing is a refuse-not-mint tightening that leaves the
+frozen `norm/v1+hmac-sha256/v1` scheme verbatim (Door 3 intact). No frozen door is reopened. The **§5
+parked sub-decisions remain parked** — this ruling touches none of them.
+
 ---
 
 *This log records acceptances, routes, and (Phase 0) an owner-OQ pointer register; it builds nothing

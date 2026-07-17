@@ -22,6 +22,7 @@ silently rewrite (mirror Door 2).
 | [ADR-0003](ADR-0003-truemail-engine-pin.md) | truemail engine pinned exactly at 3.3.1, never forked | **Door 5** (never-fork) | **No** — enforces Door 5 | ACCEPTED |
 | [ADR-0004](ADR-0004-cheap-layers-brain-native.md) | Cheap layers run control-plane-native; the control-plane takes no truemail dependency (filename keeps "brain-native" — ADRs are immutable records) | Door 5 (engine boundary) | **No** — draws the boundary, doesn't fork | ACCEPTED |
 | [ADR-0005](ADR-0005-deployable-naming.md) | Deployables named: "brain"→`control-plane`, "box"→`verifier-node` | naming (durable) | **No** — a total rename, no contract changed | ACCEPTED |
+| [ADR-0006](ADR-0006-door3-nonascii-localpart-refusal.md) | Non-ASCII local parts refused until NFC/IDNA is wired (P1) | **Door 3** (hashing) | **No** — a tightening that affirms Door 3; refuses, never mis-hashes | ACCEPTED |
 
 ## Owner-OQ rulings that became records
 
@@ -31,4 +32,4 @@ Per-phase-only sign-offs remain in each spec's Appendix C/D.
 
 ## Next number
 
-The next ADR is **ADR-0006**. Increment monotonically; never reuse a number.
+The next ADR is **ADR-0007**. Increment monotonically; never reuse a number.
