@@ -1,6 +1,6 @@
 # ADR-0006 — Non-ASCII local parts are refused until NFC is wired (P1); Door 3 unchanged
 
-- **Status:** ACCEPTED (owner sign-off 2026-07-17 — Phase-0 sign-off sheet §B)
+- **Status:** ACCEPTED (owner sign-off 2026-07-17 — Phase-0 sign-off sheet §B) · **RESOLVED at Phase 1** (NFC/IDNA wired — see "Phase-1 resolution" below)
 - **Kind:** door-referencing — a **tightening** that **affirms** Door 3. Refuses (does not mint, change, or reverse) a hash scheme. Does **not** reopen or modify the frozen `norm/v1+hmac-sha256/v1` scheme.
 - **Deciders:** owner (Phase-0 closeout sign-off, "accept all + record")
 - **Source finding:** Phase-0 code-review pass (inline adversarial sweep) · [`phase-0-signoff-sheet.md`](../phase-0-signoff-sheet.md) §B · [`phase-0-status.md`](phase-0-status.md) "Code-review gate — outcome"
@@ -78,3 +78,38 @@ silently dropped.
   decomposed forms of the same address MUST produce the **same** `email_hash`; and an IDN domain and
   its punycode form MUST agree. Regression = the two forms diverge (the original bug, now impossible
   to reintroduce silently).
+
+## Phase-1 resolution (2026-07-17) — NFC/IDNA wired, interim refusal lifted
+
+Phase 1 discharged the P1 obligation above. `control-plane/internal/hash/hash.go` now implements the
+full `norm/v1` pipeline; the two interim non-ASCII guards were removed **together**:
+
+- **Local side:** `NFC → lowercase → NFC`. The **trailing** NFC is load-bearing (not redundant):
+  Unicode case mapping is not closed under NFC (UAX#15), so `ToLower` can emit a non-NFC sequence —
+  without the second NFC, an address and its own case-variant twin (e.g. `J`+combining-caron vs
+  precomposed `ǰ`) would hash differently. This was found by the Phase-1 code-review pass (a
+  reproducible split across ~7 base-letter+mark classes in a sweep) and fixed; the trailing NFC is a
+  **strict no-op on all ASCII**, so no already-valid ASCII identity shifts.
+- **Domain side:** IDNA/UTS-46 `ToASCII` **first**, then strip trailing dot(s). Strip-after-ToASCII
+  is required because UTS-46 maps the Unicode label separators U+3002/U+FF0E/U+FF61 (`。．｡`) to ASCII
+  `.` during `ToASCII` — stripping before would split `example.com。` from `example.com`. Profile:
+  `idna.New(MapForLookup(), Transitional(false), StrictDomainName(true))` — encodes real IDNs, rejects
+  genuine garbage (disallowed runes, invalid labels) as `ErrUnparseable` (NULL hash, never mis-hashed).
+- **`provider_canonical_hash` (OQ-2)** added: gmail dot/`+tag` folding lives ONLY here, gated on the
+  literal `gmail.com`/`googlemail.com` domains (never the whole `google` class — Workspace custom
+  domains may treat dots as significant). A fold that empties the local → `ok=false` (NULL), never a
+  degenerate shared key. The primary `email_hash` never folds provider quirks (§3.3.5 trap avoided).
+
+**One documented frozen edge:** the Turkish dotted/dotless-I. The composed `İ` (U+0130) and its
+decomposed form (`I`+U+0307) **agree** (NFC closure holds); `İ`-derived forms lowercase to plain `i`
+(Go simple case mapping drops the dot) — a stable, deterministic choice, pinned by
+`TestLocalCaseFoldFrozenEdge`. Accepted as-is rather than special-cased (a `cases.Fold`-style
+primitive would change other semantics, e.g. `ß→ss`).
+
+**Compliance (now real, replacing the P1-obligation bullet above):**
+- `TestNonASCIILocalPartNFCEqual` — composed == decomposed → same hash (the original bug, proven fixed).
+- `TestNonASCIIDomainPunycoded` — Unicode domain and its punycode form hash identically.
+- `TestTrailingDotVariantsCollapse` — FQDN + double-dot + three CJK separators all collapse.
+- `TestGoldenVectorFrozen` — **absolute** golden HMAC vector pinning the frozen construction (any
+  change to keying/tag/order de-joins history and fails here). The single most important guard.
+- `TestLocalCaseFoldFrozenEdge`, `TestProviderCanonical*` — the İ edge and the OQ-2 canonical rules.
