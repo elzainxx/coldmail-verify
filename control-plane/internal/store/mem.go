@@ -37,6 +37,16 @@ type MemStore struct {
 	// Phase 4 (§4.4) — durable per-(node × provider) token-bucket spend. Keyed node+"\x00"+bucket.
 	// Uses the SHARED applyRefill helper so the fake can't diverge from PG (P3 test-double lesson).
 	rateBudget map[string]rateBucket
+
+	// Phase 5 (§7.5/PN-13) — per-caller front-door keys. Keyed hex(key_sha256) -> callerRow.
+	callers map[string]callerRow
+}
+
+// callerRow mirrors one api_callers row (per-caller key + validity window).
+type callerRow struct {
+	callerID  string
+	notBefore time.Time
+	notAfter  time.Time // zero => no expiry (NULL)
 }
 
 // rateBucket mirrors one rate_budgets row (per node, per provider bucket).
@@ -68,6 +78,7 @@ func NewMem(now func() time.Time) *MemStore {
 		registered: map[string]struct{}{},
 		warmup:     map[string]warmupWindow{},
 		rateBudget: map[string]rateBucket{},
+		callers:    map[string]callerRow{},
 	}
 }
 
@@ -447,6 +458,25 @@ func (m *MemStore) ResetWarmup(_ context.Context, nodeID string, windowStart tim
 	return nil
 }
 
+// LookupCaller resolves a caller from sha256(bearer key) honoring the validity window (PN-13,
+// §7.5) — mirrors PG EXACTLY: a match requires now ∈ [notBefore, notAfter) (notAfter zero => no
+// expiry), so a rotated-out key yields ok=false. A miss is ok=false, never an error (→ 401).
+func (m *MemStore) LookupCaller(_ context.Context, keySHA256 []byte, now time.Time) (string, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c, ok := m.callers[hex.EncodeToString(keySHA256)]
+	if !ok {
+		return "", false, nil
+	}
+	if now.Before(c.notBefore) {
+		return "", false, nil // not yet valid
+	}
+	if !c.notAfter.IsZero() && !now.Before(c.notAfter) {
+		return "", false, nil // expired (rotated out): now >= notAfter
+	}
+	return c.callerID, true, nil
+}
+
 func (m *MemStore) Ping(context.Context) error { return nil }
 func (m *MemStore) Close()                     {}
 
@@ -496,6 +526,15 @@ func (m *MemStore) SeedRateBudget(nodeID, providerBucket string, tokens float64,
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.rateBudget[rateKey(nodeID, providerBucket)] = rateBucket{tokens: tokens, lastRefill: lastRefill}
+}
+
+// SeedCaller registers a per-caller key (test-support: model an api_callers row). keySHA256 is
+// sha256(raw key); notAfter zero => no expiry. Drive the rotation/expiry paths by seeding two
+// rows for one callerID with different windows.
+func (m *MemStore) SeedCaller(keySHA256 []byte, callerID string, notBefore, notAfter time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.callers[hex.EncodeToString(keySHA256)] = callerRow{callerID: callerID, notBefore: notBefore, notAfter: notAfter}
 }
 
 // SeedPolicy stores a policy; if isDefault, it becomes the default (last write wins).

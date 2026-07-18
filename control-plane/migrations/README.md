@@ -18,8 +18,11 @@
 | `0006_catchall_write.sql` | P2 §5.6 (brain writes the catch-all probe result) | Grants `cp_runtime` INSERT+UPDATE on `catchall_domains` (DELETE stays `cp_admin`). Additive — NOT the append-only LOG. |
 | `0007_node_audits_warmup.sql` | P3 §4.3/§4.5 (audit history + gate), §5.2 (warmup) | `node_audits` (APPEND-ONLY audit history, OQ-P3-5), `node_warmup` (durable per-node/per-window ramp counter, §5.2). Grants `cp_runtime` INSERT+SELECT on `node_audits` (DELETE revoked — LOG posture), SELECT+INSERT+UPDATE on `node_warmup`, and INSERT+UPDATE on `nodes` (DELETE stays `cp_admin`). Additive — new tables, reserved `nodes` columns populated, no frozen-schema change. |
 | `0008_rate_budgets_recovering.sql` | P4 §4.4 (durable rate budget), §5.4/GAP-30 (canary sub-state) | `rate_budgets` (durable per-(node×provider) token-bucket spend — restart-safe, §4.4). Grants `cp_runtime` SELECT+INSERT+UPDATE on `rate_budgets` (DELETE revoked — counter posture, mirrors `node_warmup`). Widens the `nodes.status` CHECK to add `recovering` (the canary sub-state — a NODE-LIFECYCLE value, NOT verdict vocab; ADR-0010). Additive — new table + a strict CHECK widening, no frozen-schema change. |
+| `0010_api_callers.sql` | P5 §7.5 / PN-13 (per-caller front-door keys + rotation) | `api_callers` (per-caller key, stored `key_sha256` HASHED, validity window `[not_before, not_after)` for zero-downtime rotation). Grants `cp_runtime` **SELECT only** (hot auth read); INSERT/UPDATE/DELETE stay `cp_admin` (key issuance + rotation are admin-audited, DR-3). Additive — new table; auth is a header check, `caller_id` is key-derived (never from the body), so **no Door-1/Door-4 change**. |
 
-**Apply order:** Run sequentially `0001` → `0002` → `0003` → `0004` → `0005` → `0006` → `0007` → `0008`.
+> **Migration `0009_work_items_jobs.sql` (P5 queue tables) is added by task #84** — it applies before `0010` in lexical order. `0010` (auth) is independent of `0009` and lands first in the P5 gate sequence (PN-13 before the bulk endpoint).
+
+**Apply order:** Run sequentially in the zero-padded filename order (`0001` → … → `0008` → `0009` → `0010`). CI applies every `migrations/NNNN_*.sql` in `sort` order, so a new migration is picked up automatically.
 
 ---
 
@@ -203,4 +206,4 @@ All 25 open questions signed off (Appendix C). Key findings already resolved:
 
 ---
 
-**Ready to apply.** Run migrations `0001` → `0008` in order against your PostgreSQL 14+ / Supabase instance.
+**Ready to apply.** Run migrations `0001` → `0010` in zero-padded filename order against your PostgreSQL 14+ / Supabase instance.

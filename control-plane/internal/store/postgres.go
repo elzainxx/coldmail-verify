@@ -599,6 +599,29 @@ ON CONFLICT (node_id, window_start) DO UPDATE SET count = 0, cap = EXCLUDED.cap,
 	return nil
 }
 
+// LookupCaller resolves an authenticated caller from sha256(bearer key) (PN-13, §7.5). The
+// validity window is enforced IN the query (now ∈ [not_before, not_after)), so a rotated-out key
+// yields ErrNoRows → ok=false. During a rotation overlap two rows share a caller_id with
+// overlapping windows; the lookup is by key_sha256 (the PK), so each key resolves independently —
+// LIMIT 1 is defensive (key_sha256 is unique). A miss is ok=false, never an error (→ 401).
+func (p *PG) LookupCaller(ctx context.Context, keySHA256 []byte, now time.Time) (string, bool, error) {
+	const q = `
+SELECT caller_id FROM api_callers
+WHERE key_sha256 = $1
+  AND not_before <= $2
+  AND (not_after IS NULL OR not_after > $2)
+LIMIT 1`
+	var callerID string
+	err := p.pool.QueryRow(ctx, q, keySHA256, now.UTC()).Scan(&callerID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil // unknown OR expired key → not authenticated (caller maps to 401)
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("store: lookup caller: %w", err)
+	}
+	return callerID, true, nil
+}
+
 func orEmptyFlags(f map[string]bool) map[string]bool {
 	if f == nil {
 		return map[string]bool{}

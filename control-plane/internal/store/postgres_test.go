@@ -613,6 +613,64 @@ func TestPGMetricRowsSince_WindowOrderingAndTruncation(t *testing.T) {
 	}
 }
 
+// TestPGLookupCaller_WindowEnforced proves the real SQL validity window (PN-13) matches the Mem
+// fake: an active key resolves its caller_id; an unknown key misses; a rotated-out key (not_after
+// in the past) misses; a not-yet-valid key (not_before in the future) misses; and a rotation
+// overlap resolves BOTH keys to the same caller. Uses direct INSERTs (issuance is cp_admin; the
+// test connects as owner) then reads through the runtime LookupCaller path.
+func TestPGLookupCaller_WindowEnforced(t *testing.T) {
+	pg := testPG(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	seed := func(keySHA []byte, callerID string, nb time.Time, na *time.Time) {
+		var naVal any
+		if na != nil {
+			naVal = na.UTC()
+		}
+		if _, err := pg.pool.Exec(ctx,
+			`INSERT INTO api_callers (caller_id, key_sha256, not_before, not_after)
+			 VALUES ($1,$2,$3,$4) ON CONFLICT (key_sha256) DO NOTHING`,
+			callerID, keySHA, nb.UTC(), naVal); err != nil {
+			t.Fatalf("seed caller: %v", err)
+		}
+	}
+	// Unique key material per run so repeated runs against a shared DB don't collide.
+	tag := now.Format("150405.000000000")
+	kActive := []byte("active-" + tag)
+	kExpired := []byte("expired-" + tag)
+	kFuture := []byte("future-" + tag)
+	kRotOld := []byte("rotold-" + tag)
+	kRotNew := []byte("rotnew-" + tag)
+
+	past := now.Add(-time.Hour)
+	future := now.Add(time.Hour)
+	seed(kActive, "caller_active_"+tag, now.Add(-time.Hour), nil)
+	seed(kExpired, "caller_active_"+tag, now.Add(-48*time.Hour), &past)
+	seed(kFuture, "caller_future_"+tag, future, nil)
+	seed(kRotOld, "caller_rot_"+tag, now.Add(-24*time.Hour), &future)
+	seed(kRotNew, "caller_rot_"+tag, now, nil)
+
+	check := func(name string, key []byte, wantOK bool, wantID string) {
+		id, ok, err := pg.LookupCaller(ctx, key, now)
+		if err != nil {
+			t.Fatalf("%s: LookupCaller err %v", name, err)
+		}
+		if ok != wantOK {
+			t.Fatalf("%s: ok=%v want %v", name, ok, wantOK)
+		}
+		if wantOK && id != wantID {
+			t.Fatalf("%s: id=%q want %q", name, id, wantID)
+		}
+	}
+	check("active", kActive, true, "caller_active_"+tag)
+	check("unknown", []byte("no-such-key-"+tag), false, "")
+	check("expired", kExpired, false, "")
+	check("not-yet-valid", kFuture, false, "")
+	check("rotation-old", kRotOld, true, "caller_rot_"+tag)
+	check("rotation-new", kRotNew, true, "caller_rot_"+tag)
+}
+
 func must(s string, err error) string {
 	if err != nil {
 		panic(err)

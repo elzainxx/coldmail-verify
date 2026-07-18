@@ -10,6 +10,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -29,14 +31,26 @@ type Verifier interface {
 	Verify(ctx context.Context, rawEmail string, def *policy.Definition) (verdict.Response, error)
 }
 
+// CallerAuth is the narrow per-caller key lookup the front door needs (PN-13, satisfied by
+// store.Store). Injected so api tests use a fake without a DB. nil => per-caller auth not wired
+// (the legacy static-token path governs; the bulk endpoint is then unavailable).
+type CallerAuth interface {
+	LookupCaller(ctx context.Context, keySHA256 []byte, now time.Time) (callerID string, ok bool, err error)
+}
+
+// callerIDKey is the context key under which an authenticated caller_id is stashed (never PII —
+// GAP-36; the platform holds the user↔caller_id map). Distinct type so it can't collide.
+type callerIDKey struct{}
+
 // Server holds the wired dependencies. Deps are interfaces/values, so tests inject fakes.
 type Server struct {
-	cfg       config.Config
-	secrets   *secrets.Secrets
-	hasher    *hash.Hasher // may be nil if no pepper loaded (readiness reports it)
-	verifier  Verifier     // nil until the store+orchestrator are wired (readiness reports it)
-	defPolicy *policy.Definition
-	now       func() time.Time
+	cfg        config.Config
+	secrets    *secrets.Secrets
+	hasher     *hash.Hasher // may be nil if no pepper loaded (readiness reports it)
+	verifier   Verifier     // nil until the store+orchestrator are wired (readiness reports it)
+	callerAuth CallerAuth   // nil => per-caller auth not wired (legacy static token governs)
+	defPolicy  *policy.Definition
+	now        func() time.Time
 }
 
 // New wires the server. A nil hasher/verifier is allowed for a build smoke (no pepper / no
@@ -49,6 +63,14 @@ func New(cfg config.Config, sec *secrets.Secrets, hasher *hash.Hasher) *Server {
 func (s *Server) WithVerifier(v Verifier, def *policy.Definition) *Server {
 	s.verifier = v
 	s.defPolicy = def
+	return s
+}
+
+// WithCallerAuth attaches the per-caller key lookup (PN-13). Once wired, a valid per-caller key
+// authenticates any endpoint; the bulk surface REQUIRES one (the legacy static token is rejected
+// there). The sync /v1/verify additionally accepts the legacy static token during transition.
+func (s *Server) WithCallerAuth(c CallerAuth) *Server {
+	s.callerAuth = c
 	return s
 }
 
@@ -67,9 +89,15 @@ type verifyRequest struct {
 }
 
 func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
-	if !s.authOK(r) {
+	// Sync /v1/verify: a per-caller key OR (during transition) the legacy static token authenticates
+	// (requirePerCaller=false). The bulk-PII surface (requirePerCaller=true) is handled separately.
+	callerID, ok := s.authenticate(r, false)
+	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
+	}
+	if callerID != "" {
+		r = r.WithContext(context.WithValue(r.Context(), callerIDKey{}, callerID))
 	}
 	// Front-door mode (kill-switch Rung 4): reject if paused-reject.
 	if s.cfg.KillSwitch.FrontDoor == config.FrontDoorReject {
@@ -134,17 +162,48 @@ func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-// authOK checks the front-door bearer. Phase 0 accepts a single configured token; per-caller
-// keys + rotation are a P5 gate (PN-13). If no token is configured (build smoke), auth is open
-// ONLY in development env — never in production.
-func (s *Server) authOK(r *http.Request) bool {
-	want, ok := s.frontDoorToken()
-	if !ok {
-		return s.cfg.Env == "development"
+// authenticate is the front-door auth (PN-13). It resolves the presented bearer to a caller in
+// this precedence:
+//  1. PER-CALLER KEY: if caller-auth is wired, sha256(key) → LookupCaller (constant-time compare +
+//     validity window). A hit authenticates ANY endpoint and yields the caller_id.
+//  2. LEGACY STATIC TOKEN: accepted ONLY when requirePerCaller is false (the sync /v1/verify during
+//     transition, PN-13 backward-compat). The bulk-PII surface (requirePerCaller=true) REJECTS it —
+//     that is the F-20 gate: the bulk surface demands a per-caller key from day one.
+//  3. DEV OPEN: only when NO auth is configured at all AND env=development (build smoke) — never in
+//     production, never when a static token or caller-auth is configured.
+//
+// It returns (callerID, ok). callerID is "" for the legacy/dev paths (no per-caller principal).
+func (s *Server) authenticate(r *http.Request, requirePerCaller bool) (callerID string, ok bool) {
+	presented := trimBearer(r.Header.Get("Authorization"))
+
+	// (1) Per-caller key (PN-13). A presented bearer that matches an active key wins on any endpoint.
+	if s.callerAuth != nil && presented != "" {
+		sum := sha256.Sum256([]byte(presented))
+		if id, hit, err := s.callerAuth.LookupCaller(r.Context(), sum[:], s.now()); err == nil && hit {
+			return id, true
+		}
+		// A miss falls through: it MIGHT still be the legacy static token on a sync call.
 	}
-	got := r.Header.Get("Authorization")
-	got = trimBearer(got)
-	return got != "" && got == want
+
+	// (2) Legacy static token — sync endpoints only (never the bulk-PII surface, F-20).
+	if !requirePerCaller {
+		if want, configured := s.frontDoorToken(); configured {
+			// Constant-time compare so a wrong token gives no timing oracle.
+			if presented != "" && subtle.ConstantTimeCompare([]byte(presented), []byte(want)) == 1 {
+				return "", true // legacy caller — no per-caller principal
+			}
+			return "", false // a static token IS configured but didn't match → reject
+		}
+	}
+
+	// (3) No auth configured at all → open only in development (build smoke), never production, and
+	// never on the per-caller-required (bulk) surface.
+	if !requirePerCaller && s.callerAuth == nil {
+		if _, configured := s.frontDoorToken(); !configured {
+			return "", s.cfg.Env == "development"
+		}
+	}
+	return "", false
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

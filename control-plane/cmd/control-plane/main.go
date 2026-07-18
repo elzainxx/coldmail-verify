@@ -139,7 +139,12 @@ func buildAPI(appCtx context.Context, cfg config.Config, sec *secrets.Secrets, h
 	}
 	log.Printf("verify: orchestrator wired (%s, policy=%s v%d, cache_ttl=%s)",
 		mode, def.Key, def.Version, cfg.CacheTTL())
-	return srv.WithVerifier(orch, def)
+	// PN-13 (§7.5): wire per-caller front-door auth. The store's LookupCaller reads api_callers
+	// (SELECT-only for cp_runtime; issuance/rotation are cp_admin/DR-3). Once wired, a valid
+	// per-caller key authenticates any endpoint and the P5 bulk surface requires one; the legacy
+	// static token still authenticates the sync /v1/verify during transition (backward-compat).
+	srv = srv.WithVerifier(orch, def).WithCallerAuth(pg)
+	return srv
 }
 
 // buildSMTP wires the Phase-2 SMTP stage when SMTP is enabled and a node list exists. It fetches

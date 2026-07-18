@@ -9,7 +9,12 @@
 .env
 .env.*
 !*.example.env
-secrets/
+# A secrets STORE directory (real key/pepper material) — anchored so it does NOT match the Go
+# SOURCE package control-plane/internal/secrets/ (which is code, never secret material, and MUST
+# be tracked or a fresh clone won't compile). The unanchored `secrets/` previously swallowed that
+# package silently. Real secrets are still blocked by *.env / *.pem / *.key / *.pepper below.
+/secrets/
+/config/secrets/
 *.pem
 *.key
 *.pepper

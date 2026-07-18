@@ -318,6 +318,16 @@ type Store interface {
 	// the window so the next reservation starts the ramp over. Idempotent.
 	ResetWarmup(ctx context.Context, nodeID string, windowStart time.Time, cap int) error
 
+	// ── Phase 5 (§7.5 / PN-13) — per-caller front-door auth ──
+
+	// LookupCaller resolves an authenticated caller from the sha256 of a presented bearer key
+	// (PN-13). It returns the caller_id ONLY when a row matches AND now ∈ [not_before, not_after)
+	// — expiry is enforced in the query, so a rotated-out key (not_after in the past) yields
+	// ok=false. keySHA256 is sha256(raw key); the raw key is never stored (§7.5). A miss (unknown
+	// or expired key) is ok=false, NOT an error — the caller maps that to 401. This is a hot,
+	// read-only lookup (cp_runtime has SELECT only on api_callers; issuance/rotation are cp_admin).
+	LookupCaller(ctx context.Context, keySHA256 []byte, now time.Time) (callerID string, ok bool, err error)
+
 	Ping(ctx context.Context) error
 	Close()
 }
@@ -372,5 +382,8 @@ func (StubStore) MetricRowsSince(context.Context, time.Time, int) ([]MetricRow, 
 }
 func (StubStore) SetNodeStatus(context.Context, string, string) error       { return ErrNotWired }
 func (StubStore) ResetWarmup(context.Context, string, time.Time, int) error { return ErrNotWired }
-func (StubStore) Ping(context.Context) error                                { return ErrNotWired }
-func (StubStore) Close()                                                    {}
+func (StubStore) LookupCaller(context.Context, []byte, time.Time) (string, bool, error) {
+	return "", false, ErrNotWired
+}
+func (StubStore) Ping(context.Context) error { return ErrNotWired }
+func (StubStore) Close()                     {}

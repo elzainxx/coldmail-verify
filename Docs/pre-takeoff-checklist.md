@@ -86,13 +86,14 @@ The prompt named four as outstanding. Each is surfaced with its blocking phase; 
 - [ ] **Before P3 go-live:** every manual control-plane action (node disable, global-fallback-kill, pause, shadow-mode promotion, budget change, breaker/brake confirm, privacy opt-out flip) writes to an **append-only admin-audit log** with **per-actor identity** (who/what/when), distinct from the verdict LOG — reusing the `node_audits` / `work_item_attempts` append-only pattern.
 - [ ] **Do NOT build it now** — it gates P3, not P1. (Cross-ref P3 §6.4 note, kill-switch §4, and the global-fallback-kill definition PN-16.)
 
-### 3.7 Backup-plaintext protection for `work_items` — **gates P5** [DR-4 / PN-3 / F-7 / ADR-0002]
-- [ ] **Before P5:** the queue's plaintext column must be excluded from / protected in backup & PITR snapshots (a snapshot copies live plaintext no purge transaction touches). Treat backups as containing live plaintext for the retention window.
-- [ ] **Mechanism is a P5-time choice:** snapshot exclusion **or** separate-key at-rest encryption (key ≠ pepper) **or** short snapshot-retention — see [ADR-0002](adr/ADR-0002-queue-plaintext-backup-scope.md). **Door 3 is not reopened;** this affirms the P5 bounded exception and makes it backup-aware.
-- [ ] **Do NOT choose/build the mechanism now.** (Cross-ref P5 §3.3 note ↔ P1 §3.3.)
+### 3.7 Backup-plaintext protection for `work_items` — **gates P5** [DR-4 / PN-3 / F-7 / ADR-0002] ✅ RESOLVED (P5, 2026-07-18)
+- [x] **Before P5:** the queue's plaintext column must be excluded from / protected in backup & PITR snapshots (a snapshot copies live plaintext no purge transaction touches). Treat backups as containing live plaintext for the retention window.
+- [x] **Mechanism chosen (owner, 2026-07-18): SEPARATE-KEY at-rest encryption (key ≠ pepper)** — the only locally fail-verifiable option (ADR-0002's restore-and-assert, done as a `dump-the-row → only-ciphertext` test). Built as `internal/queue/addrcipher.go` (AES-256-GCM, AAD-bound to the row id, rotation overlap, fail-closed key length) + a separate secret `TM_QUEUE_ADDR_KEY` loaded distinctly from the pepper. Fail-verified: neuter `Seal` → `TestAddrCipher_CiphertextContainsNoPlaintext` fails; restored green. **Door 3 not reopened** — the bounded exception is now (1) transactionally purged on settle AND (2) encrypted at rest.
+- [x] The `work_items.addr_ciphertext` column holds only ciphertext; the plaintext is purged in the settlement transaction (§5.3 step 4) AND encrypted at rest for any backup taken while an item is live. Residuals stated honestly in the queue custody note (backups hold the encrypted column, safe iff the key isn't in the same snapshot; key-holder == plaintext-holder on brain compromise — F-9/F-19/PN-12).
 
-### 3.8 Front-door auth beyond a static token — **gates P5 bulk** [PN-13 / F-20]
-- [ ] **Before P5 bulk ships:** upgrade the front-door bearer from a single static shared token to **per-caller keys + rotation** — the same endpoint becomes the bulk-PII submission surface at P5. (Cross-ref P5 §7.5 note.)
+### 3.8 Front-door auth beyond a static token — **gates P5 bulk** [PN-13 / F-20] ✅ RESOLVED (P5, 2026-07-18)
+- [x] **Before P5 bulk ships:** upgrade the front-door bearer from a single static shared token to **per-caller keys + rotation** — the same endpoint becomes the bulk-PII submission surface at P5. (Cross-ref P5 §7.5 note.)
+- [x] Built as the `api_callers` table (migration 0010: `key_sha256` stored HASHED, validity window `[not_before, not_after)` for zero-downtime rotation overlap; `cp_runtime` SELECT-only, issuance/rotation `cp_admin`/DR-3) + `store.LookupCaller` + the `api.authenticate` upgrade (sha256 lookup + `crypto/subtle` constant-time static compare). The bulk-PII surface REQUIRES a per-caller key; the sync `/v1/verify` also accepts the legacy static token during transition (backward-compat — the existing `TestAuthEnforcedInProduction` still passes). `caller_id` is key-derived (trusted) and kept distinct from the body-supplied `caller_ref` (untrusted, GAP-36) — auth is header-only so **no Door-1/Door-4 change**. Fail-verified: neuter the validity window → the rotated-out-key case fails; neuter the bulk gate → the static-token-on-bulk case fails; both restored green.
 
 ---
 
@@ -140,8 +141,8 @@ PHASE-GATES (accepted 2026-07-17, DECISIONS.md — record only, not built):
   ☐ Outcome-feed AUTHENTICATION (TB-7 threat-modelled) → before P7    §3.4 (DR-1/ADR-0001)
   ☐ Shadow-mode fresh-system regression (zero live mutation) → A1→P4, A6/8/9→P7  §3.5 (DR-2)
   ☐ Admin identity + control-plane audit log   → before P3 go-live    §3.6 (DR-3, PN-1/F-11)
-  ☐ Backup-plaintext protection for work_items → before P5            §3.7 (DR-4/ADR-0002, PN-3/F-7)
-  ☐ Front-door auth beyond static token        → before P5 bulk       §3.8 (PN-13, F-20)
+  ✅ Backup-plaintext protection for work_items → RESOLVED P5 2026-07-18 §3.7 (separate-key encryption, DR-4/ADR-0002)
+  ✅ Front-door auth beyond static token        → RESOLVED P5 2026-07-18 §3.8 (per-caller keys+rotation, PN-13/F-20)
 ```
 
 *This checklist enumerates gates and resolves none of the owner OQs. It rewrites no frozen spec: the phase-gates in §3.4–3.8 were **accepted** in the 2026-07-17 consolidation ([`DECISIONS.md`](DECISIONS.md)) and are recorded here as conditions, **not implemented**. The 16 proposed notes (PN-1…PN-16), all additive, are accepted and routed to their homes — full placement in [`consolidation-application-report.md`](consolidation-application-report.md); origin in [`cross-phase-consistency-report.md`](cross-phase-consistency-report.md) §7.*
