@@ -138,11 +138,86 @@ type WarmupDecision struct {
 	WindowStart time.Time // start of the window the reservation fell in (UTC)
 }
 
+// ── Phase 4 (§4.4/§5.2/§5.4/§5.6) — durable rate budget, block-rate, lifecycle transitions ──
+
+// RateParams are the token-bucket DIALs for one (node × provider) bucket, sourced from the policy
+// rate_limits key (§4.2/§4.7). Capacity is the max burst (the bucket ceiling); RefillPerSec is the
+// steady-state refill. They are passed on EVERY call (config-authoritative), mirroring how
+// ReserveWarmupSlot takes `cap` each call — a policy edit takes effect on the next reservation.
+type RateParams struct {
+	Capacity     float64 // bucket ceiling (max burst); a DIAL
+	RefillPerSec float64 // steady-state refill rate (tokens/sec); a DIAL
+}
+
+// RateDecision is the outcome of a rate-budget check (§4.4). On a RESERVE, Allowed=false means the
+// bucket is empty → the caller degrades to cheap with signals.smtp_skipped_reason="rate_limited"
+// (PROVISIONAL/non-cacheable, PB1; never queues — P5; never invalid — §4.6). TokensAfter is the
+// remaining tokens (post-decrement on a granted reserve; the refilled count on a peek/deny). The
+// budget is DURABLE (§4.4/OQ-P4-3): a brain restart refills ONLY by REAL elapsed wall-clock (never
+// resets to full), so a freshly-restarted brain cannot let the pool sprint at a provider (the PM4
+// hazard, mirrored from the P3 warmup counter). Contrast in-flight (ephemeral, §4.3/GAP-26).
+type RateDecision struct {
+	Allowed     bool
+	TokensAfter float64
+	Capacity    float64
+}
+
+// NodeBlockStats is the per-verifier_ip block-rate aggregation the health-watcher reads from the
+// LOG (§5.2/§5.6). It counts ONLY node-attributable SMTP attempts: from_cache=false AND
+// verifier_ip IS NOT NULL — a cache hit ran no SMTP on any node, and a cheap-degrade has
+// verifier_ip=null (SMTP skipped, §4.6). Counting either would quarantine a node for verdicts it
+// never produced (PB1, the same from_cache-excluded discipline P1 §3.2.1 locked, applied to the
+// control loop). Blocked (smtp_blocked) is the PRIMARY numerator; Timeouts
+// (smtp_timeout/connection_failed) are a SECONDARY, separately-thresholded signal (may be network,
+// not reputation); greylisted is NOT counted (expected transient) — OQ-P4-6. block-rate =
+// Blocked/Attempts, meaningful only above the sample-size gate (GAP-27).
+type NodeBlockStats struct {
+	VerifierIP string
+	Attempts   int // node-attributable SMTP attempts this window (denominator)
+	Blocked    int // smtp_blocked (primary numerator)
+	Timeouts   int // smtp_timeout + connection_failed (secondary signal)
+}
+
+// MetricRow is the slim projection of a LOG row the observability layer needs (§8) — derived from
+// EXISTING verifications columns (Door 2, no schema change). It is NOT the full VerificationRow (the
+// metrics layer doesn't need the hash/provenance surface); just the fields the build-plan's metrics
+// (block-rate, unknown-rate, latency, cache-hit) + pool/rate-pressure aggregate on.
+type MetricRow struct {
+	CheckedAt  time.Time
+	Status     string
+	Reason     string
+	MXProvider string
+	VerifierIP string
+	FromCache  bool
+	LatencyMS  int
+	Signals    map[string]any // for smtp_skipped_reason (rate-saturation metric)
+}
+
 // ErrNotWired marks the no-DB stub. ErrCacheMiss is a normal (non-error) cache absence.
 var (
 	ErrNotWired  = errors.New("store: no database wired")
 	ErrCacheMiss = errors.New("store: cache miss")
 )
+
+// applyRefill is the SINGLE source of the token-bucket math (§4.4/OQ-P4-3). Given a bucket's stored
+// tokens + last-refill instant and the caller's params, it returns the refilled token count at
+// `now` (capped at Capacity) and whether at least one whole token is available. It is used by BOTH
+// the PG store and the Mem fake so the two can never diverge (the P3 review's test-double-fidelity
+// lesson — divergences hid there twice). A NEGATIVE elapsed (clock skew, or a last_refill_at ahead
+// of now) contributes ZERO refill — never grants free tokens. Because refill is derived from
+// wall-clock elapsed since last_refill_at, a brain RESTART refills only by REAL time passed; it
+// never resets the bucket to full (§4.4 restart-safe — the PM4 hazard the durable state prevents).
+func applyRefill(stored float64, lastRefill time.Time, p RateParams, now time.Time) (refilled float64, ok bool) {
+	elapsed := now.Sub(lastRefill).Seconds()
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	refilled = stored + p.RefillPerSec*elapsed
+	if refilled > p.Capacity {
+		refilled = p.Capacity
+	}
+	return refilled, refilled >= 1.0
+}
 
 // Store is the control-plane's only path to state. Note the deliberate ABSENCE of an
 // UpdateVerification / DeleteVerification method — Door 2 append-only is enforced by the
@@ -196,6 +271,53 @@ type Store interface {
 	// window (e.g. the UTC day); cap is that window's ceiling (a DIAL). Restart-safe (§5.2 LOCKED).
 	ReserveWarmupSlot(ctx context.Context, nodeID string, windowStart time.Time, cap int) (WarmupDecision, error)
 
+	// ── Phase 4 (§4.4/§5.2/§5.4/§5.6) ──
+
+	// ReserveRateToken atomically consumes one token from the (node × provider) durable token
+	// bucket (§4.4). It refills by REAL elapsed wall-clock since last_refill_at (never on restart —
+	// OQ-P4-3 restart-safe), caps at p.Capacity, and — iff ≥1 token is available — decrements and
+	// returns Allowed=true. Empty bucket → Allowed=false (caller degrades to cheap with
+	// smtp_skipped_reason="rate_limited"; never queues/invalid — §4.6). now is passed so tests are
+	// deterministic and the refill anchor is caller-controlled. It NEVER refills the allowance to
+	// full on a restart — the whole point of durable budget state (the PM4 reputation hazard).
+	ReserveRateToken(ctx context.Context, nodeID, providerBucket string, p RateParams, now time.Time) (RateDecision, error)
+
+	// PeekRateBudget refills-and-reads the (node × provider) bucket WITHOUT consuming (§3.3 eligibility
+	// "has rate-limit headroom for the target provider" — the router filter checks headroom before
+	// selection). It never mutates the durable spend; it does advance last_refill_at as a read-side
+	// refill (idempotent — the same tokens result on the next call). Allowed reports whether ≥1 token
+	// is currently available.
+	PeekRateBudget(ctx context.Context, nodeID, providerBucket string, p RateParams, now time.Time) (RateDecision, error)
+
+	// BlockRateByVerifierIP aggregates per-node block-rate from the LOG over [since, now] (§5.2/§5.6).
+	// It counts ONLY node-attributable SMTP attempts (from_cache=false AND verifier_ip NOT NULL) so
+	// cache hits and cheap-degrades never inflate/deflate a node's rate (PB1). One row per verifier_ip
+	// that has ≥1 attempt in the window. The watcher applies the sample-size gate (GAP-27) + fleet
+	// brake (§5.5) on top — this method only measures, it never quarantines.
+	BlockRateByVerifierIP(ctx context.Context, since time.Time) ([]NodeBlockStats, error)
+
+	// MetricSince reads a bounded window of LOG rows (checked_at >= since, newest first, capped at
+	// limit) for the observability metrics derivation (§8) — the "human dashboard" view (unknown-rate,
+	// latency percentiles, cache-hit), derived from EXISTING columns (Door 2, no schema change). It is
+	// deliberately bounded: at Phase-4 volumes (a small pool, honest-corporate :smtp) a windowed read
+	// is proportional (GAP-25); limit<=0 uses a safe default. Truncated=true when the window had MORE
+	// rows than limit (the caller LOGS the truncation — no silent cap). Control decisions never depend
+	// on this read (the LOG is authoritative for block-rate via BlockRateByVerifierIP; OQ-P4-11).
+	MetricRowsSince(ctx context.Context, since time.Time, limit int) (rows []MetricRow, truncated bool, err error)
+
+	// SetNodeStatus writes ONLY the lifecycle status column (§5.4) — the health-watcher's single-
+	// writer transition (active⇄quarantined⇄recovering). It does NOT touch port25_open/audit columns
+	// (separate write paths), so the watcher can transition a node without clobbering the egress/audit
+	// facts. status ∈ provisioning|active|quarantined|recovering (the 0008 CHECK). No row → no-op
+	// (matches 0 rows; mirrors AppendNodeAudit's summary-update posture).
+	SetNodeStatus(ctx context.Context, nodeID, status string) error
+
+	// ResetWarmup resets a node's durable warmup counter for the given window to a LOW start (§5.4,
+	// PM3): a block-quarantined node that recovers has a cooling IP and must re-warm gradually like a
+	// fresh IP — never resume its pre-quarantine allowance. It upserts count=0 at the given cap for
+	// the window so the next reservation starts the ramp over. Idempotent.
+	ResetWarmup(ctx context.Context, nodeID string, windowStart time.Time, cap int) error
+
 	Ping(ctx context.Context) error
 	Close()
 }
@@ -236,5 +358,19 @@ func (StubStore) UpsertNodeState(context.Context, string, string, string, bool) 
 func (StubStore) ReserveWarmupSlot(context.Context, string, time.Time, int) (WarmupDecision, error) {
 	return WarmupDecision{}, ErrNotWired
 }
-func (StubStore) Ping(context.Context) error { return ErrNotWired }
-func (StubStore) Close()                     {}
+func (StubStore) ReserveRateToken(context.Context, string, string, RateParams, time.Time) (RateDecision, error) {
+	return RateDecision{}, ErrNotWired
+}
+func (StubStore) PeekRateBudget(context.Context, string, string, RateParams, time.Time) (RateDecision, error) {
+	return RateDecision{}, ErrNotWired
+}
+func (StubStore) BlockRateByVerifierIP(context.Context, time.Time) ([]NodeBlockStats, error) {
+	return nil, ErrNotWired
+}
+func (StubStore) MetricRowsSince(context.Context, time.Time, int) ([]MetricRow, bool, error) {
+	return nil, false, ErrNotWired
+}
+func (StubStore) SetNodeStatus(context.Context, string, string) error       { return ErrNotWired }
+func (StubStore) ResetWarmup(context.Context, string, time.Time, int) error { return ErrNotWired }
+func (StubStore) Ping(context.Context) error                                { return ErrNotWired }
+func (StubStore) Close()                                                    {}

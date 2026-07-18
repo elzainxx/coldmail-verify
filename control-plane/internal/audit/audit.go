@@ -37,6 +37,12 @@ const (
 	LifecycleProvisioning Lifecycle = "provisioning"
 	LifecycleActive       Lifecycle = "active"
 	LifecycleQuarantined  Lifecycle = "quarantined"
+	// LifecycleRecovering is the P4 canary sub-state (§5.4/GAP-30): a block-quarantined node that
+	// regained audit-green + liveness earns its way back via a metered canary trickle before promotion
+	// to active. It is a NODE-LIFECYCLE value (nodes.status CHECK widened in migration 0008), NOT a
+	// verdict-vocab value (Door 4 untouched — ADR-0010). The eligibility gate admits it ONLY as the
+	// metered canary (EligibilityInput.AllowRecovering), never as a general :smtp candidate.
+	LifecycleRecovering Lifecycle = "recovering"
 )
 
 // Result is a captured /v1/audit response, engine-agnostic (the node client fills it — from a real
@@ -74,6 +80,15 @@ type EligibilityInput struct {
 	ExpectedEgressIP string    // the node's known public egress IP (brain registry authoritative)
 	Now              time.Time
 	MaxAuditAge      time.Duration // staleness window (§4.5 DIAL); <=0 => skip the freshness conjunct
+
+	// AllowRecovering admits a node in the `recovering` canary sub-state (P4 §5.4/GAP-30) to :smtp as
+	// a METERED canary — it must still pass every OTHER conjunct (green ∧ port25 ∧ egress-match ∧
+	// fresh). The caller (the orchestrator) then reserves against the LOW canary warmup cap, not the
+	// full ramp, so a recovering node receives only "a few checks/window, well under warmup start"
+	// (§5.4). Without this a recovering node gets ZERO traffic → ZERO samples → can never prove
+	// recovery on the block-rate condition (the Phase-4 adversarial-review finding: promotion on
+	// zero samples, or stuck forever). Default false = the P3 behavior (recovering excluded).
+	AllowRecovering bool
 }
 
 // SkipReason is the diagnostic reason SMTP was NOT run for a node — it maps directly to the
@@ -100,8 +115,11 @@ const (
 // blocks, port25-closed-but-green, egress mismatch, stale) are all provable locally against the
 // simulated surface — only the real IP values are PENDING-REAL-BOX.
 func Eligibility(in EligibilityInput) SkipReason {
-	// 1. Lifecycle: only an active node runs :smtp (provisioning/quarantined are excluded, §4.4/§4.5).
-	if in.Status != LifecycleActive {
+	// 1. Lifecycle: an active node runs :smtp; a `recovering` node runs :smtp ONLY as the metered
+	//    canary (§5.4/GAP-30) when the caller opts in (AllowRecovering) — and even then it must pass
+	//    every other conjunct below, and the caller meters it via the low canary warmup cap. Every
+	//    other state (provisioning/quarantined) is excluded (§4.4/§4.5).
+	if in.Status != LifecycleActive && !(in.Status == LifecycleRecovering && in.AllowRecovering) {
 		return SkipNotActive
 	}
 	// 2. Never audited → not fresh → excluded (a stale/absent green is not trusted, §4.5).

@@ -67,3 +67,84 @@ func TestLoadAppliesEnvOverrides(t *testing.T) {
 		t.Errorf("node LIST from env not applied: %+v", c.Nodes)
 	}
 }
+
+// The GAP-31 proof AT THE CONFIG LAYER: adding node #2 is a CONFIG edit (a numbered env block), not a
+// code change. The same Load path produces a 2-node list; nothing in the brain changes.
+func TestLoad_NodeTwoIsConfigOnly_GAP31(t *testing.T) {
+	env := map[string]string{
+		"TM_SMTP_MODE": "enabled",
+		"TM_NODE_ID":   "n1", "TM_NODE_BASE_URL": "http://box1", "TM_NODE_ENABLED": "true", "TM_NODE_PUBLIC_EGRESS_IP": "203.0.113.10",
+		// ↓↓↓ node #2 — a config-only addition (a numbered env block), zero brain code change ↓↓↓
+		"TM_NODE_2_ID": "n2", "TM_NODE_2_BASE_URL": "http://box2", "TM_NODE_2_ENABLED": "true", "TM_NODE_2_PUBLIC_EGRESS_IP": "203.0.113.11",
+	}
+	c, err := Load(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(c.Nodes) != 2 {
+		t.Fatalf("adding node #2 must be a +1 config-list entry, got %d nodes", len(c.Nodes))
+	}
+	if c.Nodes[1].ID != "n2" || c.Nodes[1].BaseURL != "http://box2" || c.Nodes[1].PublicEgressIP != "203.0.113.11" {
+		t.Fatalf("node #2 descriptor not parsed from numbered env: %+v", c.Nodes[1])
+	}
+	// The numbered scan stops at the first gap (no TM_NODE_3_*), so exactly 2 nodes.
+}
+
+func TestLoad_P4WatcherDialsDefaultAndOverride(t *testing.T) {
+	// Defaults present. CanaryWarmupCap (20) must be >= CanaryMinSamples (10) — the round-2 review
+	// finding: a smaller cap than the sample gate makes a recovering node stuck-forever (GAP-30).
+	def := Defaults()
+	if def.Dials.FleetWidePct != 50 || def.Dials.BlockMinSamples != 20 || def.Dials.CanaryWarmupCap != 20 {
+		t.Fatalf("P4 watcher defaults not set: %+v", def.Dials)
+	}
+	if def.Dials.CanaryWarmupCap < def.Dials.CanaryMinSamples {
+		t.Fatalf("canary cap (%d) must be >= min samples (%d) or a canary can never promote (GAP-30 stuck-forever)", def.Dials.CanaryWarmupCap, def.Dials.CanaryMinSamples)
+	}
+	if def.WatcherCadence() != 45*1e9 {
+		t.Fatalf("watcher cadence default want 45s, got %v", def.WatcherCadence())
+	}
+	// Overrides applied.
+	env := map[string]string{
+		"TM_WATCHER_CADENCE_SECONDS": "30", "TM_BLOCK_MIN_SAMPLES": "40",
+		"TM_FLEET_WIDE_PCT": "60", "TM_BLOCK_QUAR_THRESHOLD_PCT": "25",
+	}
+	c, err := Load(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Dials.WatcherCadenceSeconds != 30 || c.Dials.BlockMinSamples != 40 || c.Dials.FleetWidePct != 60 || c.Dials.BlockQuarThresholdPct != 25 {
+		t.Fatalf("P4 dial overrides not applied: %+v", c.Dials)
+	}
+}
+
+// A cadence of 0 is a valid override (one-shot, no loop); a negative/invalid dial is rejected.
+func TestLoad_P4DialValidation(t *testing.T) {
+	if _, err := Load(func(k string) string {
+		if k == "TM_WATCHER_CADENCE_SECONDS" {
+			return "0"
+		}
+		return ""
+	}); err != nil {
+		t.Fatalf("cadence 0 (one-shot) must be allowed, got %v", err)
+	}
+	if _, err := Load(func(k string) string {
+		if k == "TM_BLOCK_MIN_SAMPLES" {
+			return "0" // 0 is NOT allowed for a threshold dial (zero-disallowed)
+		}
+		return ""
+	}); err == nil {
+		t.Fatal("TM_BLOCK_MIN_SAMPLES=0 must be rejected (a zero sample gate is unsafe)")
+	}
+	// A canary cap BELOW the min-samples gate must be REJECTED (GAP-30 stuck-forever guard).
+	if _, err := Load(func(k string) string {
+		switch k {
+		case "TM_CANARY_WARMUP_CAP":
+			return "5"
+		case "TM_CANARY_MIN_SAMPLES":
+			return "10"
+		}
+		return ""
+	}); err == nil {
+		t.Fatal("canary_warmup_cap(5) < canary_min_samples(10) must be rejected (a recovering node could never promote)")
+	}
+}

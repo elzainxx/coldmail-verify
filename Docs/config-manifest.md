@@ -249,7 +249,10 @@ It does not resolve open questions or set UNSET values — those are owner decis
 | name | type | default | mis-setting effect | blast radius | source |
 |---|---|---|---|---|---|
 | **fleet-wide spike brake** (alert, don't cascade-quarantine) | feature-flag | LOCKED: do NOT auto-quarantine fleet-wide; alert + hold (OQ-P4-9) | auto-quarantine on systemic cause → cascade empties pool (auto-heal→auto-outage) | pool / brain-wide | P4 §5.5, OQ-P4-9, GAP-28 |
-| **fleet-wide detection threshold** | dial | >50% active nodes over threshold same window | — | pool | P4 §5.5 |
+| **fleet-wide detection threshold** | dial | ≥50% active nodes ELEVATED (not just tripped) same window | — | pool | P4 §5.5 |
+| **elevated-fraction (staggered-spike guard)** | dial | 0.6 × QuarThreshold ("climbing") counts toward the fleet signal | too high → a staggered subnet spike drains the pool one node at a time before the brake sees it (the Phase-4 review finding) | pool / brain-wide | P4 §5.5, GAP-28 |
+| **cross-cycle cascade memory** | feature-flag | LOCKED: a recent block-quarantine + a fresh trip = cascade → brake (spans cycles) | single-cycle snapshot misses the staggered drain | pool | P4 §5.5, GAP-28 |
+| **active-floor backstop** | feature-flag | LOCKED: block-rate quarantine NEVER drops the active pool below the serving floor | without it, block-rate could self-empty the pool even past the brake | pool / brain-wide | P4 §5.5 |
 
 ### 4.5 Topology & observability
 | name | type | default | mis-setting effect | blast radius | source |
@@ -261,6 +264,28 @@ It does not resolve open questions or set UNSET values — those are owner decis
 | **metrics backend** | feature-flag | both layered (LOG authoritative for control + TSDB for humans) (OQ-P4-11) | control depends on TSDB → control fails if TSDB down | observability | P4 §8.1, OQ-P4-11 |
 | **alert thresholds/channels** (quarantine, block-spike, audit-red, pool-eligible-low, rate-saturation) | dial | set per §8.2 | fleet-wide block-spike must never be a mere dashboard number | observability / pool | P4 §8.2 |
 | **`rate_budgets` table** | feature-flag | new operational table | — | pool | P4 §4.4, §9 |
+
+### 4.6 Concrete config keys (this build — the env vars the P4 code reads)
+| name | type | default | mis-setting effect | blast radius | source |
+|---|---|---|---|---|---|
+| **`TM_NODE_<i>_ID` / `_BASE_URL` / `_ENABLED` / `_PUBLIC_EGRESS_IP`** (nodes #2..#N, numbered) | feature-flag | absent ⇒ N=1 (only node #1's bare `TM_NODE_*`) | the GAP-31 proof: adding node #2 is a config-only numbered block, zero brain code | pool | P4 §7, GAP-31 |
+| **`TM_WATCHER_CADENCE_SECONDS`** (control-loop `T`) | dial | 45 (0 ⇒ one pass at boot, no loop) | too fast → twitchy; too slow → late quarantine | pool | P4 §5.1, OQ-P4-13 |
+| **`TM_BLOCK_RATE_WINDOW_SECONDS`** (rolling block-rate window) | dial | 1800 (30 min) | too short → noise; too long → slow | pool | P4 §5.2, OQ-P4-13 |
+| **`TM_BLOCK_MIN_SAMPLES`** (sample gate) | dial | 20 (zero-disallowed) | zero → false-quarantine on 1–2 unlucky checks | pool | P4 §5.3, GAP-27 |
+| **`TM_BLOCK_QUAR_THRESHOLD_PCT`** (quarantine threshold %) | dial | 30 | too low → over-quarantine | pool | P4 §5.4 |
+| **`TM_BLOCK_RECOVER_THRESHOLD_PCT`** (recovery threshold %) | dial | 5 (asymmetric, lower) | too high → premature recovery | pool | P4 §5.4 |
+| **`TM_CANARY_RECOVER_GREENS`** (consecutive clean canary cycles) | dial | 3 | too low → flapping recovery | pool | P4 §5.4 |
+| **`TM_CANARY_MIN_SAMPLES`** (min real canary attempts before promotion) | dial | 10 | zero → promote a recovering node on ZERO evidence (re-warm a still-blocklisted IP); the Phase-4 review finding | pool / reputation | P4 §5.4, GAP-30 |
+| **`TM_LIVENESS_MISSES`** (M consecutive `/health` fails) | dial | 3 | too low → quarantine on a transient blip | single box | P4 §5.4 |
+| **`TM_FLEET_WIDE_PCT`** (cascade-brake trigger, % of active nodes) | dial | 50 (0 ⇒ safe default in code — brake never disabled) | too high → brake never fires (auto-heal→auto-outage); too low → over-holds | pool / brain-wide | P4 §5.5, GAP-28 |
+| **`TM_CANARY_WARMUP_CAP`** (low re-warm cap on recovery) | dial | 5 | high → recovered node re-burns at full volume | single box / reputation | P4 §5.4 (PM3) |
+| **`TM_POOL_ELIGIBLE_FLOOR`** (pool-eligible-low alert floor) | dial | 1 | — | observability | P4 §8.2 |
+| **`TM_RATE_SATURATION_COUNT`** (rate-saturation alert threshold) | dial | 50 | — | observability | P4 §8.2 |
+
+> **Shadow-mode note (DR-2):** the block-rate quarantine (A1) reads `ShadowModes.A1BlockRateQuarantine`
+> (default `recommend_only`). At the default the watcher performs **zero live block-rate mutation** —
+> it recommends + alerts; audit-red (A2) and the canary (A3) stay auto. Promotion to `auto` is an
+> owner action, admin-audited under DR-3.
 
 ---
 

@@ -48,6 +48,9 @@ const ColdEmailDefinitionJSON = `{
   "flags": ["role", "typo", "free_corp", "disposable"],
   "recommendation_overrides_by_reason": { "disposable": "skip" },
   "provider_routing": { "google": "mx", "yahoo": "mx", "o365": "mx" },
+  "rate_limits": {
+    "default": { "max_inflight": 2, "max_starts_per_window": 30, "window_s": 60, "start_delay_jitter_ms": [50, 500] }
+  },
   "confidence": {
     "default": 30,
     "baseline_by_reason": {

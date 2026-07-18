@@ -14,10 +14,10 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | bucket | count |
 |---|---|
 | secrets | 8 |
-| feature-flags | 142 |
-| dials | 83 |
+| feature-flags | 145 |
+| dials | 96 |
 | other/uncategorized | 2 |
-| **total knobs** | **235** |
+| **total knobs** | **251** |
 
 > One-way doors are **not** dials: the frozen contracts (response shape, LOG, hashing,
 > vocabulary, never-fork) live in code (`control-plane/internal/{vocab,hash,verdict,store,router}`),
@@ -37,7 +37,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | vendor API key (P6) | no rotation story; leak = budget-DoS + billed enumeration oracle (security F-6) | no rotation story; leak = budget-DoS + billed enumeration oracle (security F-6) |
 | front-door bearer token | no per-caller scoping/rotation brain-side; guards bulk-PII endpoint by P5 (security F-20) | no per-caller scoping/rotation brain-side; guards bulk-PII endpoint by P5 (security F-20) |
 
-## Feature-flags (142)
+## Feature-flags (145)
 
 | knob | default / state | source |
 |---|---|---|
@@ -127,12 +127,15 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | hysteresis (quick-quarantine / slow-recover) | LOCKED asymmetric | P4 §5.3, §5.4 |
 | recovery resets durable warmup counter to low | LOCKED reset (PM3) | P4 §5.4 (PM3) |
 | fleet-wide spike brake (alert, don't cascade-quarantine) | LOCKED: do NOT auto-quarantine fleet-wide; alert + hold (OQ-P4-9) | P4 §5.5, OQ-P4-9, GAP-28 |
+| cross-cycle cascade memory | LOCKED: a recent block-quarantine + a fresh trip = cascade → brake (spans cycles) | P4 §5.5, GAP-28 |
+| active-floor backstop | LOCKED: block-rate quarantine NEVER drops the active pool below the serving floor | P4 §5.5 |
 | single-brain assumption (rate-limiter state) | single brain (OQ-P4-8); multi-brain out of scope | P4 §4.3/4.4, OQ-P4-8, GAP-25 |
 | health-watcher process placement | in-process background loop, single writer of nodes.status (OQ-P4-14) | P4 §5.1, OQ-P4-14 |
 | node #2 = +1 config line | config-only, zero code diff (Door 5 proof) | P4 §7, GAP-31 |
 | provisioning-script stage automation | stages 2/4/5/6/7 auto; spin+PTR script-with-manual-fallback (OQ-P4-10) | P4 §6.2, OQ-P4-10 |
 | metrics backend | both layered (LOG authoritative for control + TSDB for humans) (OQ-P4-11) | P4 §8.1, OQ-P4-11 |
 | `rate_budgets` table | new operational table | P4 §4.4, §9 |
+| `TM_NODE_<i>_ID` / `_BASE_URL` / `_ENABLED` / `_PUBLIC_EGRESS_IP` (nodes #2..#N, numbered) | absent ⇒ N=1 (only node #1's bare `TM_NODE_*`) | P4 §7, GAP-31 |
 | queue substrate | Supabase `work_items` + `FOR UPDATE SKIP LOCKED` (OQ-P5-1) | P5 §3.1, OQ-P5-1, GAP-34 |
 | compare-and-set settlement (`WHERE locked_by=me AND status=in_flight`) | LOCKED (GAP-37) — the CAS not the lease is the guarantee | P5 §5.2, §5.3, GAP-37 |
 | idempotency key derivation | `hash(email_hash ‖ policy_key ‖ policy_version ‖ config_fingerprint)` | P5 §5.1 |
@@ -184,7 +187,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | `unknown` not pressured to `valid` | LOCKED — first-class unknown survives flywheel | P7 §8.4 |
 | platform "your sends train our accuracy" disclosure | surface it (OQ-P7-8), disclose-don't-hide | P7 §14, OQ-P7-8 |
 
-## Dials (83)
+## Dials (96)
 
 | knob | default / state | source |
 |---|---|---|
@@ -235,8 +238,21 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | `RECOVER_WINDOW` (sustained-clean duration) | 30–60 min | P4 §5.4 |
 | `recovering` canary trickle size | few checks/window, well under warmup start (OQ-P4-7) | P4 §5.4, OQ-P4-7, GAP-30 |
 | liveness-fail quarantine (M consecutive) | M consecutive `/health` fails | P4 §5.4 |
-| fleet-wide detection threshold | >50% active nodes over threshold same window | P4 §5.5 |
+| fleet-wide detection threshold | ≥50% active nodes ELEVATED (not just tripped) same window | P4 §5.5 |
+| elevated-fraction (staggered-spike guard) | 0.6 × QuarThreshold ("climbing") counts toward the fleet signal | P4 §5.5, GAP-28 |
 | alert thresholds/channels (quarantine, block-spike, audit-red, pool-eligible-low, rate-saturation) | set per §8.2 | P4 §8.2 |
+| `TM_WATCHER_CADENCE_SECONDS` (control-loop `T`) | 45 (0 ⇒ one pass at boot, no loop) | P4 §5.1, OQ-P4-13 |
+| `TM_BLOCK_RATE_WINDOW_SECONDS` (rolling block-rate window) | 1800 (30 min) | P4 §5.2, OQ-P4-13 |
+| `TM_BLOCK_MIN_SAMPLES` (sample gate) | 20 (zero-disallowed) | P4 §5.3, GAP-27 |
+| `TM_BLOCK_QUAR_THRESHOLD_PCT` (quarantine threshold %) | 30 | P4 §5.4 |
+| `TM_BLOCK_RECOVER_THRESHOLD_PCT` (recovery threshold %) | 5 (asymmetric, lower) | P4 §5.4 |
+| `TM_CANARY_RECOVER_GREENS` (consecutive clean canary cycles) | 3 | P4 §5.4 |
+| `TM_CANARY_MIN_SAMPLES` (min real canary attempts before promotion) | 10 | P4 §5.4, GAP-30 |
+| `TM_LIVENESS_MISSES` (M consecutive `/health` fails) | 3 | P4 §5.4 |
+| `TM_FLEET_WIDE_PCT` (cascade-brake trigger, % of active nodes) | 50 (0 ⇒ safe default in code — brake never disabled) | P4 §5.5, GAP-28 |
+| `TM_CANARY_WARMUP_CAP` (low re-warm cap on recovery) | 5 | P4 §5.4 (PM3) |
+| `TM_POOL_ELIGIBLE_FLOOR` (pool-eligible-low alert floor) | 1 | P4 §8.2 |
+| `TM_RATE_SATURATION_COUNT` (rate-saturation alert threshold) | 50 | P4 §8.2 |
 | lease TTL | LOCKED: must exceed brain's max SMTP client deadline (GAP-37) | P5 §5.2, GAP-37 |
 | in-flight dedup collapse | collapse-on-enqueue when cheap; CAS backstop | P5 §5.5 |
 | backoff base step | 5 min (hint-seeded floor from `retry_after_hint_s`) | P5 §4.2, OQ-P5-2 |

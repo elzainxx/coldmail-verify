@@ -24,6 +24,14 @@ import (
 // list is empty by design, so this is the expected path.
 var ErrNoEligibleNode = errors.New("router: no eligible node")
 
+// ErrRateSaturated is returned by a Strategy when candidates DID exist and were eligible, but ALL of
+// them lacked per-provider RATE headroom (§4.6). It is distinct from ErrNoEligibleNode so the caller
+// emits the correct smtp_skipped_reason="rate_limited" (a capacity gap that clears when the cap frees)
+// rather than "no_eligible_node" (a health/routing gap) — the two degrade the same way (cheap,
+// provisional, non-cacheable, never invalid) but carry different diagnostics/alerting (§8.2). Found by
+// the Phase-4 round-2 review: without this, a pure rate-saturation degrade was mislabeled.
+var ErrRateSaturated = errors.New("router: all eligible nodes rate-saturated")
+
 // Node is the routable view of a configured node.
 type Node = config.NodeDescriptor
 
@@ -103,6 +111,12 @@ type HealthSource interface {
 type SMTPFilterConfig struct {
 	MaxAuditAge time.Duration // §4.5 staleness window; <=0 disables the freshness conjunct
 	Now         func() time.Time
+	// AllowRecovering admits `recovering` (canary) nodes to the candidate set (P4 §5.4/GAP-30). They
+	// must still pass every other conjunct (green ∧ port25 ∧ egress-match ∧ fresh); the CALLER meters
+	// them via the low canary warmup cap so a recovering node gets only "a few checks/window" — the
+	// metered canary that lets it accrue REAL block-rate samples to prove recovery (without this, a
+	// recovering node gets zero traffic → zero samples → can never recover; the Phase-4 review finding).
+	AllowRecovering bool
 }
 
 // SMTPRouteResult reports the routing outcome for the SMTP stage. When Node is valid, SMTP runs on
@@ -115,6 +129,7 @@ type SMTPRouteResult struct {
 	Err       error
 	SkipToken string                      // frozen §8 signals.smtp_skipped_reason ("" when a node was picked)
 	PerNode   map[string]audit.SkipReason // node_id -> finer internal reason (diagnosis)
+	IsCanary  bool                        // the picked node is `recovering` → the caller meters it via the LOW canary cap (§5.4)
 }
 
 // SMTPRoute applies the §4.4 eligibility filter then the Strategy. For each ENABLED node it reads
@@ -133,7 +148,14 @@ func (r *Registry) SMTPRoute(ctx context.Context, plan Plan, health HealthSource
 		now = fc.Now
 	}
 	perNode := map[string]audit.SkipReason{}
-	candidates := make([]Node, 0, len(r.nodes))
+	// Two candidate classes (§5.4): ACTIVE nodes serve normal traffic; RECOVERING nodes serve ONLY
+	// the metered canary. We prefer active — a recovering node must not steal traffic from a healthy
+	// peer — and fall to recovering only when NO active node can take the check. This keeps the canary
+	// a genuine trickle (it gets a check only when it's the last resort for that domain), while still
+	// letting it accrue REAL block-rate samples to prove recovery (the Phase-4 review finding).
+	active := make([]Node, 0, len(r.nodes))
+	recovering := make([]Node, 0, len(r.nodes))
+	recoveringStatus := map[string]bool{}
 
 	for _, n := range r.nodes {
 		if !n.Enabled {
@@ -161,22 +183,49 @@ func (r *Registry) SMTPRoute(ctx context.Context, plan Plan, health HealthSource
 			ExpectedEgressIP: n.PublicEgressIP,
 			Now:              now(),
 			MaxAuditAge:      fc.MaxAuditAge,
+			AllowRecovering:  fc.AllowRecovering,
 		})
 		if reason != audit.SkipNone {
 			perNode[n.ID] = reason
 			continue
 		}
-		candidates = append(candidates, n)
+		if h.Status == string(audit.LifecycleRecovering) {
+			recovering = append(recovering, n)
+			recoveringStatus[n.ID] = true
+		} else {
+			active = append(active, n)
+		}
 	}
 
-	if len(candidates) > 0 {
-		picked, err := r.strategy.Pick(ctx, plan, candidates)
+	// Prefer active; the canary (recovering) is the fallback ONLY when no active node can serve.
+	if len(active) > 0 {
+		picked, err := r.strategy.Pick(ctx, plan, active)
 		if err != nil {
-			return SMTPRouteResult{Err: err, SkipToken: skipTokenFor(perNode), PerNode: perNode}
+			return SMTPRouteResult{Err: err, SkipToken: skipTokenForErr(err, perNode), PerNode: perNode}
 		}
 		return SMTPRouteResult{Node: picked, PerNode: perNode}
 	}
+	if len(recovering) > 0 {
+		picked, err := r.strategy.Pick(ctx, plan, recovering)
+		if err != nil {
+			return SMTPRouteResult{Err: err, SkipToken: skipTokenForErr(err, perNode), PerNode: perNode}
+		}
+		// The picked node is the metered canary — the caller reserves against the LOW canary cap so
+		// the recovering node gets only a trickle (§5.4), not the full ramp.
+		return SMTPRouteResult{Node: picked, PerNode: perNode, IsCanary: recoveringStatus[picked.ID]}
+	}
 	return SMTPRouteResult{Err: ErrNoEligibleNode, SkipToken: skipTokenFor(perNode), PerNode: perNode}
+}
+
+// skipTokenForErr maps a Strategy Pick error to the frozen §8 token. ErrRateSaturated (candidates
+// existed but ALL were rate-capped) → "rate_limited" (§4.6) — NOT the per-node-exclusion token, which
+// would mislabel a pure rate-saturation degrade as no_eligible_node/audit_red (the round-2 review
+// finding). Any other error falls back to the per-node exclusion mapping.
+func skipTokenForErr(err error, perNode map[string]audit.SkipReason) string {
+	if errors.Is(err, ErrRateSaturated) {
+		return "rate_limited"
+	}
+	return skipTokenFor(perNode)
 }
 
 // skipTokenFor maps the per-node exclusion reasons to the frozen §8 signals.smtp_skipped_reason

@@ -8,6 +8,7 @@ package store
 import (
 	"context"
 	"encoding/hex"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +33,16 @@ type MemStore struct {
 	health     map[string]NodeHealth   // node_id -> latest health summary (the `nodes` row mirror)
 	registered map[string]struct{}     // node_ids with a `nodes` row (mirrors PG: only UpsertNodeState creates it)
 	warmup     map[string]warmupWindow // node_id + "\x00" + windowStart -> counter
+
+	// Phase 4 (§4.4) — durable per-(node × provider) token-bucket spend. Keyed node+"\x00"+bucket.
+	// Uses the SHARED applyRefill helper so the fake can't diverge from PG (P3 test-double lesson).
+	rateBudget map[string]rateBucket
+}
+
+// rateBucket mirrors one rate_budgets row (per node, per provider bucket).
+type rateBucket struct {
+	tokens     float64
+	lastRefill time.Time
 }
 
 // warmupWindow mirrors one node_warmup row (per node, per window).
@@ -56,7 +67,12 @@ func NewMem(now func() time.Time) *MemStore {
 		health:     map[string]NodeHealth{},
 		registered: map[string]struct{}{},
 		warmup:     map[string]warmupWindow{},
+		rateBudget: map[string]rateBucket{},
 	}
+}
+
+func rateKey(nodeID, bucket string) string {
+	return nodeID + "\x00" + bucket
 }
 
 func warmupKey(nodeID string, windowStart time.Time) string {
@@ -298,6 +314,139 @@ func (m *MemStore) ReserveWarmupSlot(_ context.Context, nodeID string, windowSta
 	return WarmupDecision{Allowed: true, Count: w.count, Cap: w.cap, WindowStart: w.windowStart}, nil
 }
 
+// ── Phase 4 (§4.4/§5.2/§5.4/§5.6) — durable rate budget, block-rate, lifecycle ─────────
+
+// ReserveRateToken consumes one token from the durable (node × provider) bucket (§4.4). It refills
+// via the SHARED applyRefill helper (identical math to PG) from real elapsed time since lastRefill,
+// so a fresh MemStore models a cold bucket (starts at capacity — a never-seen node has full burst)
+// and an existing bucket refills only by elapsed wall-clock (never on restart — restart-safe).
+func (m *MemStore) ReserveRateToken(_ context.Context, nodeID, providerBucket string, p RateParams, now time.Time) (RateDecision, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if p.Capacity <= 0 {
+		return RateDecision{Allowed: false, TokensAfter: 0, Capacity: p.Capacity}, nil
+	}
+	b, ok := m.rateBudget[rateKey(nodeID, providerBucket)]
+	if !ok {
+		// A never-seen bucket starts FULL (capacity tokens at `now`) — mirrors PG's INSERT of a fresh
+		// row at capacity. The first reservation then decrements from full.
+		b = rateBucket{tokens: p.Capacity, lastRefill: now}
+	}
+	tokens, canGrant := applyRefill(b.tokens, b.lastRefill, p, now)
+	if !canGrant {
+		// Persist the refill (advance the anchor) but do NOT decrement — mirrors PG's read-side refill.
+		m.rateBudget[rateKey(nodeID, providerBucket)] = rateBucket{tokens: tokens, lastRefill: now}
+		return RateDecision{Allowed: false, TokensAfter: tokens, Capacity: p.Capacity}, nil
+	}
+	tokens -= 1.0
+	m.rateBudget[rateKey(nodeID, providerBucket)] = rateBucket{tokens: tokens, lastRefill: now}
+	return RateDecision{Allowed: true, TokensAfter: tokens, Capacity: p.Capacity}, nil
+}
+
+// PeekRateBudget refills-and-reads WITHOUT consuming (§3.3 headroom check). It advances the refill
+// anchor (idempotent) but never decrements the spend.
+func (m *MemStore) PeekRateBudget(_ context.Context, nodeID, providerBucket string, p RateParams, now time.Time) (RateDecision, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if p.Capacity <= 0 {
+		return RateDecision{Allowed: false, TokensAfter: 0, Capacity: p.Capacity}, nil
+	}
+	b, ok := m.rateBudget[rateKey(nodeID, providerBucket)]
+	if !ok {
+		b = rateBucket{tokens: p.Capacity, lastRefill: now}
+	}
+	tokens, canGrant := applyRefill(b.tokens, b.lastRefill, p, now)
+	m.rateBudget[rateKey(nodeID, providerBucket)] = rateBucket{tokens: tokens, lastRefill: now}
+	return RateDecision{Allowed: canGrant, TokensAfter: tokens, Capacity: p.Capacity}, nil
+}
+
+// BlockRateByVerifierIP aggregates per-verifier_ip block-rate from the in-memory LOG over [since,∞)
+// (§5.2/§5.6). It applies the EXACT filter PG does (from_cache=false ∧ verifier_ip!="" ∧ SMTP
+// actually ran), so cache hits and cheap-degrades never count (PB1). "SMTP ran" is inferred from a
+// non-empty VerifierIP (§4.6: a cheap-degrade logs verifier_ip=""/NULL). Deterministic order.
+func (m *MemStore) BlockRateByVerifierIP(_ context.Context, since time.Time) ([]NodeBlockStats, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	agg := map[string]*NodeBlockStats{}
+	for _, row := range m.Log {
+		if row.FromCache || row.VerifierIP == "" { // exclude cache hits + cheap-degrades (PB1)
+			continue
+		}
+		if row.CheckedAt.Before(since) {
+			continue
+		}
+		s, ok := agg[row.VerifierIP]
+		if !ok {
+			s = &NodeBlockStats{VerifierIP: row.VerifierIP}
+			agg[row.VerifierIP] = s
+		}
+		s.Attempts++
+		switch row.Reason {
+		case "smtp_blocked":
+			s.Blocked++
+		case "smtp_timeout", "connection_failed":
+			s.Timeouts++
+		}
+	}
+	out := make([]NodeBlockStats, 0, len(agg))
+	for _, s := range agg {
+		out = append(out, *s)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].VerifierIP < out[j].VerifierIP })
+	return out, nil
+}
+
+// MetricRowsSince returns LOG rows with CheckedAt >= since, newest first, capped at limit (§8). It
+// mirrors PG's bounded windowed read (ORDER BY checked_at DESC LIMIT). limit<=0 uses 5000.
+func (m *MemStore) MetricRowsSince(_ context.Context, since time.Time, limit int) ([]MetricRow, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if limit <= 0 {
+		limit = 5000
+	}
+	// Collect in-window rows newest-first.
+	var all []MetricRow
+	for i := len(m.Log) - 1; i >= 0; i-- {
+		row := m.Log[i]
+		if row.CheckedAt.Before(since) {
+			continue
+		}
+		all = append(all, MetricRow{
+			CheckedAt: row.CheckedAt, Status: row.Status, Reason: row.Reason, MXProvider: row.MXProvider,
+			VerifierIP: row.VerifierIP, FromCache: row.FromCache, LatencyMS: row.LatencyMS, Signals: row.Signals,
+		})
+	}
+	truncated := len(all) > limit
+	if truncated {
+		all = all[:limit]
+	}
+	return all, truncated, nil
+}
+
+// SetNodeStatus writes ONLY the lifecycle status (§5.4). No `nodes` row → no-op (mirrors PG's
+// UPDATE ... WHERE id=$1 matching 0). It never touches port25_open/audit columns.
+func (m *MemStore) SetNodeStatus(_ context.Context, nodeID, status string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.registered[nodeID]; !ok {
+		return nil // no row → no-op (PG parity)
+	}
+	h := m.health[nodeID]
+	h.NodeID = nodeID
+	h.Status = status
+	m.health[nodeID] = h
+	return nil
+}
+
+// ResetWarmup resets the node's warmup counter for the window to count=0 at the given cap (§5.4/PM3
+// canary recovery — re-warm gently). Upserts the window row.
+func (m *MemStore) ResetWarmup(_ context.Context, nodeID string, windowStart time.Time, cap int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.warmup[warmupKey(nodeID, windowStart)] = warmupWindow{windowStart: windowStart.UTC(), count: 0, cap: cap}
+	return nil
+}
+
 func (m *MemStore) Ping(context.Context) error { return nil }
 func (m *MemStore) Close()                     {}
 
@@ -339,6 +488,14 @@ func (m *MemStore) SeedWarmup(nodeID string, windowStart time.Time, count, cap i
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.warmup[warmupKey(nodeID, windowStart)] = warmupWindow{windowStart: windowStart.UTC(), count: count, cap: cap}
+}
+
+// SeedRateBudget sets a node×provider bucket's durable state directly (test-support: model the
+// rate_budgets row a brain reloads on restart — the §4.4 restart-safe property).
+func (m *MemStore) SeedRateBudget(nodeID, providerBucket string, tokens float64, lastRefill time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rateBudget[rateKey(nodeID, providerBucket)] = rateBucket{tokens: tokens, lastRefill: lastRefill}
 }
 
 // SeedPolicy stores a policy; if isDefault, it becomes the default (last write wins).

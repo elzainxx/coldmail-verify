@@ -83,6 +83,16 @@ touching a one-way door or elevating/gating a cross-phase decision.
 | [`adr/ADR-0009-gap24-egress-ip-invariant-runtime-enforcement.md`](adr/ADR-0009-gap24-egress-ip-invariant-runtime-enforcement.md) | GAP-24 four-way egress-IP invariant runtime-enforced (eligibility gate + re-audit scheduler); `verifier_ip` sourced from the brain registry; the P3 additive surface (one `signals` key, `node_audits`/`node_warmup` tables) — additive against all five doors. |
 | [`../control-plane/migrations/0007_node_audits_warmup.sql`](../control-plane/migrations/0007_node_audits_warmup.sql) | `node_audits` (append-only audit history, OQ-P3-5) + `node_warmup` (durable ramp counter, §5.2) + the `nodes` INSERT/UPDATE grant. Append-only posture on `node_audits` proven live. |
 
+## Phase-4 artifacts (resilience & pool — local build complete)
+
+| Doc | What it is |
+|---|---|
+| [`phase-4-status.md`](phase-4-status.md) | Live scorecard of the Phase-4 local build: sticky-by-domain (HRW) + least-inflight routing, the per-provider rate limiter, the continuous health-watcher, block-rate quarantine + the three guards, the **fleet-wide cascade brake (fail-verified)**, canary recovery, observability, node #2 = +1 config line, and the PENDING-REAL-BOX ledger. Grants proven live on real Postgres. |
+| [`phase-4-provisioning-script-design.md`](phase-4-provisioning-script-design.md) | The §6 provisioning-script DESIGN: the ordered, idempotent, fail-closed stage contract (spin → install → PTR → audit → register → warm up), one level more concrete than P3's checklist — design, not runnable code. Resolves the P3 `port25_open` wiring gap (stage 4 = the egress-test writer, DR-3 first slice). |
+| [`phase-4-to-5-handoff.md`](phase-4-to-5-handoff.md) | The Phase-4→Phase-5 handoff: what P4 locked/built, what P5 inherits (the `rate_limited` backpressure the queue absorbs, sticky-by-domain setting up domain-batched session reuse, the durable-counter discipline), the `SEAM → P5` inbox (the queue, greylist retry, CAS idempotency), and the cutover gates carried forward (incl. DR-4 queue-plaintext-backup). |
+| [`adr/ADR-0010-phase-4-pool-additive-surface.md`](adr/ADR-0010-phase-4-pool-additive-surface.md) | The Phase-4 additive surface: one `signals` value (`rate_limited`), one table (`rate_budgets`), the `recovering` node-lifecycle value (NOT verdict vocab); block-rate quarantine (A1) defaults recommend-only (DR-2); the fleet-wide cascade brake (GAP-28) + canary recovery (GAP-30) built + fail-verified — additive against all five doors. |
+| [`../control-plane/migrations/0008_rate_budgets_recovering.sql`](../control-plane/migrations/0008_rate_budgets_recovering.sql) | `rate_budgets` (durable per-(node×provider) token-bucket spend, restart-safe, §4.4) + the `recovering` `nodes.status` value (§5.4/GAP-30). `cp_runtime` SELECT+INSERT+UPDATE, DELETE revoked (counter posture, proven live). |
+
 ## How the living-docs system stays honest (enforced, not asked)
 
 - **Behavior change ⇒ doc/ADR change**, in the same commit — [`../scripts/check-docs-updated.sh`](../scripts/check-docs-updated.sh) fails CI otherwise.

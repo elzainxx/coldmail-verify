@@ -18,10 +18,12 @@ import (
 	"github.com/mnfi/codmailling/control-plane/internal/audit"
 	"github.com/mnfi/codmailling/control-plane/internal/config"
 	"github.com/mnfi/codmailling/control-plane/internal/hash"
+	"github.com/mnfi/codmailling/control-plane/internal/health"
 	"github.com/mnfi/codmailling/control-plane/internal/node"
 	"github.com/mnfi/codmailling/control-plane/internal/orchestrator"
 	"github.com/mnfi/codmailling/control-plane/internal/policy"
 	"github.com/mnfi/codmailling/control-plane/internal/provrouting"
+	"github.com/mnfi/codmailling/control-plane/internal/ratelimit"
 	"github.com/mnfi/codmailling/control-plane/internal/router"
 	"github.com/mnfi/codmailling/control-plane/internal/secrets"
 	"github.com/mnfi/codmailling/control-plane/internal/store"
@@ -151,13 +153,6 @@ func buildSMTP(ctx, appCtx context.Context, cfg config.Config, sec *secrets.Secr
 	if !cfg.SMTPEnabled() || len(cfg.Nodes) == 0 {
 		return nil, fallback
 	}
-	reg := router.New(cfg.Nodes, nil)
-	plan := router.Plan{}
-	n, err := reg.Route(ctx, plan)
-	if err != nil {
-		log.Printf("verify: SMTP enabled but no eligible node — staying cheap-layers-only")
-		return nil, fallback
-	}
 	tokenFor := func(id string) string {
 		if t, ok := sec.NodeToken(id); ok {
 			return t
@@ -165,6 +160,43 @@ func buildSMTP(ctx, appCtx context.Context, cfg config.Config, sec *secrets.Secr
 		return ""
 	}
 	client := node.NewHTTPClient(cfg.SMTPClientDeadline())
+
+	// §4: the per-provider rate limiter (durable budget in Postgres, ephemeral in-flight in-process).
+	// Its caps come from the policy rate_limits key (§4.7, global-with-override OQ-P4-5). §3.2/§3.4:
+	// the router's Strategy is now sticky-by-domain (HRW) with a least-inflight fallback; it consults
+	// the limiter for per-node rate headroom (§3.3) + in-flight ranking (§3.4). This is the "one
+	// mechanism in two parts" — sticky concentrates, the limiter paces (§4.1). A nil rate_limits key
+	// makes the limiter inert (no rate limiting), and the strategy degrades to pure sticky affinity.
+	var rateLimits *policy.RateLimits
+	if def, derr := policy.ColdEmailDefinition(); derr == nil {
+		rateLimits = def.RateLimits
+	}
+	limiter := ratelimit.New(ratelimit.Config{Budget: pg, Limits: rateLimits})
+	sticky := router.NewSticky(
+		func(rctx context.Context, nodeID string, plan router.Plan) bool {
+			ok, herr := limiter.HasHeadroom(rctx, nodeID, ratelimit.BucketForDomain(plan.Provider, plan.Domain))
+			return herr == nil && ok // a headroom-read error fails closed (no headroom → not this home)
+		},
+		func(nodeID string, plan router.Plan) int {
+			return limiter.Inflight(nodeID, ratelimit.BucketForDomain(plan.Provider, plan.Domain))
+		},
+	)
+	reg := router.New(cfg.Nodes, sticky)
+
+	// The bootstrap /v1/config fetch just needs SOME configured node's base URL; use the first enabled
+	// one directly (the eligibility filter that gates :smtp is applied per request via SMTPRoute, not
+	// here). This keeps N=1 and N>1 identical — the config-fetch node is a bootstrap detail.
+	var n config.NodeDescriptor
+	for _, nd := range cfg.Nodes {
+		if nd.Enabled {
+			n = nd
+			break
+		}
+	}
+	if n.ID == "" {
+		log.Printf("verify: SMTP enabled but no enabled node in the config list — staying cheap-layers-only")
+		return nil, fallback
+	}
 
 	// §4.6: fingerprint the engine's effective config. On failure, refuse a confident engine
 	// fingerprint — degrade to cheap-only (don't run SMTP against an unknown config).
@@ -207,12 +239,14 @@ func buildSMTP(ctx, appCtx context.Context, cfg config.Config, sec *secrets.Secr
 		}
 	}
 
-	// §4.5: start the MINIMAL scheduled re-audit ticker (NOT the P4 continuous health-watcher — no
-	// /health poll, no block-rate). It re-runs /v1/audit on a cadence, records the append-only
-	// history, and drives auto-quarantine-on-red / N-green-recover. Runs in the background on the
-	// process-lifetime appCtx (cancelled on shutdown). On a real box this is what promotes
-	// provisioning→active once PTR/DNS align and stops :smtp the moment an audit goes red.
-	startReAuditTicker(appCtx, cfg, client, pg, tokenFor)
+	// §5: start the CONTINUOUS health-watcher (the P4 control loop). It REPLACES the P3 minimal
+	// re-audit ticker (§1.2): it owns the audit cadence AND adds liveness polling + block-rate-driven
+	// quarantine, with the three guards (sample gate, hysteresis, fleet-wide brake) + canary recovery.
+	// The block-rate (statistical, A1) trigger is recommend-only by default (DR-2 shadow-mode) — the
+	// watcher performs ZERO live block-rate mutation until an owner promotes A1 to auto (the
+	// fresh-system invariant). Audit-red (A2) + canary (A3) stay auto. Runs on the process-lifetime
+	// appCtx (cancelled on shutdown), the single writer of nodes.status (§5.1).
+	startHealthWatcher(appCtx, cfg, client, pg, tokenFor)
 
 	return &orchestrator.SMTPDeps{
 		Client:         client,
@@ -225,56 +259,55 @@ func buildSMTP(ctx, appCtx context.Context, cfg config.Config, sec *secrets.Secr
 		Health:      pg,
 		MaxAuditAge: cfg.AuditMaxAge(),
 		WarmupCap:   cfg.Dials.WarmupDailyCap,
+		CanaryCap:   cfg.Dials.CanaryWarmupCap, // §5.4: the LOW cap a recovering canary node is metered by
+		// Phase 4 (§4): the per-provider rate limiter + a real jitter sleeper.
+		Limiter: limiter,
+		Sleep:   time.Sleep,
 	}, fingerprint
 }
 
-// startReAuditTicker launches the §4.5 minimal re-audit loop in the background. The CADENCE lives
-// here (in the caller), keeping the scheduler itself a pure, testable actor — and keeping the
-// "not a P4 daemon" boundary honest (this is a simple ticker over a fixed node list, not a
-// health-watcher). It audits once immediately (so a box that's already green promotes at boot),
-// then every AuditInterval. Each pass is audit.Scheduler.AuditAll; auto-quarantine is a state
-// transition inside it. Block-rate-driven quarantine is explicitly NOT here (GAP-18 → P4).
-func startReAuditTicker(ctx context.Context, cfg config.Config, client node.AuditClient, s audit.AuditStore, tokenFor func(string) string) {
-	refs := make([]audit.NodeRef, 0, len(cfg.Nodes))
+// startHealthWatcher launches the §5 CONTINUOUS health-watcher in the background — the P4 control
+// loop that REPLACES the P3 minimal re-audit ticker (§1.2). It owns the audit cadence (via the P3
+// scheduler's Observe: fetch + record, no transition) AND adds liveness polling + block-rate-driven
+// quarantine, with the three guards (sample gate GAP-27, hysteresis, fleet-wide brake GAP-28) and
+// the canary recovery (GAP-30). It is the SINGLE WRITER of nodes.status (§5.1). The block-rate (A1)
+// trigger is recommend-only by default (DR-2) — zero live block-rate mutation until an owner
+// promotes A1 to auto. The client is the live HTTPClient (real /v1/audit + /healthcheck); on the
+// local build with no real box the audit fetch fails → no promotion (honest, harden-toward-unknown).
+func startHealthWatcher(ctx context.Context, cfg config.Config, client *node.HTTPClient, pg *store.PG, tokenFor func(string) string) {
+	pool := make([]health.WatchedNode, 0, len(cfg.Nodes))
 	for _, nd := range cfg.Nodes {
 		if !nd.Enabled {
 			continue
 		}
-		refs = append(refs, audit.NodeRef{ID: nd.ID, BaseURL: nd.BaseURL, Token: tokenFor(nd.ID), PublicEgressIP: nd.PublicEgressIP})
+		pool = append(pool, health.WatchedNode{
+			NodeRef:    audit.NodeRef{ID: nd.ID, BaseURL: nd.BaseURL, Token: tokenFor(nd.ID), PublicEgressIP: nd.PublicEgressIP},
+			VerifierIP: nd.PublicEgressIP, // == the node's egress IP (the block-rate GROUP BY key, §5.6)
+		})
 	}
-	if len(refs) == 0 {
+	if len(pool) == 0 {
 		return
 	}
-	sched := audit.NewScheduler(audit.Deps{Client: client, Store: s}, cfg.Dials.AuditRecoverGreens)
-	interval := cfg.AuditInterval()
-	go func() {
-		auditPass := func() {
-			for _, out := range sched.AuditAll(ctx, refs) {
-				if out.Err != nil {
-					log.Printf("audit: node=%s error: %v", out.NodeID, out.Err)
-					continue
-				}
-				if out.EgressMismatch {
-					log.Printf("audit: node=%s WARNING egress-IP != audited current_host_ip (GAP-24) — will NOT promote", out.NodeID)
-				}
-				if out.From != out.To {
-					log.Printf("audit: node=%s %s -> %s (audit=%s)", out.NodeID, out.From, out.To, out.Status)
-				}
-			}
-		}
-		auditPass() // immediate first audit at boot
-		if interval <= 0 {
-			return
-		}
-		t := time.NewTicker(interval)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				auditPass()
-			}
-		}
-	}()
+	sched := audit.NewScheduler(audit.Deps{Client: client, Store: pg}, cfg.Dials.CanaryRecoverGreens)
+	blockMode := health.ModeRecommendOnly // DR-2: A1 statistical trigger defaults to recommend-only
+	if cfg.ShadowModes.A1BlockRateQuarantine == config.ModeAuto {
+		blockMode = health.ModeAuto // owner-promoted (admin-audited under DR-3)
+	}
+	params := health.Params{
+		MinSamples:        cfg.Dials.BlockMinSamples,
+		QuarThreshold:     float64(cfg.Dials.BlockQuarThresholdPct) / 100.0,
+		RecoverThreshold:  float64(cfg.Dials.BlockRecoverThreshPct) / 100.0,
+		RecoverGreens:     cfg.Dials.CanaryRecoverGreens,
+		MinCanarySamples:  cfg.Dials.CanaryMinSamples, // §5.4/GAP-30 (no zero-sample promotion)
+		LivenessMisses:    cfg.Dials.LivenessMisses,
+		FleetWideFraction: float64(cfg.Dials.FleetWidePct) / 100.0,
+		MinActiveFloor:    cfg.Dials.PoolEligibleFloor, // §5.5 backstop: block-rate never drops below the serving floor
+		BlockMode:         blockMode,
+	}
+	w := health.NewWatcher(health.Deps{
+		Audit: sched, Liveness: client, BlockRate: pg, Status: pg,
+	}, params, cfg.BlockRateWindow(), cfg.Dials.CanaryWarmupCap)
+	log.Printf("health-watcher: starting (cadence=%s window=%s block_mode=%s fleet_brake=%d%%)",
+		cfg.WatcherCadence(), cfg.BlockRateWindow(), blockMode, cfg.Dials.FleetWidePct)
+	go w.Run(ctx, pool, cfg.WatcherCadence())
 }

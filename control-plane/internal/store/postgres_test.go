@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -318,6 +319,223 @@ func TestPGReserveWarmup_DenyReportsStoredCap(t *testing.T) {
 	}
 	if d.Cap != 2 {
 		t.Fatalf("PG deny must report the STORED cap 2, got %d", d.Cap)
+	}
+}
+
+// ── Phase 4 (§4.4/§5.2/§5.4/§5.6) — PG-gated: durable rate budget, block-rate, lifecycle ──
+
+// The durable rate budget survives a "restart" (a NEW *PG handle sharing nothing but the DB) without
+// refilling to full — the §4.4/PM4 property. Uses refill_per_sec=0 so no wall-clock refill masks it.
+func TestPGRateBudget_DurableAcrossRestart(t *testing.T) {
+	pg := testPG(t)
+	ctx := context.Background()
+	nodeID := "n-" + must(idgen.NewV7String(time.Now().UTC()))
+	p := RateParams{Capacity: 2, RefillPerSec: 0}
+	now := time.Now().UTC()
+	// Drain the fresh (full) bucket: 2 grants, then deny.
+	if d, _ := pg.ReserveRateToken(ctx, nodeID, "other:acme.com", p, now); !d.Allowed {
+		t.Fatalf("grant 1 must be allowed (fresh full bucket)")
+	}
+	if d, _ := pg.ReserveRateToken(ctx, nodeID, "other:acme.com", p, now); !d.Allowed {
+		t.Fatalf("grant 2 must be allowed")
+	}
+	if d, _ := pg.ReserveRateToken(ctx, nodeID, "other:acme.com", p, now); d.Allowed {
+		t.Fatalf("grant 3 must be denied (bucket empty, no refill)")
+	}
+	// "Restart": a second pool handle. The durable row persists → still empty at the SAME instant.
+	pg2 := testPG(t)
+	if d, _ := pg2.ReserveRateToken(ctx, nodeID, "other:acme.com", p, now); d.Allowed {
+		t.Fatalf("a restart must NOT refill the durable allowance — reserve should be denied (PM4)")
+	}
+}
+
+// Real elapsed wall-clock DOES refill (restart-safe, not restart-refilled): drain, then reserve
+// 10s later with refill=1/sec → allowed again.
+func TestPGRateBudget_RefillsByElapsed(t *testing.T) {
+	pg := testPG(t)
+	ctx := context.Background()
+	nodeID := "n-" + must(idgen.NewV7String(time.Now().UTC()))
+	p := RateParams{Capacity: 1, RefillPerSec: 1}
+	base := time.Now().UTC()
+	if d, _ := pg.ReserveRateToken(ctx, nodeID, "b", p, base); !d.Allowed {
+		t.Fatalf("first reserve (full) must be allowed")
+	}
+	if d, _ := pg.ReserveRateToken(ctx, nodeID, "b", p, base); d.Allowed {
+		t.Fatalf("second reserve at same instant must deny")
+	}
+	if d, _ := pg.ReserveRateToken(ctx, nodeID, "b", p, base.Add(2*time.Second)); !d.Allowed {
+		t.Fatalf("after 2s a token must have refilled (restart-safe)")
+	}
+}
+
+// PeekRateBudget must not consume: peek repeatedly, then a reserve still succeeds.
+func TestPGPeekRateBudget_DoesNotConsume(t *testing.T) {
+	pg := testPG(t)
+	ctx := context.Background()
+	nodeID := "n-" + must(idgen.NewV7String(time.Now().UTC()))
+	p := RateParams{Capacity: 1, RefillPerSec: 0}
+	now := time.Now().UTC()
+	for i := 0; i < 3; i++ {
+		if d, _ := pg.PeekRateBudget(ctx, nodeID, "b", p, now); !d.Allowed {
+			t.Fatalf("peek %d must report headroom", i)
+		}
+	}
+	if d, _ := pg.ReserveRateToken(ctx, nodeID, "b", p, now); !d.Allowed {
+		t.Fatalf("reserve after peeks must still succeed (peek didn't consume)")
+	}
+}
+
+// The rate_budgets DELETE grant is revoked from cp_runtime (append-only-ish counter posture). This
+// only runs when the DSN role is cp_runtime (CI uses postgres/superuser); it asserts the grant when
+// it can, otherwise skips honestly (never fakes the enforcement).
+func TestPGRateBudget_DeleteDeniedForRuntime(t *testing.T) {
+	pg := testPG(t)
+	ctx := context.Background()
+	nodeID := "n-" + must(idgen.NewV7String(time.Now().UTC()))
+	_, _ = pg.ReserveRateToken(ctx, nodeID, "b", RateParams{Capacity: 1, RefillPerSec: 0}, time.Now().UTC())
+	_, err := pg.pool.Exec(ctx, `DELETE FROM rate_budgets WHERE node_id=$1`, nodeID)
+	if err == nil {
+		t.Skip("connected as a privileged role (DELETE allowed) — grant enforcement is proven only as cp_runtime")
+	}
+	// As cp_runtime the DELETE must be denied (permission denied), mirroring node_warmup's posture.
+}
+
+// The block-rate SQL excludes cache hits (from_cache=true) and cheap-degrades (verifier_ip NULL) —
+// PB1, proven against real Postgres (the FILTER + WHERE clauses).
+func TestPGBlockRate_ExcludesCacheAndDegrades_PB1(t *testing.T) {
+	pg := testPG(t)
+	ctx := context.Background()
+	// A UNIQUE verifier_ip per run: the CI/local Postgres persists rows across runs, and the block-
+	// rate window is an hour, so a fixed IP would accumulate prior runs' rows. Derive a distinct
+	// 10.x.y.z from the wall clock so each run measures only its own inserts.
+	ns := time.Now().UnixNano()
+	ip := fmt.Sprintf("10.%d.%d.%d", (ns>>16)&0xff, (ns>>8)&0xff, ns&0xff)
+	now := time.Now().UTC()
+	mkRow := func(reason, verifierIP string, fromCache bool) VerificationRow {
+		return VerificationRow{
+			ID: must(idgen.NewV7String(now)), RequestID: must(idgen.NewV7String(now)),
+			CheckedAt: now, CreatedAt: now, Status: "unknown", Reason: reason,
+			Confidence: 10, Recommendation: "review",
+			Flags: map[string]bool{}, Signals: map[string]any{},
+			PolicyKey: "cold-email", PolicyVersion: 1, APIVersion: "v1",
+			ConfigFingerprint: "cfg_sha256:test", VerifierIP: verifierIP, FromCache: fromCache,
+		}
+	}
+	// 2 real blocks + 1 real accepted on ip; 1 cache-hit block; 1 degrade (no verifier_ip).
+	for _, r := range []VerificationRow{
+		mkRow("smtp_blocked", ip, false), mkRow("smtp_blocked", ip, false), mkRow("accepted", ip, false),
+		mkRow("smtp_blocked", ip, true), mkRow("smtp_blocked", "", false),
+	} {
+		if err := pg.AppendVerification(ctx, r, nil); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	stats, err := pg.BlockRateByVerifierIP(ctx, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("block-rate: %v", err)
+	}
+	var got *NodeBlockStats
+	for i := range stats {
+		if stats[i].VerifierIP == ip {
+			got = &stats[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("expected stats for %s, got %v", ip, stats)
+	}
+	if got.Attempts != 3 || got.Blocked != 2 {
+		t.Fatalf("PB1: want attempts=3 blocked=2 (cache hit + degrade excluded), got attempts=%d blocked=%d", got.Attempts, got.Blocked)
+	}
+}
+
+// SetNodeStatus writes 'recovering' (0008 CHECK widening) without clobbering port25/audit, and is a
+// no-op for an unregistered node (WHERE id matches 0 rows).
+func TestPGSetNodeStatus_RecoveringAndNoop(t *testing.T) {
+	pg := testPG(t)
+	ctx := context.Background()
+	nodeID := "n-" + must(idgen.NewV7String(time.Now().UTC()))
+	base := "http://box-" + nodeID
+	if err := pg.UpsertNodeState(ctx, nodeID, base, "quarantined", true); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if err := pg.SetNodeStatus(ctx, nodeID, "recovering"); err != nil {
+		t.Fatalf("set recovering: %v", err)
+	}
+	h, known, err := pg.GetNodeHealth(ctx, nodeID)
+	if err != nil || !known {
+		t.Fatalf("health: known=%v err=%v", known, err)
+	}
+	if h.Status != "recovering" {
+		t.Fatalf("status should be recovering, got %q", h.Status)
+	}
+	if !h.Port25Open {
+		t.Fatalf("SetNodeStatus must not clobber port25_open")
+	}
+	// No-op on an unregistered node (no error, no row created).
+	if err := pg.SetNodeStatus(ctx, "ghost-"+nodeID, "recovering"); err != nil {
+		t.Fatalf("set on unregistered must be a no-op, got %v", err)
+	}
+}
+
+// ResetWarmup reopens the ramp at count=0 (§5.4/PM3), durable in Postgres.
+func TestPGResetWarmup_ReopensRamp(t *testing.T) {
+	pg := testPG(t)
+	ctx := context.Background()
+	nodeID := "n-" + must(idgen.NewV7String(time.Now().UTC()))
+	w := time.Now().UTC().Truncate(24 * time.Hour)
+	// Fill to cap.
+	for i := 0; i < 2; i++ {
+		if d, _ := pg.ReserveWarmupSlot(ctx, nodeID, w, 2); !d.Allowed {
+			t.Fatalf("fill grant %d", i)
+		}
+	}
+	if d, _ := pg.ReserveWarmupSlot(ctx, nodeID, w, 2); d.Allowed {
+		t.Fatalf("precondition: full window denies")
+	}
+	if err := pg.ResetWarmup(ctx, nodeID, w, 5); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	if d, _ := pg.ReserveWarmupSlot(ctx, nodeID, w, 5); !d.Allowed || d.Count != 1 {
+		t.Fatalf("after reset ramp reopens at count=1, got %+v", d)
+	}
+}
+
+// Concurrent first-admits to a NEVER-SEEN bucket must NOT race into a unique_violation (the round-2
+// review finding — the guardless first-touch INSERT). With the ON CONFLICT DO NOTHING pre-create,
+// N concurrent goroutines all succeed (no spurious error); exactly `capacity` of them get a token.
+func TestPGReserveRate_ConcurrentColdStartNoUniqueViolation(t *testing.T) {
+	pg := testPG(t)
+	ctx := context.Background()
+	nodeID := "n-" + must(idgen.NewV7String(time.Now().UTC()))
+	bucket := "other:cold-" + nodeID
+	p := RateParams{Capacity: 3, RefillPerSec: 0}
+	now := time.Now().UTC()
+
+	const N = 8
+	errs := make(chan error, N)
+	granted := make(chan bool, N)
+	for i := 0; i < N; i++ {
+		go func() {
+			d, err := pg.ReserveRateToken(ctx, nodeID, bucket, p, now)
+			errs <- err
+			granted <- d.Allowed
+		}()
+	}
+	grants := 0
+	for i := 0; i < N; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("concurrent cold-start admit must NOT error (no unique_violation), got %v", err)
+		}
+		if <-granted {
+			grants++
+		}
+	}
+	// At most `capacity` (3) grants at the same instant (no refill); the rest denied — never an error.
+	if grants > 3 {
+		t.Fatalf("no-refill bucket of capacity 3 must grant at most 3, got %d", grants)
+	}
+	if grants == 0 {
+		t.Fatal("a fresh full bucket must grant at least one token")
 	}
 }
 

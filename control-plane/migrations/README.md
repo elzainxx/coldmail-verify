@@ -17,8 +17,9 @@
 | `0005_grants.sql` | §3.2.1 (PN-9, Door 2 enforcement) | Role grants: `cp_runtime` (INSERT+SELECT only), `cp_admin` (DDL owner) |
 | `0006_catchall_write.sql` | P2 §5.6 (brain writes the catch-all probe result) | Grants `cp_runtime` INSERT+UPDATE on `catchall_domains` (DELETE stays `cp_admin`). Additive — NOT the append-only LOG. |
 | `0007_node_audits_warmup.sql` | P3 §4.3/§4.5 (audit history + gate), §5.2 (warmup) | `node_audits` (APPEND-ONLY audit history, OQ-P3-5), `node_warmup` (durable per-node/per-window ramp counter, §5.2). Grants `cp_runtime` INSERT+SELECT on `node_audits` (DELETE revoked — LOG posture), SELECT+INSERT+UPDATE on `node_warmup`, and INSERT+UPDATE on `nodes` (DELETE stays `cp_admin`). Additive — new tables, reserved `nodes` columns populated, no frozen-schema change. |
+| `0008_rate_budgets_recovering.sql` | P4 §4.4 (durable rate budget), §5.4/GAP-30 (canary sub-state) | `rate_budgets` (durable per-(node×provider) token-bucket spend — restart-safe, §4.4). Grants `cp_runtime` SELECT+INSERT+UPDATE on `rate_budgets` (DELETE revoked — counter posture, mirrors `node_warmup`). Widens the `nodes.status` CHECK to add `recovering` (the canary sub-state — a NODE-LIFECYCLE value, NOT verdict vocab; ADR-0010). Additive — new table + a strict CHECK widening, no frozen-schema change. |
 
-**Apply order:** Run sequentially `0001` → `0002` → `0003` → `0004` → `0005` → `0006` → `0007`.
+**Apply order:** Run sequentially `0001` → `0002` → `0003` → `0004` → `0005` → `0006` → `0007` → `0008`.
 
 ---
 
@@ -70,13 +71,18 @@ The `0005_grants.sql` migration implements two roles:
 
 | Role | Purpose | Verifications Grants | Other Tables |
 |---|---|---|---|
-| `cp_runtime` | Brain's operational credential (maps to Supabase `service_role`) | **INSERT, SELECT only** (NO UPDATE, NO DELETE) | Full read/write on `cache`; INSERT+UPDATE on `catchall_domains` (0006); INSERT+SELECT on `node_audits` (append-only, 0007); SELECT+INSERT+UPDATE on `node_warmup` + INSERT+UPDATE on `nodes` (0007); read-only on other lists/policies |
-| `cp_admin` | DDL owner / grant-admin (break-glass, admin-audited) | ALL (for migrations, partitions) | ALL (incl. the only DELETE on `node_audits`/`node_warmup`/`nodes`) |
+| `cp_runtime` | Brain's operational credential (maps to Supabase `service_role`) | **INSERT, SELECT only** (NO UPDATE, NO DELETE) | Full read/write on `cache`; INSERT+UPDATE on `catchall_domains` (0006); INSERT+SELECT on `node_audits` (append-only, 0007); SELECT+INSERT+UPDATE on `node_warmup` + INSERT+UPDATE on `nodes` (0007); SELECT+INSERT+UPDATE on `rate_budgets` (counter, 0008); read-only on other lists/policies |
+| `cp_admin` | DDL owner / grant-admin (break-glass, admin-audited) | ALL (for migrations, partitions) | ALL (incl. the only DELETE on `node_audits`/`node_warmup`/`nodes`/`rate_budgets`) |
 
 **P3 append-only note (0007):** `node_audits` carries the LOG's own posture — `cp_runtime` gets
 INSERT+SELECT, DELETE is revoked, so audit *history* (a green→red→green flap record P4 needs) can
 never be destroyed by the runtime. Proven live: as `cp_runtime`, `INSERT node_audits` succeeds and
 `DELETE FROM node_audits` raises `permission denied` (same for `node_warmup`/`nodes` DELETE).
+
+**P4 counter-posture note (0008):** `rate_budgets` mirrors `node_warmup` — `cp_runtime` gets
+SELECT+INSERT+UPDATE (the durable token-bucket spend the limiter increments), DELETE revoked. Proven
+live: as `cp_runtime`, `INSERT`/`UPDATE rate_budgets` succeed and `DELETE FROM rate_budgets` raises
+`permission denied`. The `recovering` value is accepted by the widened `nodes.status` CHECK.
 
 **Why:** The LOG (`verifications`) is append-only by **revoked grants**, not convention. The runtime service role *cannot* update or delete historical rows — corrections are new rows. PN-9 hardens this: `cp_admin` is a separate, audited credential (not held by the runtime process), so the runtime cannot silently rewrite history.
 
@@ -197,4 +203,4 @@ All 25 open questions signed off (Appendix C). Key findings already resolved:
 
 ---
 
-**Ready to apply.** Run migrations `0001` → `0007` in order against your PostgreSQL 14+ / Supabase instance.
+**Ready to apply.** Run migrations `0001` → `0008` in order against your PostgreSQL 14+ / Supabase instance.

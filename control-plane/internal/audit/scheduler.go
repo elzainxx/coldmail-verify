@@ -144,6 +144,68 @@ func (s *Scheduler) AuditNode(ctx context.Context, n NodeRef) AuditOutcome {
 	return AuditOutcome{NodeID: n.ID, Status: status, From: cur, To: tr.NextStatus, EgressMismatch: egressMismatch}
 }
 
+// Observation is one Observe cycle's result (P4 §5.1): the EFFECTIVE audit status (green only if
+// derived-green AND no GAP-24 egress mismatch — a green-on-wrong-IP is effectively red) plus the
+// raw derived status and the mismatch flag. It carries NO lifecycle transition — Observe records the
+// audit FACT (history + summary) but leaves the state machine to the P4 watcher (internal/health),
+// which is the single writer of the lifecycle (§5.1). Fetch failure → Err set, EffectiveGreen false.
+type Observation struct {
+	NodeID         string
+	EffectiveGreen bool // green derived AND egress matches (GAP-24) — what the watcher trusts
+	RawStatus      Status
+	EgressMismatch bool
+	Err            error
+}
+
+// Observe fetches /v1/audit, derives green/red, applies the GAP-24 egress cross-check, and appends
+// the append-only history row (which also updates the node's audit_status/last_audit_at summary) —
+// but does NOT compute or persist a lifecycle transition (P4 §5.1: the health-watcher owns the
+// lifecycle; the scheduler here is reduced to the audit FETCH + record). This is how P4 "replaces
+// P3's minimal scheduler" (§1.2) without a second writer racing on nodes.status. The GAP-24 invariant
+// is preserved: a green whose current_host_ip != the expected egress IP yields EffectiveGreen=false,
+// so the watcher treats it as red (never promotes it) — exactly as the P3 scheduler forced red for
+// the transition. History records the RAW status (truth); the effective flag drives the decision.
+//
+// A fetch failure records nothing and returns Err — an unreachable box is NOT green (the watcher
+// treats an errored observation as "no fresh audit"); harden-toward-unknown.
+func (s *Scheduler) Observe(ctx context.Context, n NodeRef) Observation {
+	now := s.deps.Now()
+	ar, err := s.deps.Client.FetchAudit(ctx, n.BaseURL, n.Token)
+	if err != nil {
+		return Observation{NodeID: n.ID, Err: fmt.Errorf("audit fetch: %w", err)}
+	}
+	result := Result{CurrentHostIP: ar.CurrentHostIP, Warnings: strMap(ar.Warnings), AuditedAt: parseAuditedAt(ar.AuditedAt, now)}
+	status := DeriveStatus(result)
+	egressMismatch := n.PublicEgressIP != "" && ar.CurrentHostIP != "" && ar.CurrentHostIP != n.PublicEgressIP
+
+	// Append the append-only history row (also updates nodes.audit_status/last_audit_at/host_ip). We
+	// write the EFFECTIVE status to the summary so a green-on-wrong-IP surfaces as red to any reader of
+	// the summary too (GAP-24 fail-safe) — while the raw warnings/current_host_ip stay in the row for
+	// forensics. This differs from the P3 AuditNode (which wrote the raw status + used `effective` only
+	// for its own transition); the P4 watcher reads the summary/observation, so the summary must not lie.
+	effective := status
+	if egressMismatch {
+		effective = StatusRed
+	}
+	id, _ := idgen.NewV7String(now)
+	if aerr := s.deps.Store.AppendNodeAudit(ctx, store.NodeAuditRow{
+		ID: id, NodeID: n.ID, AuditedAt: result.AuditedAt, AuditStatus: string(effective),
+		Warnings: anyMap(ar.Warnings), CurrentHostIP: ar.CurrentHostIP,
+	}); aerr != nil {
+		return Observation{NodeID: n.ID, RawStatus: status, EgressMismatch: egressMismatch, Err: fmt.Errorf("append audit: %w", aerr)}
+	}
+	return Observation{NodeID: n.ID, EffectiveGreen: effective == StatusGreen, RawStatus: status, EgressMismatch: egressMismatch}
+}
+
+// ObserveAll runs one Observe pass across all nodes (P4 §5.1 — the watcher's audit-signal refresh).
+func (s *Scheduler) ObserveAll(ctx context.Context, nodes []NodeRef) []Observation {
+	out := make([]Observation, 0, len(nodes))
+	for _, n := range nodes {
+		out = append(out, s.Observe(ctx, n))
+	}
+	return out
+}
+
 // AuditAll runs one re-audit cycle across all nodes (§4.5 scheduled sweep). The caller drives it on
 // a cadence (a ticker); AuditAll itself is a single pass so it is deterministic to test.
 func (s *Scheduler) AuditAll(ctx context.Context, nodes []NodeRef) []AuditOutcome {

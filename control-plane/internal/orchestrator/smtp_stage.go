@@ -10,6 +10,7 @@ import (
 
 	"github.com/mnfi/codmailling/control-plane/internal/node"
 	"github.com/mnfi/codmailling/control-plane/internal/policy"
+	"github.com/mnfi/codmailling/control-plane/internal/ratelimit"
 	"github.com/mnfi/codmailling/control-plane/internal/router"
 	"github.com/mnfi/codmailling/control-plane/internal/smtp"
 	"github.com/mnfi/codmailling/control-plane/internal/vocab"
@@ -36,6 +37,25 @@ type SMTPDeps struct {
 	Health      router.HealthSource
 	MaxAuditAge time.Duration // §4.5 staleness window (DIAL); <=0 disables the freshness conjunct
 	WarmupCap   int           // §5.2 per-node/per-day :smtp cap; <=0 => warmup not enforced
+	CanaryCap   int           // §5.4 the LOW cap a `recovering` (canary) node is metered by; <=0 => fall back to WarmupCap
+
+	// Phase 4 (§4) — the per-provider rate limiter. nil => no rate limiting (the P2/P3 posture; the
+	// limiter is inert). When set, runSMTP jitters + admits before the node call and releases the
+	// in-flight slot after; a saturated cap degrades to cheap with smtp_skipped_reason="rate_limited"
+	// (§4.6, PROVISIONAL/non-cacheable, never invalid/queued). Sleep is the jitter-sleeper (injected
+	// so tests don't actually sleep); nil => time.Sleep.
+	Limiter RateLimiter
+	Sleep   func(time.Duration)
+}
+
+// RateLimiter is the narrow §4 admission capability runSMTP needs (satisfied by *ratelimit.Limiter;
+// injected so orchestrator tests use a fake without a store). Admit consumes one session-start slot
+// (rate + concurrency); Release frees the concurrency slot after the session closes; JitterDelay is
+// the anti-fingerprint pre-start delay (§4.2).
+type RateLimiter interface {
+	Admit(ctx context.Context, nodeID, providerBucket string) (ratelimit.Decision, error)
+	Release(nodeID, providerBucket string)
+	JitterDelay(providerBucket string) time.Duration
 }
 
 // smtpStageOutcome is runSMTP's result. When Ran, the SMTP verdict + its provenance replace the
@@ -82,7 +102,10 @@ func (o *Orchestrator) runSMTP(ctx context.Context, normalized, domain, requestI
 	rr := o.smtp.Registry.SMTPRoute(ctx,
 		router.Plan{Domain: domain, Provider: mxProviderOf(cheap.Signals)},
 		o.smtp.Health,
-		router.SMTPFilterConfig{MaxAuditAge: o.smtp.MaxAuditAge, Now: o.now},
+		// AllowRecovering lets a `recovering` node serve the METERED canary (§5.4/GAP-30): it's a
+		// fallback candidate only (active nodes are preferred), reserved against the LOW canary cap
+		// below so it accrues just "a few checks/window" — the real samples it needs to prove recovery.
+		router.SMTPFilterConfig{MaxAuditAge: o.smtp.MaxAuditAge, Now: o.now, AllowRecovering: true},
 	)
 	if rr.Err != nil {
 		return smtpStageOutcome{SkipReason: rr.SkipToken, Provisional: true}
@@ -92,9 +115,15 @@ func (o *Orchestrator) runSMTP(ctx context.Context, normalized, domain, requestI
 	// §5.2 warmup ramp: reserve one :smtp slot against the node's per-window ascending cap. Over the
 	// cap → degrade to cheap with smtp_skipped_reason="warmup_cap" (PROVISIONAL/non-cacheable, PB1 —
 	// the SMTP verdict becomes available once the window rolls). NEVER queue (P5) or invalid (§5.2).
-	// Cap<=0 means warmup is not enforced (a mature node) — skip the reservation entirely.
-	if o.smtp.WarmupCap > 0 {
-		dec, werr := o.store.ReserveWarmupSlot(ctx, n.ID, o.warmupWindow(), o.smtp.WarmupCap)
+	// A CANARY (recovering) node is metered by the LOW canary cap (§5.4) — a recovered IP re-warms
+	// gently; this is what keeps the canary a "trickle, well under warmup start". Cap<=0 means warmup
+	// is not enforced (a mature node) — but a canary ALWAYS uses its cap (its whole point is metering).
+	warmupCap := o.smtp.WarmupCap
+	if rr.IsCanary && o.smtp.CanaryCap > 0 {
+		warmupCap = o.smtp.CanaryCap
+	}
+	if warmupCap > 0 {
+		dec, werr := o.store.ReserveWarmupSlot(ctx, n.ID, o.warmupWindow(), warmupCap)
 		if werr != nil {
 			// A warmup-store error must NOT silently send over-cap (reputation hazard) — fail closed
 			// to the cheap verdict, marked provisional. The verdict is still honest (cheap), just no SMTP.
@@ -103,6 +132,37 @@ func (o *Orchestrator) runSMTP(ctx context.Context, normalized, domain, requestI
 		if !dec.Allowed {
 			return smtpStageOutcome{SkipReason: reasonWarmupCap, Provisional: true}
 		}
+	}
+
+	// §4 per-provider rate limiter: pace the concentration sticky routing created (§3.1/§4.1). The
+	// bucket is (node × provider), refined to "other:<domain>" for honest-corporate traffic (§4.1,
+	// OQ-P4-2). We jitter the START (§4.2 anti-fingerprint), then admit (consume a durable token +
+	// an ephemeral in-flight slot). A saturated cap degrades to cheap with
+	// smtp_skipped_reason="rate_limited" — PROVISIONAL/non-cacheable (PB1), never queued (P5), never
+	// invalid (§4.6). Admitted sessions MUST release the in-flight slot; we defer that below. The
+	// limiter is nil in the P2/P3 posture (no rate limiting) — the stage runs unchanged then.
+	providerBucket := ""
+	if o.smtp.Limiter != nil {
+		providerBucket = ratelimit.BucketForDomain(mxProviderOf(cheap.Signals), domain)
+		if d := o.smtp.Limiter.JitterDelay(providerBucket); d > 0 {
+			o.sleep(d) // spread starts so they don't arrive as a periodic, fingerprintable burst
+		}
+		adm, aerr := o.smtp.Limiter.Admit(ctx, n.ID, providerBucket)
+		if aerr != nil {
+			// A limiter/store error must NOT silently sprint past the cap (reputation hazard) — fail
+			// closed to the cheap verdict, rate_limited/provisional. The verdict stays honest (cheap).
+			return smtpStageOutcome{SkipReason: reasonRateLimited, Provisional: true}
+		}
+		if !adm.Admitted {
+			// Every relevant cap exhausted for this (node × provider) → degrade (§4.6). Non-cacheable
+			// (PB1: the SMTP verdict becomes available once the cap frees; caching would freeze a
+			// lower-quality answer). NEVER invalid, NEVER queued (the P5 seam leaves retry-eligible in
+			// signals but nothing retries here).
+			return smtpStageOutcome{SkipReason: reasonRateLimited, Provisional: true}
+		}
+		// The concurrency slot is held for the life of the session; release it on EVERY return path
+		// below (the node call, its error paths, and the scored result).
+		defer o.smtp.Limiter.Release(n.ID, providerBucket)
 	}
 
 	token := ""
@@ -161,13 +221,25 @@ func (o *Orchestrator) warmupWindow() time.Time {
 	return time.Date(n.Year(), n.Month(), n.Day(), 0, 0, 0, 0, time.UTC)
 }
 
-// reasonWarmupCap / reasonSMTPSkipped is the frozen §8 signals.smtp_skipped_reason enum (additive
-// to the open signals bag — Door 1). Only these four tokens are ever written.
+// sleep is the jitter sleeper (§4.2), injected via SMTPDeps.Sleep so tests don't block on real time.
+func (o *Orchestrator) sleep(d time.Duration) {
+	if o.smtp != nil && o.smtp.Sleep != nil {
+		o.smtp.Sleep(d)
+		return
+	}
+	time.Sleep(d)
+}
+
+// reasonWarmupCap / reasonSMTPSkipped is the signals.smtp_skipped_reason enum (additive to the open
+// signals bag — Door 1). P3 shipped four tokens; P4 adds ONE additive value: rate_limited (§4.6/§9,
+// the phase's only Door-adjacent addition — an additive value on the already-open string enum, NOT a
+// new key/reason/status). Only these five tokens are ever written.
 const (
 	reasonNoEligibleNode = "no_eligible_node"
 	reasonAuditRed       = "audit_red"
 	reasonProviderMX     = "provider_mx_routed"
 	reasonWarmupCap      = "warmup_cap"
+	reasonRateLimited    = "rate_limited" // P4 §4.6: every eligible node at its per-provider cap
 	signalSMTPSkipped    = "smtp_skipped_reason"
 )
 

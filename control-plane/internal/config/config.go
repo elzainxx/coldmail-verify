@@ -131,6 +131,25 @@ type Dials struct {
 	AuditMaxAgeSeconds   int // §4.5 staleness window; recommend 2× the interval. A green older than this → not fresh → excluded.
 	AuditRecoverGreens   int // §4.5 OQ-P3-7: consecutive greens to auto-recover from quarantine (asymmetric; quarantine on first red).
 	WarmupDailyCap       int // §5.2 per-node/per-day :smtp verification ceiling; 0 => warmup NOT enforced (a mature node). Counts verifications (catch-all ≈ 2 connections — GAP-13/§5.2).
+
+	// Phase 4 (§5) — the health-watcher control-loop DIALs (volumes are dials; existence is locked).
+	// The watcher REPLACES the P3 minimal re-audit ticker: it owns the audit cadence + adds liveness
+	// + block-rate. Start conservative (§5.4 "longer window = less twitchy"). OQ-P4-13 recommends
+	// T=30–60s, block-rate window 15–30m. The block-rate quarantine is recommend-only by default
+	// (DR-2, ShadowModes.A1BlockRateQuarantine) so the watcher performs ZERO live block-rate mutation
+	// until an owner promotes A1 to auto (the fresh-system invariant).
+	WatcherCadenceSeconds  int // §5.1 T — control-loop cadence (0 => one pass at boot, no loop)
+	BlockRateWindowSeconds int // §5.2 rolling block-rate window
+	BlockMinSamples        int // §5.3/GAP-27 — block-rate trigger inert below this attempt count
+	BlockQuarThresholdPct  int // §5.4 — block-rate ≥ this % (with samples, pool healthy) → quarantine-eligible
+	BlockRecoverThreshPct  int // §5.4 — canary block-rate ≤ this % (sustained) → recover (asymmetric, lower)
+	CanaryRecoverGreens    int // §5.4 — consecutive clean canary cycles before recovering→active
+	CanaryMinSamples       int // §5.4/GAP-30 — MIN real canary attempts before a block-rate recovery may promote (no zero-sample promotion — the Phase-4 review finding)
+	LivenessMisses         int // §5.4 — M consecutive liveness failures → quarantine (box down/wedged)
+	FleetWidePct           int // §5.5/GAP-28 — if this % of ACTIVE nodes trip at once → BRAKE (alert, don't quarantine)
+	CanaryWarmupCap        int // §5.4/PM3 — the low warmup cap a recovered node re-warms from
+	PoolEligibleFloor      int // §8.2 — alert when the eligible set ≤ this floor (recommend 1)
+	RateSaturationCount    int // §8.2 — alert when rate_limited degrades in the window ≥ this
 }
 
 // ── Policy / structural feature-flags (shape frozen, contents dial) ─────────────────
@@ -177,6 +196,14 @@ func (c Config) AuditInterval() time.Duration {
 }
 func (c Config) AuditMaxAge() time.Duration {
 	return time.Duration(c.Dials.AuditMaxAgeSeconds) * time.Second
+}
+
+// WatcherCadence / BlockRateWindow are the Phase-4 §5 health-watcher DIALs as typed durations.
+func (c Config) WatcherCadence() time.Duration {
+	return time.Duration(c.Dials.WatcherCadenceSeconds) * time.Second
+}
+func (c Config) BlockRateWindow() time.Duration {
+	return time.Duration(c.Dials.BlockRateWindowSeconds) * time.Second
 }
 
 // CacheTTL returns the configured cache TTL as a duration, or 0 when the dial is UNSET
@@ -284,6 +311,24 @@ func Defaults() Config {
 			AuditMaxAgeSeconds:   7200, // 2× the interval → a stale green is excluded (§4.5)
 			AuditRecoverGreens:   3,    // 3 consecutive greens to auto-recover (§4.5 asymmetric)
 			WarmupDailyCap:       50,   // §5.2 conservative day-1 start (~50/day, OQ-P3-10 dial)
+			// Phase-4 health-watcher dials (§5). Conservative defaults (OQ-P4-13; §5.4 asymmetric):
+			WatcherCadenceSeconds:  45,   // §5.1 T (30–60s recommended)
+			BlockRateWindowSeconds: 1800, // §5.2 30-minute rolling window (start conservative)
+			BlockMinSamples:        20,   // §5.3/GAP-27 sample gate
+			BlockQuarThresholdPct:  30,   // §5.4 quarantine at ≥30% block-rate
+			BlockRecoverThreshPct:  5,    // §5.4 recover at ≤5% (asymmetric, lower)
+			CanaryRecoverGreens:    3,    // §5.4 consecutive clean canary cycles
+			CanaryMinSamples:       10,   // §5.4/GAP-30 real canary attempts before promotion (no zero-sample)
+			LivenessMisses:         3,    // §5.4 M consecutive liveness misses
+			FleetWidePct:           50,   // §5.5/GAP-28 majority of active nodes = systemic → brake
+			// CanaryWarmupCap is the per-window meter for a recovering node's canary trickle. It MUST be
+			// >= CanaryMinSamples, or the canary can never accrue enough real attempts to promote —
+			// re-introducing the GAP-30 "stuck forever" one-way door (the Phase-4 round-2 review found
+			// this exact inconsistency when the cap was below the gate). Validate() enforces it; the
+			// default sits comfortably above CanaryMinSamples so a recovering node can actually recover.
+			CanaryWarmupCap:     20, // §5.4/PM3 low re-warm start — but >= CanaryMinSamples so the canary can promote
+			PoolEligibleFloor:   1,  // §8.2 alert one-quarantine-from-all-degrade
+			RateSaturationCount: 50, // §8.2 sustained rate_limited degrades in the window
 		},
 		Policy: Policy{DefaultPolicyKey: "cold-email"},
 		Nodes:  nil, // node LIST, empty at P0. Door 5: a list even when length 0/1.
@@ -331,7 +376,12 @@ func Load(getenv func(string) string) (Config, error) {
 	if v := getenv("TM_FRONTDOOR_MODE"); v != "" {
 		c.KillSwitch.FrontDoor = FrontDoorMode(v)
 	}
-	// A single node from env keeps the LIST shape exercised at P0 (Door 5) without a file.
+	// The node LIST from env (Door 5). Node #1 uses the bare TM_NODE_* keys (the P0/P3 shape); nodes
+	// #2..#N use numbered keys TM_NODE_<i>_* (i≥2). This is how P4 proves "add node #2 = +1 config
+	// line" (§7/GAP-31): standing up a second node is a CONFIG edit — a numbered env block — with ZERO
+	// brain code change. The router/watcher/limiter are all list-shaped/per-node (built that way since
+	// P1), so the same code serves N=1 and N=2. (A real #2 also needs the §6 provisioning — the
+	// honest bound of GAP-31: the brain is N-agnostic; the world still makes you earn each clean IP.)
 	if id := getenv("TM_NODE_ID"); id != "" {
 		c.Nodes = append(c.Nodes, NodeDescriptor{
 			ID:       id,
@@ -342,6 +392,21 @@ func Load(getenv func(string) string) (Config, error) {
 			// REAL-BOX — set once a real host is provisioned; empty in the local build → the GAP-24
 			// conjunct fails safe (no :smtp on a green whose IP the brain can't confirm).
 			PublicEgressIP: getenv("TM_NODE_PUBLIC_EGRESS_IP"),
+		})
+	}
+	// Nodes #2..#N — numbered, config-only (the GAP-31 proof). Stops at the first gap in the sequence.
+	for i := 2; ; i++ {
+		p := "TM_NODE_" + strconv.Itoa(i) + "_"
+		id := getenv(p + "ID")
+		if id == "" {
+			break
+		}
+		c.Nodes = append(c.Nodes, NodeDescriptor{
+			ID:             id,
+			BaseURL:        getenv(p + "BASE_URL"),
+			TokenRef:       id,
+			Enabled:        getenv(p+"ENABLED") == "true",
+			PublicEgressIP: getenv(p + "PUBLIC_EGRESS_IP"),
 		})
 	}
 
@@ -373,6 +438,36 @@ func Load(getenv func(string) string) (Config, error) {
 			return c, fmt.Errorf("config: invalid TM_WARMUP_DAILY_CAP %q", v)
 		}
 		c.Dials.WarmupDailyCap = n
+	}
+
+	// Phase-4 health-watcher dial overrides (§5). Each optional; absent => the safe default. All are
+	// non-negative (a 0 cadence disables the loop; 0 fleet-pct is clamped to the safe default in the
+	// health package's withDefaults, so the brake is never accidentally disabled — GAP-28).
+	for _, d := range []struct {
+		env  string
+		dst  *int
+		zero bool // true => allow 0 (e.g. cadence 0 = one-shot)
+	}{
+		{"TM_WATCHER_CADENCE_SECONDS", &c.Dials.WatcherCadenceSeconds, true},
+		{"TM_BLOCK_RATE_WINDOW_SECONDS", &c.Dials.BlockRateWindowSeconds, false},
+		{"TM_BLOCK_MIN_SAMPLES", &c.Dials.BlockMinSamples, false},
+		{"TM_BLOCK_QUAR_THRESHOLD_PCT", &c.Dials.BlockQuarThresholdPct, false},
+		{"TM_BLOCK_RECOVER_THRESHOLD_PCT", &c.Dials.BlockRecoverThreshPct, false},
+		{"TM_CANARY_RECOVER_GREENS", &c.Dials.CanaryRecoverGreens, false},
+		{"TM_CANARY_MIN_SAMPLES", &c.Dials.CanaryMinSamples, false},
+		{"TM_LIVENESS_MISSES", &c.Dials.LivenessMisses, false},
+		{"TM_FLEET_WIDE_PCT", &c.Dials.FleetWidePct, false},
+		{"TM_CANARY_WARMUP_CAP", &c.Dials.CanaryWarmupCap, false},
+		{"TM_POOL_ELIGIBLE_FLOOR", &c.Dials.PoolEligibleFloor, true},
+		{"TM_RATE_SATURATION_COUNT", &c.Dials.RateSaturationCount, true},
+	} {
+		if v := getenv(d.env); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 0 || (!d.zero && n == 0) {
+				return c, fmt.Errorf("config: invalid %s %q", d.env, v)
+			}
+			*d.dst = n
+		}
 	}
 
 	return c, c.Validate()
@@ -412,6 +507,14 @@ func (c Config) Validate() error {
 	if c.Dials.RecommendationSend < c.Dials.RecommendationReview {
 		return fmt.Errorf("config: recommendation.send (%d) must be >= review (%d)",
 			c.Dials.RecommendationSend, c.Dials.RecommendationReview)
+	}
+	// §5.4/GAP-30: the canary meter must allow enough real attempts to satisfy the promotion sample
+	// gate, or a recovering node can NEVER accrue MinCanarySamples → stuck-forever (the round-2 review
+	// finding). CanaryWarmupCap>0 (a canary is always metered) AND >= CanaryMinSamples. Both dials are
+	// per the block-rate window in practice; require the meter to cover the gate with margin=equality.
+	if c.Dials.CanaryWarmupCap > 0 && c.Dials.CanaryMinSamples > c.Dials.CanaryWarmupCap {
+		return fmt.Errorf("config: canary_warmup_cap (%d) must be >= canary_min_samples (%d) or a recovering node can never accrue enough samples to promote (GAP-30 stuck-forever)",
+			c.Dials.CanaryWarmupCap, c.Dials.CanaryMinSamples)
 	}
 	return nil
 }

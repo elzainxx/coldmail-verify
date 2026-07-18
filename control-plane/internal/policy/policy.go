@@ -23,13 +23,38 @@ type Definition struct {
 	Key     string `json:"-"`
 	Version int    `json:"-"`
 
-	Order                        []string          `json:"order"`
-	Gates                        map[string]string `json:"gates"`                            // "<layer>:<result>" -> "<status>:<reason>:<stop|continue>"
-	Flags                        []string          `json:"flags"`                            // layers whose finding sets an is_* flag / nudges confidence
-	RecommendationOverrides      map[string]string `json:"recommendation_overrides_by_reason"` // reason -> recommendation
-	ProviderRouting              map[string]string `json:"provider_routing"`                 // mx_provider -> "mx" (P1: routes big providers to risky/provider_no_smtp)
-	Confidence                   ConfidenceModel   `json:"confidence"`
-	RecommendationThresholds     Thresholds        `json:"recommendation_thresholds"`
+	Order                    []string          `json:"order"`
+	Gates                    map[string]string `json:"gates"`                              // "<layer>:<result>" -> "<status>:<reason>:<stop|continue>"
+	Flags                    []string          `json:"flags"`                              // layers whose finding sets an is_* flag / nudges confidence
+	RecommendationOverrides  map[string]string `json:"recommendation_overrides_by_reason"` // reason -> recommendation
+	ProviderRouting          map[string]string `json:"provider_routing"`                   // mx_provider -> "mx" (P1: routes big providers to risky/provider_no_smtp)
+	Confidence               ConfidenceModel   `json:"confidence"`
+	RecommendationThresholds Thresholds        `json:"recommendation_thresholds"`
+
+	// RateLimits is the P4 per-provider rate-limit config (§4.2/§4.7) — an ADDITIVE key on the open
+	// policy object (OQ-25 tolerate-unknown; P1 §7.2 named this exact forward expansion). It is nil
+	// on P1/P2/P3 policies (no shape change); the P4 limiter reads it when present. Global-with-
+	// per-provider-override (OQ-P4-5): Default applies to any bucket lacking a ByProvider entry.
+	RateLimits *RateLimits `json:"rate_limits,omitempty"`
+}
+
+// RateLimits carries the token-bucket + jitter DIALs per provider bucket (§4.2). All values are
+// dials; the STRUCTURE is additive-only. MaxInflight is the per-(node × provider) concurrency cap
+// (the primary reputation guard — §4.2); the token-bucket (max_starts_per_window over window_s)
+// bounds the start RATE; StartDelayJitterMS is the anti-fingerprint spread (§4.2).
+type RateLimits struct {
+	Default    RateLimit            `json:"default"`
+	ByProvider map[string]RateLimit `json:"by_provider,omitempty"`
+}
+
+// RateLimit is one bucket's controls (§4.2). Zero values mean "unset" and the limiter treats an
+// unset/zero cap as "no limit configured for this bucket" (falls back to Default, then to inert) —
+// it never invents a cap. StartDelayJitterMS is a [min,max] spread in milliseconds.
+type RateLimit struct {
+	MaxInflight        int   `json:"max_inflight"`          // per-(node×provider) concurrency cap
+	MaxStartsPerWindow int   `json:"max_starts_per_window"` // token-bucket capacity per window
+	WindowS            int   `json:"window_s"`              // the window length in seconds (refill horizon)
+	StartDelayJitterMS []int `json:"start_delay_jitter_ms"` // [min,max] jitter spread (anti-fingerprint)
 }
 
 // ConfidenceModel is the P1 fixed baseline-by-reason table + flag deltas (OQ-8, §7.4). Not a
@@ -205,7 +230,8 @@ func (e *Engine) confidence(def *Definition, reason vocab.Reason, flags map[stri
 
 // recommend maps (status × confidence) → recommendation, then REPAIRS toward the LOCKED
 // composability invariant (vocab.ComposabilityOK) so an illegal pair can never be emitted:
-//   invalid ⇒ skip; valid ⇒ send|review; risky/unknown ⇒ review|skip.
+//
+//	invalid ⇒ skip; valid ⇒ send|review; risky/unknown ⇒ review|skip.
 func (e *Engine) recommend(def *Definition, status vocab.Status, reason vocab.Reason, conf int) vocab.Recommendation {
 	// Reason-level override (e.g. cold-email: disposable → skip) takes precedence, but is
 	// still clamped to composability below.

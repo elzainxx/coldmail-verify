@@ -418,6 +418,187 @@ RETURNING count, cap`
 	return WarmupDecision{Allowed: true, Count: count, Cap: gotCap, WindowStart: ws}, nil
 }
 
+// ── Phase 4 (§4.4/§5.2/§5.4/§5.6) — durable rate budget, block-rate, lifecycle ──────────
+
+// reserveRate is the shared body of ReserveRateToken/PeekRateBudget: it SELECT … FOR UPDATEs the
+// bucket row inside a tx, computes the refill via the SHARED applyRefill helper (identical math to
+// the Mem fake — the P3 test-double lesson), optionally consumes one token, and upserts the new
+// state. FOR UPDATE serializes concurrent admits on the same bucket (a single brain, but multiple
+// request goroutines) so two requests can't both spend the last token. A never-seen bucket is
+// treated as FULL at capacity (mirrors Mem) — a fresh node has full burst headroom.
+//
+// Cold-start race (Phase-4 round-2 review): SELECT ... FOR UPDATE cannot lock a NONEXISTENT row (no
+// gap locks under READ COMMITTED), so two concurrent first-admits to a never-seen bucket would both
+// see ErrNoRows and race on a guardless INSERT → unique_violation → a spurious rate_limited degrade.
+// Fixed by pre-creating the row IDEMPOTENTLY (INSERT ... ON CONFLICT DO NOTHING at full capacity)
+// BEFORE the SELECT FOR UPDATE — after that the row always exists, so FOR UPDATE always locks and the
+// bare-INSERT branch is gone. Mirrors ReserveWarmupSlot's ON CONFLICT discipline.
+func (p *PG) reserveRate(ctx context.Context, nodeID, providerBucket string, pp RateParams, now time.Time, consume bool) (RateDecision, error) {
+	if pp.Capacity <= 0 {
+		return RateDecision{Allowed: false, TokensAfter: 0, Capacity: pp.Capacity}, nil
+	}
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return RateDecision{}, fmt.Errorf("store: begin rate: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // rollback after a successful commit is a no-op
+
+	// Idempotent pre-create: a never-seen bucket starts FULL at capacity (mirrors Mem). ON CONFLICT
+	// DO NOTHING makes concurrent first-touches safe — the loser is a no-op, not a unique_violation.
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO rate_budgets (node_id, provider_bucket, tokens, capacity, refill_per_sec, last_refill_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,now())
+		 ON CONFLICT (node_id, provider_bucket) DO NOTHING`,
+		nodeID, providerBucket, pp.Capacity, pp.Capacity, pp.RefillPerSec, now.UTC(),
+	); err != nil {
+		return RateDecision{}, fmt.Errorf("store: rate pre-create: %w", err)
+	}
+
+	// The row now exists → FOR UPDATE always locks it (serializes concurrent admits on this bucket).
+	var stored float64
+	var lastRefill time.Time
+	if err := tx.QueryRow(ctx,
+		`SELECT tokens, last_refill_at FROM rate_budgets WHERE node_id=$1 AND provider_bucket=$2 FOR UPDATE`,
+		nodeID, providerBucket).Scan(&stored, &lastRefill); err != nil {
+		return RateDecision{}, fmt.Errorf("store: rate select: %w", err)
+	}
+
+	tokens, canGrant := applyRefill(stored, lastRefill, pp, now)
+	allowed := canGrant
+	if consume && canGrant {
+		tokens -= 1.0
+	} else if consume {
+		allowed = false // no whole token → deny (still persist the read-side refill below)
+	}
+
+	// Persist the refill + any decrement. capacity/refill are refreshed from the caller's params (a
+	// policy edit takes effect next call, mirroring ReserveWarmupSlot's per-call cap).
+	if _, err := tx.Exec(ctx,
+		`UPDATE rate_budgets SET tokens=$3, capacity=$4, refill_per_sec=$5, last_refill_at=$6, updated_at=now()
+		 WHERE node_id=$1 AND provider_bucket=$2`,
+		nodeID, providerBucket, tokens, pp.Capacity, pp.RefillPerSec, now.UTC(),
+	); err != nil {
+		return RateDecision{}, fmt.Errorf("store: rate update: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return RateDecision{}, fmt.Errorf("store: rate commit: %w", err)
+	}
+	return RateDecision{Allowed: allowed, TokensAfter: tokens, Capacity: pp.Capacity}, nil
+}
+
+// ReserveRateToken consumes one token from the durable bucket (§4.4). Restart-safe: the refill is
+// derived from real elapsed time since last_refill_at (a brain restart never resets to full — the
+// PM4 reputation hazard the durable state prevents).
+func (p *PG) ReserveRateToken(ctx context.Context, nodeID, providerBucket string, pp RateParams, now time.Time) (RateDecision, error) {
+	return p.reserveRate(ctx, nodeID, providerBucket, pp, now, true)
+}
+
+// PeekRateBudget refills-and-reads WITHOUT consuming (§3.3 headroom check).
+func (p *PG) PeekRateBudget(ctx context.Context, nodeID, providerBucket string, pp RateParams, now time.Time) (RateDecision, error) {
+	return p.reserveRate(ctx, nodeID, providerBucket, pp, now, false)
+}
+
+// BlockRateByVerifierIP aggregates per-node block-rate from the LOG over [since, now] (§5.2/§5.6).
+// It counts ONLY from_cache=false rows with a non-NULL verifier_ip — cache hits ran no SMTP and
+// cheap-degrades have verifier_ip NULL (§4.6), so neither can inflate/deflate a node's rate (PB1).
+// smtp_blocked is the primary numerator; smtp_timeout/connection_failed the secondary; greylisted
+// is NOT counted (OQ-P4-6). One row per verifier_ip with ≥1 attempt in the window.
+func (p *PG) BlockRateByVerifierIP(ctx context.Context, since time.Time) ([]NodeBlockStats, error) {
+	const q = `
+SELECT host(verifier_ip) AS ip,
+       count(*)                                                        AS attempts,
+       count(*) FILTER (WHERE reason = 'smtp_blocked')                 AS blocked,
+       count(*) FILTER (WHERE reason IN ('smtp_timeout','connection_failed')) AS timeouts
+FROM verifications
+WHERE from_cache = false
+  AND verifier_ip IS NOT NULL
+  AND checked_at >= $1
+GROUP BY verifier_ip
+ORDER BY ip`
+	rows, err := p.pool.Query(ctx, q, since.UTC())
+	if err != nil {
+		return nil, fmt.Errorf("store: block-rate query: %w", err)
+	}
+	defer rows.Close()
+	var out []NodeBlockStats
+	for rows.Next() {
+		var s NodeBlockStats
+		if err := rows.Scan(&s.VerifierIP, &s.Attempts, &s.Blocked, &s.Timeouts); err != nil {
+			return nil, fmt.Errorf("store: block-rate scan: %w", err)
+		}
+		out = append(out, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: block-rate rows: %w", err)
+	}
+	return out, nil
+}
+
+// MetricRowsSince reads a bounded window of LOG rows for the observability metrics (§8), newest
+// first, capped at limit+1 so we can detect truncation. Derived from existing verifications columns
+// (Door 2, no schema change). limit<=0 uses 5000. It is a read-only projection; control decisions
+// never depend on it (OQ-P4-11 — block-rate uses BlockRateByVerifierIP).
+func (p *PG) MetricRowsSince(ctx context.Context, since time.Time, limit int) ([]MetricRow, bool, error) {
+	if limit <= 0 {
+		limit = 5000
+	}
+	const q = `
+SELECT checked_at, status, reason, COALESCE(mx_provider,''), COALESCE(host(verifier_ip),''),
+       from_cache, COALESCE(latency_ms,0), signals
+FROM verifications
+WHERE checked_at >= $1
+ORDER BY checked_at DESC
+LIMIT $2`
+	rows, err := p.pool.Query(ctx, q, since.UTC(), limit+1) // +1 to detect truncation
+	if err != nil {
+		return nil, false, fmt.Errorf("store: metric rows query: %w", err)
+	}
+	defer rows.Close()
+	var out []MetricRow
+	for rows.Next() {
+		var r MetricRow
+		var signalsJSON []byte
+		if err := rows.Scan(&r.CheckedAt, &r.Status, &r.Reason, &r.MXProvider, &r.VerifierIP, &r.FromCache, &r.LatencyMS, &signalsJSON); err != nil {
+			return nil, false, fmt.Errorf("store: metric row scan: %w", err)
+		}
+		if len(signalsJSON) > 0 {
+			_ = json.Unmarshal(signalsJSON, &r.Signals) // best-effort; a bad blob just drops the signal metric
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("store: metric rows: %w", err)
+	}
+	truncated := len(out) > limit
+	if truncated {
+		out = out[:limit]
+	}
+	return out, truncated, nil
+}
+
+// SetNodeStatus writes ONLY the lifecycle status column (§5.4) — the health-watcher's single-writer
+// transition. It never touches port25_open/audit columns. WHERE id=$1 matching 0 rows (unregistered
+// node) is a no-op (mirrors Mem + AppendNodeAudit's summary posture). Never deletes.
+func (p *PG) SetNodeStatus(ctx context.Context, nodeID, status string) error {
+	if _, err := p.pool.Exec(ctx, `UPDATE nodes SET status=$2 WHERE id=$1`, nodeID, status); err != nil {
+		return fmt.Errorf("store: set node status: %w", err)
+	}
+	return nil
+}
+
+// ResetWarmup resets the node's warmup counter for the window to count=0 at the given cap (§5.4/PM3
+// canary recovery). Upserts the window row (idempotent).
+func (p *PG) ResetWarmup(ctx context.Context, nodeID string, windowStart time.Time, cap int) error {
+	const q = `
+INSERT INTO node_warmup (node_id, window_start, count, cap, updated_at)
+VALUES ($1, $2, 0, $3, now())
+ON CONFLICT (node_id, window_start) DO UPDATE SET count = 0, cap = EXCLUDED.cap, updated_at = now()`
+	if _, err := p.pool.Exec(ctx, q, nodeID, windowStart.UTC(), cap); err != nil {
+		return fmt.Errorf("store: reset warmup: %w", err)
+	}
+	return nil
+}
+
 func orEmptyFlags(f map[string]bool) map[string]bool {
 	if f == nil {
 		return map[string]bool{}

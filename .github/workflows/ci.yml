@@ -44,7 +44,7 @@ jobs:
       # Apply the P1 migrations to the CI Postgres so the gated store tests exercise real DDL.
       - name: apply migrations
         run: |
-          for f in migrations/0001_*.sql migrations/0002_*.sql migrations/0003_*.sql migrations/0004_*.sql migrations/0005_*.sql migrations/0006_*.sql migrations/0007_*.sql; do
+          for f in migrations/0001_*.sql migrations/0002_*.sql migrations/0003_*.sql migrations/0004_*.sql migrations/0005_*.sql migrations/0006_*.sql migrations/0007_*.sql migrations/0008_*.sql; do
             PGPASSWORD=ci psql -h localhost -U postgres -d cptest -v ON_ERROR_STOP=1 -f "$f"
           done
       # The GAP harness tests SKIP with PENDING reasons — that is expected and honest
