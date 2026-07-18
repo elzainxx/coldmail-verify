@@ -67,8 +67,21 @@ per-node token (OQ-P3-14). Keep a documented fallback provider (§3.1).
 The order is safety-critical. **Zero brain code changes** (GAP-21).
 
 1. **Egress-25 smoke test** (§3.4) → set the node's `port25_open=true`. Command: V1 above.
-   In the brain's store this is `UpsertNodeState(..., port25Open=true)` (or the future egress-test
-   write path). Until this is true, the node is **not** `:smtp`-eligible.
+   > **⚠ WIRING GAP (flagged, review 2026-07-18 — not faked, but not yet operator-executable):**
+   > `port25_open` is only ever *set false* by boot registration (`UpsertNodeState(..., false)`); the
+   > re-audit scheduler reads it back and rewrites it unchanged. There is currently **no
+   > operator/env/admin command** to flip it to `true` in a running system (no `TM_NODE_PORT25_OPEN`
+   > env, no admin endpoint, no egress-test writer). So as of this build the node **cannot be made
+   > `:smtp`-eligible without an out-of-band DB write** — which is honest (the gate fails closed;
+   > nothing is faked green) but means this cutover step is **not mechanically executable yet.**
+   > Flipping `port25_open` is a **manual control-plane mutation** and therefore belongs behind the
+   > **DR-3 admin-audit-log** (per-actor identity), which is the accepted **pre-P3-go-live gate** and is
+   > **buildable now in parallel with Phase 4**. The egress-test-writer + its admin path are the
+   > concrete first slice of that gate. Until then, the interim is a direct DB write
+   > (`UPDATE nodes SET port25_open=true WHERE id=...`) — the migration grants both `cp_runtime` and
+   > `cp_admin` UPDATE on `nodes`, so do it as `cp_admin` (break-glass, to be admin-audited under DR-3),
+   > recorded here as the interim manual step until the audited write-path exists.
+   Until `port25_open` is true, the node is **not** `:smtp`-eligible.
 2. **Point the box at real config** (`smtp_port:25`, real `dns`) and `POST /v1/config/reload` →
    a new `config_fingerprint` (naturally invalidates any mock-era cache).
 3. **Set the brain node descriptor** (env / config-list):
