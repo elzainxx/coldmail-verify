@@ -151,6 +151,31 @@ type Dials struct {
 	CanaryWarmupCap        int // §5.4/PM3 — the low warmup cap a recovered node re-warms from
 	PoolEligibleFloor      int // §8.2 — alert when the eligible set ≤ this floor (recommend 1)
 	RateSaturationCount    int // §8.2 — alert when rate_limited degrades in the window ≥ this
+
+	// Phase 5 (§4.2/§4.5/§7.5) — the queue's retry/backoff/lease/bulk DIALs (existence locked;
+	// values tunable). These were code-defaults in buildQueue; promoted here so PROJECT_RULES §6
+	// ("anything the manifest calls a dial is a readable config entry, never hardcoded") holds. The
+	// backoff/attempt/age dials carry the spec's §4.2/§4.5 recommended defaults; the submission-
+	// backpressure dials (§7.5) are owner-OQ (UNSET) — they must read UNSET, never a guessed number.
+	QueueBackoffBaseSeconds   int  // §4.2 attempt-0 backoff floor (greylist windows are minutes); 300 (5m)
+	QueueBackoffFactor        int  // §4.2 exponential factor; 2
+	QueueBackoffCapSeconds    int  // §4.2 per-step ceiling; 3600 (60m)
+	QueueBackoffJitterPct     int  // §4.2 ± jitter % (anti thundering-herd); 15
+	QueueRateWaitSeconds      int  // §4.6 SHORT capacity-wait backoff (rate_limited/no-eligible); 30
+	QueueMaxAttempts          int  // §4.5 retry ceiling; 4 (spec 3–5)
+	QueueMaxRetryAgeSeconds   int  // §4.5 total retry-budget-in-time ceiling; 21600 (6h)
+	QueueLeaseMarginSeconds   int  // §5.2/GAP-37 — lease TTL = max-SMTP-deadline + this margin (must be >0 so TTL > deadline); 120 (2m)
+	QueueDrainBatchSize       int  // §6 items leased per drain tick; 10
+	QueueDrainIdlePollSeconds int  // drain loop idle sleep when the queue is empty; 2
+	// §7.5 submission backpressure — owner OQ (manifest §8.2: "UNSET"). A Dial so it reads UNSET,
+	// never a guessed number; when UNSET the endpoint uses a safe built-in hard cap (documented) but
+	// the *tuned* value is deliberately the owner's, not invented here. This is the ONE backpressure
+	// dial that is CONSUMED (bounds the bulk surface). The other two manifest §7.5/§6.5 backpressure
+	// dials (max-in-flight-jobs, per-job-in-flight-%) have NO enforcement path yet (per-job
+	// concurrency / WFQ is a deferred SEAM — OQ-P5-3); they stay in the manifest §8.2 UNSET inventory
+	// and are deliberately NOT wired as settable config here — a settable-but-ignored knob is a silent
+	// footgun (the P5→P6 review finding). They land in the phase that actually enforces them.
+	QueueBulkMaxAddresses Dial // §7.5 max addresses per /v1/verify/bulk submission (backpressure)
 }
 
 // ── Policy / structural feature-flags (shape frozen, contents dial) ─────────────────
@@ -205,6 +230,31 @@ func (c Config) WatcherCadence() time.Duration {
 }
 func (c Config) BlockRateWindow() time.Duration {
 	return time.Duration(c.Dials.BlockRateWindowSeconds) * time.Second
+}
+
+// ── Phase 5 queue DIAL accessors (§4.2/§4.5/§5.2) — typed durations the queue wiring reads ──
+func (c Config) QueueBackoffBase() time.Duration {
+	return time.Duration(c.Dials.QueueBackoffBaseSeconds) * time.Second
+}
+func (c Config) QueueBackoffCap() time.Duration {
+	return time.Duration(c.Dials.QueueBackoffCapSeconds) * time.Second
+}
+func (c Config) QueueRateWait() time.Duration {
+	return time.Duration(c.Dials.QueueRateWaitSeconds) * time.Second
+}
+func (c Config) QueueMaxRetryAge() time.Duration {
+	return time.Duration(c.Dials.QueueMaxRetryAgeSeconds) * time.Second
+}
+func (c Config) QueueDrainIdlePoll() time.Duration {
+	return time.Duration(c.Dials.QueueDrainIdlePollSeconds) * time.Second
+}
+
+// QueueLeaseTTL derives the GAP-37 lease TTL from the brain's max SMTP deadline PLUS the configured
+// margin — the lease MUST exceed the deadline so a live attempt never loses its lease (a reclaim
+// then provably means dead). maxSMTPDeadline is passed in (the caller resolves it from
+// SMTPClientDeadline with its own fallback). The margin is a dial (>0, enforced by Validate).
+func (c Config) QueueLeaseTTL(maxSMTPDeadline time.Duration) time.Duration {
+	return maxSMTPDeadline + time.Duration(c.Dials.QueueLeaseMarginSeconds)*time.Second
 }
 
 // CacheTTL returns the configured cache TTL as a duration, or 0 when the dial is UNSET
@@ -331,6 +381,19 @@ func Defaults() Config {
 			CanaryWarmupCap:     20, // §5.4/PM3 low re-warm start — but >= CanaryMinSamples so the canary can promote
 			PoolEligibleFloor:   1,  // §8.2 alert one-quarantine-from-all-degrade
 			RateSaturationCount: 50, // §8.2 sustained rate_limited degrades in the window
+			// Phase-5 queue dials (§4.2/§4.5/§7.5). Backoff/attempt/age carry the spec's recommended
+			// defaults; the §7.5 submission-backpressure dials are owner-OQ → UNSET (never guessed).
+			QueueBackoffBaseSeconds:   300,   // §4.2 5m attempt-0 floor (greylist windows are minutes)
+			QueueBackoffFactor:        2,     // §4.2 ×2 exponential
+			QueueBackoffCapSeconds:    3600,  // §4.2 60m per-step ceiling
+			QueueBackoffJitterPct:     15,    // §4.2 ±15% jitter (anti thundering-herd)
+			QueueRateWaitSeconds:      30,    // §4.6 short capacity-wait backoff
+			QueueMaxAttempts:          4,     // §4.5 retry ceiling (spec 3–5)
+			QueueMaxRetryAgeSeconds:   21600, // §4.5 6h total retry-budget-in-time
+			QueueLeaseMarginSeconds:   120,   // §5.2/GAP-37 lease TTL = maxSMTPdeadline + 2m (>0 so TTL > deadline)
+			QueueDrainBatchSize:       10,    // §6 items per drain tick
+			QueueDrainIdlePollSeconds: 2,     // idle sleep when the queue is empty
+			QueueBulkMaxAddresses:     Dial{Set: false}, // §7.5 owner OQ — UNSET (safe hard cap applies)
 		},
 		Policy: Policy{DefaultPolicyKey: "cold-email"},
 		Nodes:  nil, // node LIST, empty at P0. Door 5: a list even when length 0/1.
@@ -463,6 +526,19 @@ func Load(getenv func(string) string) (Config, error) {
 		{"TM_CANARY_WARMUP_CAP", &c.Dials.CanaryWarmupCap, false},
 		{"TM_POOL_ELIGIBLE_FLOOR", &c.Dials.PoolEligibleFloor, true},
 		{"TM_RATE_SATURATION_COUNT", &c.Dials.RateSaturationCount, true},
+		// Phase-5 queue dials (§4.2/§4.5/§5.2). All must be > 0 (a zero backoff/attempt/lease is
+		// nonsensical or unsafe); the drainer additionally fails fast if the lease TTL doesn't exceed
+		// the SMTP deadline (GAP-37), and Validate() guards the margin below.
+		{"TM_QUEUE_BACKOFF_BASE_SECONDS", &c.Dials.QueueBackoffBaseSeconds, false},
+		{"TM_QUEUE_BACKOFF_FACTOR", &c.Dials.QueueBackoffFactor, false},
+		{"TM_QUEUE_BACKOFF_CAP_SECONDS", &c.Dials.QueueBackoffCapSeconds, false},
+		{"TM_QUEUE_BACKOFF_JITTER_PCT", &c.Dials.QueueBackoffJitterPct, true}, // 0 jitter is legal (tests/degenerate)
+		{"TM_QUEUE_RATE_WAIT_SECONDS", &c.Dials.QueueRateWaitSeconds, false},
+		{"TM_QUEUE_MAX_ATTEMPTS", &c.Dials.QueueMaxAttempts, false},
+		{"TM_QUEUE_MAX_RETRY_AGE_SECONDS", &c.Dials.QueueMaxRetryAgeSeconds, false},
+		{"TM_QUEUE_LEASE_MARGIN_SECONDS", &c.Dials.QueueLeaseMarginSeconds, false},
+		{"TM_QUEUE_DRAIN_BATCH_SIZE", &c.Dials.QueueDrainBatchSize, false},
+		{"TM_QUEUE_DRAIN_IDLE_POLL_SECONDS", &c.Dials.QueueDrainIdlePollSeconds, false},
 	} {
 		if v := getenv(d.env); v != "" {
 			n, err := strconv.Atoi(v)
@@ -471,6 +547,18 @@ func Load(getenv func(string) string) (Config, error) {
 			}
 			*d.dst = n
 		}
+	}
+
+	// Phase-5 submission-backpressure dial (§7.5) — owner OQ, stays UNSET unless an operator sets it
+	// (reads UNSET, never a guessed number). Only the CONSUMED one is wired: TM_QUEUE_BULK_MAX_ADDRESSES
+	// bounds the bulk surface. Max-in-flight-jobs / per-job-% are NOT wired (no enforcement path yet —
+	// a settable-but-ignored knob is a silent footgun; they land with the phase that enforces them).
+	if v := getenv("TM_QUEUE_BULK_MAX_ADDRESSES"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return c, fmt.Errorf("config: invalid TM_QUEUE_BULK_MAX_ADDRESSES %q (must be > 0)", v)
+		}
+		c.Dials.QueueBulkMaxAddresses = Dial{Value: n, Set: true}
 	}
 
 	return c, c.Validate()
@@ -529,6 +617,19 @@ func (c Config) Validate() error {
 	if c.Dials.FleetWidePct < 1 || c.Dials.FleetWidePct > 99 {
 		return fmt.Errorf("config: fleet_wide_pct (%d) must be in 1..99 — a value ≥100 makes the fleet-wide cascade brake (GAP-28) mathematically unable to fire, silently disabling it",
 			c.Dials.FleetWidePct)
+	}
+	// §5.2/GAP-37: the queue lease TTL = maxSMTPdeadline + QueueLeaseMarginSeconds. The margin MUST be
+	// > 0 so the lease strictly EXCEEDS the deadline — a live (slow-not-dead) attempt must never lose
+	// its lease, or a reclaim double-runs it and the CAS exactly-once guarantee degrades to a race.
+	// (NewDrainer also fails fast on TTL<=deadline; this catches a zero/negative margin at startup.)
+	if c.Dials.QueueLeaseMarginSeconds <= 0 {
+		return fmt.Errorf("config: queue_lease_margin_seconds (%d) must be > 0 — the lease TTL must strictly exceed the max SMTP deadline (GAP-37), else a slow attempt loses its lease and is double-run",
+			c.Dials.QueueLeaseMarginSeconds)
+	}
+	// §4.5: at least one retry ceiling must bound an item so it can't linger forever (attempt count
+	// OR age). The drainer enforces the same, but a startup guard is clearer than a runtime surprise.
+	if c.Dials.QueueMaxAttempts <= 0 && c.Dials.QueueMaxRetryAgeSeconds <= 0 {
+		return fmt.Errorf("config: at least one of queue_max_attempts / queue_max_retry_age_seconds must be > 0 (§4.5 — an item must have a retry ceiling)")
 	}
 	return nil
 }

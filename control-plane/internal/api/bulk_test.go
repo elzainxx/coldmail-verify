@@ -36,7 +36,7 @@ func bulkServer(t *testing.T, now time.Time) (*Server, *store.MemStore, *queue.A
 	}
 	enq := &queue.Enqueuer{Store: mem, Hasher: h, Cipher: cipher, ConfigFingerprint: "cfg", Now: func() time.Time { return now }}
 
-	srv := New(cfg, sec, h).WithVerifier(stubVerifier{}, def).WithCallerAuth(mem).WithBulk(enq, mem)
+	srv := New(cfg, sec, h).WithVerifier(stubVerifier{}, def).WithCallerAuth(mem).WithBulk(enq, mem, 0)
 	srv.now = func() time.Time { return now }
 	// Seed a per-caller key (the bulk surface requires one, PN-13).
 	mem.SeedCaller(sha("bulk-key"), "caller_bulk", now.Add(-time.Hour), time.Time{})
@@ -102,7 +102,7 @@ func TestBulkSubmit_StaticTokenRejectedOnBulk(t *testing.T) {
 	def, _ := policy.ColdEmailDefinition()
 	cipher, _ := queue.NewAddrCipher(key32(2))
 	enq := &queue.Enqueuer{Store: mem, Hasher: h, Cipher: cipher, ConfigFingerprint: "cfg", Now: func() time.Time { return now }}
-	srv := New(cfg, sec, h).WithVerifier(stubVerifier{}, def).WithCallerAuth(mem).WithBulk(enq, mem)
+	srv := New(cfg, sec, h).WithVerifier(stubVerifier{}, def).WithCallerAuth(mem).WithBulk(enq, mem, 0)
 	srv.now = func() time.Time { return now }
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/verify/bulk", strings.NewReader(`{"addresses":["a@acmecorp.com"]}`))

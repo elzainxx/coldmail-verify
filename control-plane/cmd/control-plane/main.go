@@ -172,30 +172,41 @@ func buildQueue(appCtx context.Context, cfg config.Config, sec *secrets.Secrets,
 		log.Printf("queue: DR-4 cipher init failed (%v) — bulk endpoint disabled", err)
 		return
 	}
+	bulkMax := 0 // 0 => the handler's built-in safe hard cap applies (§7.5 dial is owner-OQ/UNSET)
+	if cfg.Dials.QueueBulkMaxAddresses.Set {
+		bulkMax = cfg.Dials.QueueBulkMaxAddresses.Value
+	}
 	enq := &queue.Enqueuer{Store: pg, Hasher: hasher, Cipher: cipher, ConfigFingerprint: cfgFingerprint}
-	srv.WithBulk(enq, pg)
+	srv.WithBulk(enq, pg, bulkMax)
 
-	// Backoff dials (§4.2) — conservative defaults; greylist windows are minutes, capacity waits seconds.
+	// Backoff dials (§4.2) — ALL read from config now (promoted from code-defaults; PROJECT_RULES §6).
 	bo := queue.Backoff{
-		Base: 5 * time.Minute, Factor: 2, Cap: time.Hour, JitterFrac: 0.15, RateWait: 30 * time.Second,
+		Base:       cfg.QueueBackoffBase(),
+		Factor:     float64(cfg.Dials.QueueBackoffFactor),
+		Cap:        cfg.QueueBackoffCap(),
+		JitterFrac: float64(cfg.Dials.QueueBackoffJitterPct) / 100.0,
+		RateWait:   cfg.QueueRateWait(),
 	}
 	// GAP-37: the lease TTL must EXCEED the brain's max SMTP client deadline so a live attempt never
-	// loses its lease. Derive the TTL as a margin over the configured deadline (fallback: 60s deadline).
+	// loses its lease. maxSMTP falls back to 60s when the deadline dial is UNSET (X-7 coupling); the
+	// TTL adds the configured margin (Validate() guarantees the margin > 0, so TTL > deadline).
 	maxSMTP := cfg.SMTPClientDeadline()
 	if maxSMTP <= 0 {
 		maxSMTP = 60 * time.Second
 	}
-	leaseTTL := maxSMTP + 2*time.Minute
+	leaseTTL := cfg.QueueLeaseTTL(maxSMTP)
 	drainer, err := queue.NewDrainer(queue.Deps{
 		Store: pg, Compute: orch, Policy: policyResolver{def: def}, Cipher: cipher, Backoff: bo,
 		WorkerID: "drainer-1", LeaseTTL: leaseTTL, MaxSMTPDeadline: maxSMTP,
-		MaxAttempts: 4, MaxRetryAge: 6 * time.Hour, BatchSize: 10, IdlePoll: 2 * time.Second,
+		MaxAttempts: cfg.Dials.QueueMaxAttempts, MaxRetryAge: cfg.QueueMaxRetryAge(),
+		BatchSize: cfg.Dials.QueueDrainBatchSize, IdlePoll: cfg.QueueDrainIdlePoll(),
 	})
 	if err != nil {
 		log.Printf("queue: drainer init failed (%v) — bulk submissions will enqueue but NOT drain until fixed", err)
 		return
 	}
-	log.Printf("queue: bulk endpoint wired; drainer starting (lease_ttl=%s max_smtp=%s)", leaseTTL, maxSMTP)
+	log.Printf("queue: bulk endpoint wired; drainer starting (lease_ttl=%s max_smtp=%s max_attempts=%d max_age=%s)",
+		leaseTTL, maxSMTP, cfg.Dials.QueueMaxAttempts, cfg.QueueMaxRetryAge())
 	go drainer.Run(appCtx)
 }
 

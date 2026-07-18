@@ -13,18 +13,18 @@ Regenerate on any manifest change; CI verifies this file is up to date
 
 | bucket | count |
 |---|---|
-| secrets | 8 |
+| secrets | 9 |
 | feature-flags | 145 |
-| dials | 97 |
+| dials | 108 |
 | other/uncategorized | 2 |
-| **total knobs** | **252** |
+| **total knobs** | **264** |
 
 > One-way doors are **not** dials: the frozen contracts (response shape, LOG, hashing,
 > vocabulary, never-fork) live in code (`control-plane/internal/{vocab,hash,verdict,store,router}`),
 > not in this toggle list. A dial that *feeds* a door (e.g. a `confidence` number vs. the
 > `confidence` int-0–100 *type*) is a dial; the type it feeds is frozen.
 
-## Secrets (8)
+## Secrets (9)
 
 | knob | default / state | source |
 |---|---|---|
@@ -32,6 +32,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | front-door bearer token(s) (caller → brain) | scheme decided (bearer, OQ-13); P1 accepts static token from config | P1 §3.1.1, §3.5.4, §5.2, OQ-13 |
 | node token / rack `ACCESS_TOKENS` (brain → box) | UNSET value; in secrets mgr, referenced by id, never plaintext in `nodes` | P1 §3.5.4, §4.5, OQ-13 |
 | Supabase service-role key | service-role only in P1; RLS deferred (OQ-20) | P1 §4, OQ-20 |
+| `TM_QUEUE_ADDR_KEY` (+`_PREV`) (DR-4 at-rest key) | UNSET ⇒ queue subsystem refuses to start (bulk 503); key ≠ pepper, 32 bytes | P5 §3.3, ADR-0011, DR-4 |
 | vendor API key (per adapter) | UNSET — held brain-side in secrets, rotated (§7.4) | P6 §7.2, §7.4, §8.3 |
 | node token (brain→box) | no rotation *cadence*; revoke-vs-drain ordering at queue scale unspecified (security F-1) | no rotation *cadence*; revoke-vs-drain ordering at queue scale unspecified (security F-1) |
 | vendor API key (P6) | no rotation story; leak = budget-DoS + billed enumeration oracle (security F-6) | no rotation story; leak = budget-DoS + billed enumeration oracle (security F-6) |
@@ -187,7 +188,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | `unknown` not pressured to `valid` | LOCKED — first-class unknown survives flywheel | P7 §8.4 |
 | platform "your sends train our accuracy" disclosure | surface it (OQ-P7-8), disclose-don't-hide | P7 §14, OQ-P7-8 |
 
-## Dials (97)
+## Dials (108)
 
 | knob | default / state | source |
 |---|---|---|
@@ -268,6 +269,17 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | bulk max addresses-per-submission | UNSET (backpressure) | P5 §7.5 |
 | max in-flight-jobs | UNSET | P5 §7.5 |
 | `jobs` retention window | days (results-fetch window), then work_items purged | P5 §7.2 |
+| `TM_QUEUE_BACKOFF_BASE_SECONDS` (attempt-0 greylist floor) | 300 (5 min) | P5 §4.2, OQ-P5-2 |
+| `TM_QUEUE_BACKOFF_FACTOR` (exponential factor) | 2 | P5 §4.2, OQ-P5-2 |
+| `TM_QUEUE_BACKOFF_CAP_SECONDS` (per-step ceiling) | 3600 (60 min) | P5 §4.2, OQ-P5-2 |
+| `TM_QUEUE_BACKOFF_JITTER_PCT` (± jitter %) | 15 (0 legal for tests) | P5 §4.2, OQ-P5-2 |
+| `TM_QUEUE_RATE_WAIT_SECONDS` (capacity-wait backoff) | 30 | P5 §4.6 |
+| `TM_QUEUE_MAX_ATTEMPTS` (retry ceiling) | 4 (spec 3–5) | P5 §4.5, OQ-P5-2 |
+| `TM_QUEUE_MAX_RETRY_AGE_SECONDS` (time ceiling) | 21600 (6h) | P5 §4.5, OQ-P5-2 |
+| `TM_QUEUE_LEASE_MARGIN_SECONDS` (lease TTL = maxSMTPdeadline + this) | 120 (2 min); VALIDATED > 0 (GAP-37: TTL must EXCEED the deadline, else a slow attempt loses its lease and is double-run) | P5 §5.2, GAP-37, X-7 |
+| `TM_QUEUE_DRAIN_BATCH_SIZE` (items per drain tick) | 10 | P5 §6 |
+| `TM_QUEUE_DRAIN_IDLE_POLL_SECONDS` (idle sleep) | 2 | P5 §3 |
+| `TM_QUEUE_BULK_MAX_ADDRESSES` (submission cap, §7.5) | **UNSET — owner OQ** (built-in hard cap 100k applies until set) | P5 §7.5 |
 | `confidence_cap` (external valid) | 60 (anti-laundering) | P6 §3.2, §3.4, OQ-P6-1 |
 | vendor normalization table (raw status → system vocab) | per §8.2; unrecognized → `unknown` (never guess) | P6 §8.2 |
 | `daily_cap` (external spend) | UNSET — start conservative (OQ-P6-5) | P6 §5.2, OQ-P6-5 |

@@ -335,6 +335,30 @@ It does not resolve open questions or set UNSET values — those are owner decis
 | **`jobs` retention window** | dial | days (results-fetch window), then work_items purged | — | data (operational) | P5 §7.2 |
 | **`caller_ref`** (opaque platform correlation) | feature-flag | echoed, never interpreted (two-job boundary) | interpreting → platform-UI leak (GAP-36) | brain↔platform boundary | P5 §7.2, §7.6, GAP-36 |
 
+### 5.4 Concrete config keys (this build — the env vars the P5 code reads)
+These promote the §5.2/§5.3 dials from `buildQueue` code-defaults to readable config (PROJECT_RULES §6 — anything the manifest calls a dial is a config entry, never hardcoded). Backoff/attempt/age carry the §4.2/§4.5 recommended defaults; the §7.5 submission-backpressure dials are owner-OQ (**UNSET** — they read UNSET, never a guessed number; a safe built-in hard cap still bounds the surface).
+
+| name | type | default | mis-setting effect | blast radius | source |
+|---|---|---|---|---|---|
+| **`TM_QUEUE_ADDR_KEY`** (+`_PREV`) (DR-4 at-rest key) | secret | UNSET ⇒ queue subsystem refuses to start (bulk 503); key ≠ pepper, 32 bytes | absent ⇒ no bulk; wrong ⇒ cipher init fails, bulk disabled | privacy / security | P5 §3.3, ADR-0011, DR-4 |
+| **`TM_QUEUE_BACKOFF_BASE_SECONDS`** (attempt-0 greylist floor) | dial | 300 (5 min) | too fast → re-greylist; too slow → long tail | per-check / reputation | P5 §4.2, OQ-P5-2 |
+| **`TM_QUEUE_BACKOFF_FACTOR`** (exponential factor) | dial | 2 | — | per-check | P5 §4.2, OQ-P5-2 |
+| **`TM_QUEUE_BACKOFF_CAP_SECONDS`** (per-step ceiling) | dial | 3600 (60 min) | — | per-check | P5 §4.2, OQ-P5-2 |
+| **`TM_QUEUE_BACKOFF_JITTER_PCT`** (± jitter %) | dial | 15 (0 legal for tests) | zero → thundering-herd retry wave | reputation | P5 §4.2, OQ-P5-2 |
+| **`TM_QUEUE_RATE_WAIT_SECONDS`** (capacity-wait backoff) | dial | 30 | too long → slow drain when capacity frees | per-check | P5 §4.6 |
+| **`TM_QUEUE_MAX_ATTEMPTS`** (retry ceiling) | dial | 4 (spec 3–5) | zero → never retries (rejected: needs a ceiling); high → long-lived items | per-check | P5 §4.5, OQ-P5-2 |
+| **`TM_QUEUE_MAX_RETRY_AGE_SECONDS`** (time ceiling) | dial | 21600 (6h) | too long → items (and their plaintext, §5.1) linger | per-check / privacy | P5 §4.5, OQ-P5-2 |
+| **`TM_QUEUE_LEASE_MARGIN_SECONDS`** (lease TTL = maxSMTPdeadline + this) | dial | 120 (2 min); VALIDATED > 0 (GAP-37: TTL must EXCEED the deadline, else a slow attempt loses its lease and is double-run) | ≤0 rejected at startup; too small → live attempt reclaimed under load | data-integrity | P5 §5.2, GAP-37, X-7 |
+| **`TM_QUEUE_DRAIN_BATCH_SIZE`** (items per drain tick) | dial | 10 | too high → burst; too low → slow drain | pool | P5 §6 |
+| **`TM_QUEUE_DRAIN_IDLE_POLL_SECONDS`** (idle sleep) | dial | 2 | too high → latency; too low → busy-poll | brain-wide | P5 §3 |
+| **`TM_QUEUE_BULK_MAX_ADDRESSES`** (submission cap, §7.5) | dial | **UNSET — owner OQ** (built-in hard cap 100k applies until set) | unbounded upload → brain/DB overload (bounded by the hard cap even when UNSET) | brain-wide | P5 §7.5 |
+
+> **Not-yet-wired backpressure dials (§7.5 max-in-flight-jobs, §6.5 per-job-in-flight-% / WFQ):** these
+> stay in the §8.2 "no default anywhere" UNSET inventory and are **deliberately NOT settable config yet** —
+> there is no enforcement path (per-job concurrency / weighted-fair-queuing is a deferred SEAM, OQ-P5-3),
+> and a settable-but-ignored env var is a silent footgun (P5→P6 review finding). They are wired by the
+> phase that actually enforces them, not before. Only the *consumed* bulk-max dial above is promoted.
+
 ---
 
 ## 6. PHASE 6 — Third-party fallback

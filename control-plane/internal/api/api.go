@@ -68,10 +68,11 @@ type Server struct {
 	hasher     *hash.Hasher  // may be nil if no pepper loaded (readiness reports it)
 	verifier   Verifier      // nil until the store+orchestrator are wired (readiness reports it)
 	callerAuth CallerAuth    // nil => per-caller auth not wired (legacy static token governs)
-	bulk       BulkSubmitter // nil => bulk endpoint unavailable (returns 503)
-	jobs       JobReader     // nil => job endpoints unavailable
-	defPolicy  *policy.Definition
-	now        func() time.Time
+	bulk         BulkSubmitter // nil => bulk endpoint unavailable (returns 503)
+	jobs         JobReader     // nil => job endpoints unavailable
+	bulkMaxAddrs int           // §7.5 submission cap; 0 => the built-in safe hard cap (dial UNSET)
+	defPolicy    *policy.Definition
+	now          func() time.Time
 }
 
 // New wires the server. A nil hasher/verifier is allowed for a build smoke (no pepper / no
@@ -97,10 +98,15 @@ func (s *Server) WithCallerAuth(c CallerAuth) *Server {
 
 // WithBulk attaches the P5 bulk submitter + job reader (§7). The bulk routes are served only when
 // both are wired AND per-caller auth is present (PN-13 gates the bulk-PII surface). A nil pair
-// leaves the bulk endpoints returning 503 (honest not-ready), never a fabricated handle.
-func (s *Server) WithBulk(b BulkSubmitter, j JobReader) *Server {
+// leaves the bulk endpoints returning 503 (honest not-ready), never a fabricated handle. maxAddrs
+// is the §7.5 submission-backpressure cap; <=0 => use the built-in safe hard cap (the dial is
+// owner-OQ/UNSET, so an operator hasn't tuned it — we still bound the surface, never unbounded).
+func (s *Server) WithBulk(b BulkSubmitter, j JobReader, maxAddrs int) *Server {
 	s.bulk = b
 	s.jobs = j
+	if maxAddrs > 0 {
+		s.bulkMaxAddrs = maxAddrs
+	}
 	return s
 }
 
@@ -187,9 +193,20 @@ type bulkRequest struct {
 	CallerRef string   `json:"caller_ref,omitempty"`
 }
 
-// maxBulkAddresses bounds one submission (§7.5 submission backpressure) so an unbounded upload
-// can't exhaust the brain/DB. Over-limit → 413 with a clear message, never a silent truncation.
+// maxBulkAddresses is the built-in safe hard cap on one submission (§7.5 backpressure) used when the
+// TM_QUEUE_BULK_MAX_ADDRESSES dial is UNSET (owner-OQ). It bounds the surface so an unbounded upload
+// can't exhaust the brain/DB even before an operator tunes the dial; a Set dial overrides it via
+// s.bulkMaxAddrs. Over-limit → 413 with a clear message, never a silent truncation.
 const maxBulkAddresses = 100_000
+
+// bulkAddressCap returns the effective per-submission cap: the configured dial when Set, else the
+// built-in hard cap. Never unbounded (the dial being UNSET does not mean "no limit").
+func (s *Server) bulkAddressCap() int {
+	if s.bulkMaxAddrs > 0 {
+		return s.bulkMaxAddrs
+	}
+	return maxBulkAddresses
+}
 
 // handleBulkSubmit is POST /v1/verify/bulk (§7.1): authenticate with a PER-CALLER key (PN-13 —
 // this is the bulk-PII surface; the legacy static token is rejected here), enqueue the work, and
@@ -221,9 +238,9 @@ func (s *Server) handleBulkSubmit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "addresses is required and must be non-empty"})
 		return
 	}
-	if len(req.Addresses) > maxBulkAddresses {
+	if cap := s.bulkAddressCap(); len(req.Addresses) > cap {
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
-			"error": "too many addresses", "max": maxBulkAddresses, "got": len(req.Addresses),
+			"error": "too many addresses", "max": cap, "got": len(req.Addresses),
 		})
 		return
 	}

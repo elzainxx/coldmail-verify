@@ -176,3 +176,68 @@ func TestLoad_P4DialValidation(t *testing.T) {
 		t.Fatal("canary_warmup_cap(5) < canary_min_samples(10) must be rejected (a recovering node could never promote)")
 	}
 }
+
+// TestLoad_P5QueueDialsDefaultAndOverride proves the P5 queue dials were promoted from buildQueue
+// code-defaults to config (PROJECT_RULES §6): defaults carry the §4.2/§4.5 spec values, env
+// overrides apply, and the §7.5 submission-backpressure dials are owner-OQ → read UNSET (never a
+// guessed number).
+func TestLoad_P5QueueDialsDefaultAndOverride(t *testing.T) {
+	def := Defaults()
+	// §4.2/§4.5 dials carry the spec defaults.
+	if def.Dials.QueueBackoffBaseSeconds != 300 || def.Dials.QueueBackoffFactor != 2 ||
+		def.Dials.QueueBackoffCapSeconds != 3600 || def.Dials.QueueBackoffJitterPct != 15 ||
+		def.Dials.QueueMaxAttempts != 4 || def.Dials.QueueMaxRetryAgeSeconds != 21600 ||
+		def.Dials.QueueLeaseMarginSeconds != 120 {
+		t.Fatalf("P5 queue dial defaults not set: %+v", def.Dials)
+	}
+	// The §7.5 bulk-max dial is owner-OQ → UNSET (never guessed). (The other two backpressure dials —
+	// max-in-flight-jobs, per-job-% — are deliberately NOT wired as config: no enforcement path yet,
+	// and a settable-but-ignored knob is a silent footgun — the P5→P6 review finding.)
+	if def.Dials.QueueBulkMaxAddresses.Set {
+		t.Fatal("P5 bulk-max dial must default UNSET (owner OQ), never a guessed number")
+	}
+	if def.Dials.QueueBulkMaxAddresses.String() != "UNSET(owner-OQ)" {
+		t.Fatalf("an UNSET dial must read UNSET, got %q", def.Dials.QueueBulkMaxAddresses.String())
+	}
+	// The typed lease-TTL accessor: TTL = maxSMTPdeadline + margin (strictly exceeds the deadline).
+	if got := def.QueueLeaseTTL(60 * 1e9); got != (60+120)*1e9 {
+		t.Fatalf("lease TTL want 180s, got %v", got)
+	}
+	// Overrides apply (int dials + a Set backpressure dial).
+	env := map[string]string{
+		"TM_QUEUE_MAX_ATTEMPTS": "6", "TM_QUEUE_BACKOFF_BASE_SECONDS": "600",
+		"TM_QUEUE_BULK_MAX_ADDRESSES": "5000",
+	}
+	c, err := Load(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Dials.QueueMaxAttempts != 6 || c.Dials.QueueBackoffBaseSeconds != 600 {
+		t.Fatalf("P5 int-dial overrides not applied: %+v", c.Dials)
+	}
+	if !c.Dials.QueueBulkMaxAddresses.Set || c.Dials.QueueBulkMaxAddresses.Value != 5000 {
+		t.Fatalf("TM_QUEUE_BULK_MAX_ADDRESSES override not applied: %+v", c.Dials.QueueBulkMaxAddresses)
+	}
+}
+
+// TestLoad_P5LeaseMarginGuard is the GAP-37 config-layer guard: the lease margin MUST be > 0 so the
+// lease TTL strictly exceeds the max SMTP deadline (else a slow attempt loses its lease → double-run).
+func TestLoad_P5LeaseMarginGuard(t *testing.T) {
+	if _, err := Load(func(k string) string {
+		if k == "TM_QUEUE_LEASE_MARGIN_SECONDS" {
+			return "0"
+		}
+		return ""
+	}); err == nil {
+		t.Fatal("queue_lease_margin_seconds=0 must be rejected (GAP-37: lease TTL must exceed the SMTP deadline)")
+	}
+	// A positive margin validates.
+	if _, err := Load(func(k string) string {
+		if k == "TM_QUEUE_LEASE_MARGIN_SECONDS" {
+			return "90"
+		}
+		return ""
+	}); err != nil {
+		t.Fatalf("a positive lease margin must be accepted, got %v", err)
+	}
+}
