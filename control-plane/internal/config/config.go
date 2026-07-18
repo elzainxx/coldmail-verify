@@ -176,6 +176,22 @@ type Dials struct {
 	// and are deliberately NOT wired as settable config here — a settable-but-ignored knob is a silent
 	// footgun (the P5→P6 review finding). They land in the phase that actually enforces them.
 	QueueBulkMaxAddresses Dial // §7.5 max addresses per /v1/verify/bulk submission (backpressure)
+
+	// Phase 6 (§5.2/§5.3/§3.4) — the external-fallback spend/breaker/anti-laundering DIALs (existence
+	// locked; the budget ceilings are owner-OQ → UNSET, "start conservative and raise from observed
+	// residue-tail volume", never loosen blind). ExternalConfidenceCap carries the §3.4 recommend-60
+	// anti-laundering ceiling (a rented verdict is never SMTP-grade). The caps are Dials so an UNSET
+	// ceiling reads UNSET (owner-OQ), never a guessed number — a 0-cap means "not enforced", NOT "no
+	// spend"; the layer only egresses at all when deliberately enabled (Fallback==enabled + a vendor
+	// key + DPA). ExternalErrorRatePct/CooldownSeconds gate the circuit-breaker (§5.3 cond 2).
+	ExternalConfidenceCap     int  // §3.4 anti-laundering cap on external valid; 60 (recommend). LOCKED risky, never valid.
+	ExternalDailyCap          Dial // §5.2 cost-units/day; UNSET (owner-OQ) — 0/unset => not enforced
+	ExternalMonthlyCap        Dial // §5.2 cost-units/month; UNSET
+	ExternalPerJobCap         Dial // §5.2/§4.4 cost-units per bulk job (bounds a pathological list); UNSET
+	ExternalRateCeiling       Dial // §5.2 max vendor calls/min; UNSET
+	ExternalErrorRatePct      int  // §5.3 cond-2 error-rate trip threshold %; 0 => error-rate condition disabled
+	ExternalErrorMinSamples   int  // §5.3/GAP-27 min calls in the window before error-rate can trip; 20
+	ExternalBreakerCooldownSeconds int // §5.3 breaker open-duration before a half-open probe; 300 (5m)
 }
 
 // ── Policy / structural feature-flags (shape frozen, contents dial) ─────────────────
@@ -195,9 +211,29 @@ type Config struct {
 	Dials       Dials
 	Policy      Policy
 
+	// ExternalDPAConfirmed is the P6 §7.4 legal enablement gate: the external fallback layer ships
+	// DISABLED and MUST NOT egress a single real address until the vendor DPA / due-diligence
+	// checklist has passed (DPA signed, retention understood, TLS, key custody). Enabling pre-DPA is
+	// UNLAWFUL SUB-PROCESSING. Defaults FALSE — so even Fallback==enabled + a vendor key present does
+	// NOT turn the layer on; an operator must ALSO deliberately assert this flag (TM_EXTERNAL_DPA_
+	// CONFIRMED=true) after the checklist passes. This makes accidental enablement HARD: three
+	// independent switches (kill-switch rung, vendor key, this DPA flag) must all be affirmative, and
+	// the global-fallback-kill (Fallback==off) overrides all of them (§ kill-switch-ladder Global A).
+	ExternalDPAConfirmed bool
+
 	// Node registry is a LIST from config (Door 5 — never a single hardcoded endpoint).
 	// Phase 0 ships zero or one mock entry; the list shape is what matters.
 	Nodes []NodeDescriptor
+}
+
+// ExternalFallbackEnabled reports whether the P6 fallback layer may egress to a vendor — the AND of
+// three independent switches (§7.4 "enabling is hard"): the kill-switch fallback rung is ON
+// (Fallback==enabled — DEFAULT off), the operator confirmed the DPA (ExternalDPAConfirmed — DEFAULT
+// false), and (checked by the caller) a vendor key is loaded. The global-fallback-kill
+// (Fallback==off) is the panic button that forces this false regardless of the DPA flag. This is the
+// code-level guard that makes accidental pre-DPA egress hard; buildExternal also requires the key.
+func (c Config) ExternalFallbackEnabled() bool {
+	return c.KillSwitch.Fallback == FallbackEnabled && c.ExternalDPAConfirmed
 }
 
 // SMTPClientDeadline returns the brain-side SMTP client deadline (§6.5), or 0 when the dial is
@@ -247,6 +283,12 @@ func (c Config) QueueMaxRetryAge() time.Duration {
 }
 func (c Config) QueueDrainIdlePoll() time.Duration {
 	return time.Duration(c.Dials.QueueDrainIdlePollSeconds) * time.Second
+}
+
+// ExternalBreakerCooldown is the P6 §5.3 breaker open-duration (before a half-open probe) as a typed
+// duration; it also anchors the error-rate measurement window (external_stage.externalErrWindow).
+func (c Config) ExternalBreakerCooldown() time.Duration {
+	return time.Duration(c.Dials.ExternalBreakerCooldownSeconds) * time.Second
 }
 
 // QueueLeaseTTL derives the GAP-37 lease TTL from the brain's max SMTP deadline PLUS the configured
@@ -394,6 +436,19 @@ func Defaults() Config {
 			QueueDrainBatchSize:       10,    // §6 items per drain tick
 			QueueDrainIdlePollSeconds: 2,     // idle sleep when the queue is empty
 			QueueBulkMaxAddresses:     Dial{Set: false}, // §7.5 owner OQ — UNSET (safe hard cap applies)
+			// Phase-6 external-fallback dials (§5.2/§5.3/§3.4). The anti-laundering cap carries the
+			// §3.4 recommend-60. The spend ceilings are owner-OQ → UNSET (start conservative, raise
+			// from observed volume — never loosen blind). The breaker error-rate is off-by-default
+			// (0%) with a sample gate + a 5m cooldown, so a first deployment relies on the budget
+			// ceilings until an owner tunes the error-rate condition.
+			ExternalConfidenceCap:          60,               // §3.4 anti-laundering ceiling (never SMTP-grade)
+			ExternalDailyCap:               Dial{Set: false}, // §5.2 owner OQ — UNSET (not enforced until set)
+			ExternalMonthlyCap:             Dial{Set: false}, // §5.2 owner OQ — UNSET
+			ExternalPerJobCap:              Dial{Set: false}, // §5.2/§4.4 owner OQ — UNSET
+			ExternalRateCeiling:            Dial{Set: false}, // §5.2 owner OQ — UNSET
+			ExternalErrorRatePct:           0,                // §5.3 cond-2 disabled until tuned (0 => off)
+			ExternalErrorMinSamples:        20,               // §5.3/GAP-27 sample gate (mirrors block-rate)
+			ExternalBreakerCooldownSeconds: 300,              // §5.3 5m open before a half-open probe
 		},
 		Policy: Policy{DefaultPolicyKey: "cold-email"},
 		Nodes:  nil, // node LIST, empty at P0. Door 5: a list even when length 0/1.
@@ -539,6 +594,14 @@ func Load(getenv func(string) string) (Config, error) {
 		{"TM_QUEUE_LEASE_MARGIN_SECONDS", &c.Dials.QueueLeaseMarginSeconds, false},
 		{"TM_QUEUE_DRAIN_BATCH_SIZE", &c.Dials.QueueDrainBatchSize, false},
 		{"TM_QUEUE_DRAIN_IDLE_POLL_SECONDS", &c.Dials.QueueDrainIdlePollSeconds, false},
+		// Phase-6 external-fallback int dials (§3.4/§5.3). ConfidenceCap 0 is legal (would make every
+		// rented verdict confidence 0 — extreme but not unsafe: it can only LOWER, never launder to
+		// valid). ErrorRatePct 0 disables the error-rate breaker condition (budget ceilings still
+		// apply). Cooldown/samples 0 legal (degenerate; tests). All non-negative.
+		{"TM_EXTERNAL_CONFIDENCE_CAP", &c.Dials.ExternalConfidenceCap, true},
+		{"TM_EXTERNAL_ERROR_RATE_PCT", &c.Dials.ExternalErrorRatePct, true},
+		{"TM_EXTERNAL_ERROR_MIN_SAMPLES", &c.Dials.ExternalErrorMinSamples, true},
+		{"TM_EXTERNAL_BREAKER_COOLDOWN_SECONDS", &c.Dials.ExternalBreakerCooldownSeconds, true},
 	} {
 		if v := getenv(d.env); v != "" {
 			n, err := strconv.Atoi(v)
@@ -559,6 +622,35 @@ func Load(getenv func(string) string) (Config, error) {
 			return c, fmt.Errorf("config: invalid TM_QUEUE_BULK_MAX_ADDRESSES %q (must be > 0)", v)
 		}
 		c.Dials.QueueBulkMaxAddresses = Dial{Value: n, Set: true}
+	}
+
+	// Phase-6 external-spend ceiling dials (§5.2) — owner OQ, stay UNSET unless an operator sets them
+	// (read UNSET, never a guessed number; an UNSET cap is "not enforced", never "unbounded spend" —
+	// the layer only egresses when deliberately enabled). Each must be > 0 when set.
+	for _, d := range []struct {
+		env string
+		dst *Dial
+	}{
+		{"TM_EXTERNAL_DAILY_CAP", &c.Dials.ExternalDailyCap},
+		{"TM_EXTERNAL_MONTHLY_CAP", &c.Dials.ExternalMonthlyCap},
+		{"TM_EXTERNAL_PER_JOB_CAP", &c.Dials.ExternalPerJobCap},
+		{"TM_EXTERNAL_RATE_CEILING", &c.Dials.ExternalRateCeiling},
+	} {
+		if v := getenv(d.env); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n <= 0 {
+				return c, fmt.Errorf("config: invalid %s %q (must be > 0)", d.env, v)
+			}
+			*d.dst = Dial{Value: n, Set: true}
+		}
+	}
+
+	// Phase-6 §7.4 DPA enablement gate (default FALSE): the layer stays disabled until the operator
+	// asserts the DPA/due-diligence checklist has passed. Enabling pre-DPA = unlawful sub-processing,
+	// so this is deliberately a separate, explicit affirmative flag — NOT implied by the kill-switch
+	// rung or the vendor key. Only the exact string "true" turns it on.
+	if getenv("TM_EXTERNAL_DPA_CONFIRMED") == "true" {
+		c.ExternalDPAConfirmed = true
 	}
 
 	return c, c.Validate()

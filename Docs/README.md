@@ -104,6 +104,15 @@ touching a one-way door or elevating/gating a cross-phase decision.
 | [`../control-plane/migrations/0009_work_items_jobs.sql`](../control-plane/migrations/0009_work_items_jobs.sql) | `work_items` (durable queue; UNIQUE idempotency_key; `addr_ciphertext` encrypted plaintext; lease `locked_by`/`locked_at`; `verification_id` FK-less) + `jobs` (counts/status/opaque caller_ref) + `work_item_attempts` (append-only transcripts). Partial indexes for the group-by-domain dequeue, the GAP-38 completion query, and the lease-reclaim sweep. cp_runtime SELECT+INSERT+UPDATE, DELETE cp_admin. |
 | [`../control-plane/migrations/0010_api_callers.sql`](../control-plane/migrations/0010_api_callers.sql) | `api_callers` (PN-13): per-caller key stored `key_sha256` HASHED, validity window `[not_before, not_after)` for zero-downtime rotation. cp_runtime SELECT-only (hot auth read); issuance/rotation cp_admin (DR-3 admin-audited). |
 
+## Phase-6 artifacts (the third-party fallback — local build complete, layer DISABLED)
+
+| Doc | What it is |
+|---|---|
+| [`phase-6-status.md`](phase-6-status.md) | Live scorecard of the Phase-6 local build: the external-verifier layer (built DISABLED against a **mock vendor**), residue-only routing (closed 4-class set), the **anti-laundering rule + spend-once (both fail-verified)**, per-vendor budget + circuit-breaker, the global-fallback-kill, the P7-weaning provenance, and the honest **PENDING-REAL-VENDOR** ledger (vendor accuracy is un-mockable, GAP-46/47). |
+| [`phase-6-readiness-assessment.md`](phase-6-readiness-assessment.md) | The P5→P6 readiness pass (predecessor): Phase 5 re-verified closed; Phase 6 mapped fully local-buildable against a mock vendor with the layer DISABLED — the **DPA gates enablement, not implementation**. |
+| [`adr/ADR-0012-phase-6-external-fallback-additive-surface.md`](adr/ADR-0012-phase-6-external-fallback-additive-surface.md) | The Phase-6 additive surface + the two irreversible correctness surfaces: **anti-laundering** (vendor `valid`→`risky/external_verified` capped, never SMTP-grade — §3.4); **spend-once = the GAP-37 CAS extended to money** (§5.4/GAP-42); OQ-P6-3 asymmetry; **hard-to-enable** (kill-switch AND DPA AND vendor key). Additive against all five doors, zero new vocab. |
+| [`../control-plane/migrations/0011_external_calls.sql`](../control-plane/migrations/0011_external_calls.sql) | `external_calls` (P6 §6.1): the append-only external-verifier spend + P7-weaning provenance sidecar. Stores `email_hash` ONLY (never plaintext, §7.3); queryable by `email_hash` for SAR/deletion (PN-10). A queued escalation's row rides the settlement CAS (spend-once, GAP-42). cp_runtime SELECT+INSERT only; DELETE cp_admin. |
+
 ## How the living-docs system stays honest (enforced, not asked)
 
 - **Behavior change ⇒ doc/ADR change**, in the same commit — [`../scripts/check-docs-updated.sh`](../scripts/check-docs-updated.sh) fails CI otherwise.

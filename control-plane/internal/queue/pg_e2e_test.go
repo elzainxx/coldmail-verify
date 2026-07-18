@@ -36,7 +36,7 @@ func testPGStore(t *testing.T) *store.PG {
 // isolate the queue plumbing against real PG).
 type settleE2EComputer struct{ now time.Time }
 
-func (c settleE2EComputer) ComputeForQueue(_ context.Context, _ string, _ *policy.Definition) (orchestrator.QueueOutcome, error) {
+func (c settleE2EComputer) ComputeForQueue(_ context.Context, _ string, _ *policy.Definition, _ string) (orchestrator.QueueOutcome, error) {
 	// The row id is assigned by the caller in real code; assign one here (valid UUID: the final
 	// group is exactly 12 hex chars). randHex12 supplies those 12.
 	id := "018f0000-0000-7000-8000-" + randHex12()
@@ -47,6 +47,11 @@ func (c settleE2EComputer) ComputeForQueue(_ context.Context, _ string, _ *polic
 		PolicyKey: "cold-email", PolicyVersion: 1, APIVersion: "v1", ConfigFingerprint: "cfg",
 	}
 	return orchestrator.QueueOutcome{Class: orchestrator.QSettled, Row: row}, nil
+}
+
+// EscalateExhausted: no fallback wired in this e2e test → outcome unchanged (no-egress default).
+func (c settleE2EComputer) EscalateExhausted(_ context.Context, _ string, _ *policy.Definition, out orchestrator.QueueOutcome, _, _ string) orchestrator.QueueOutcome {
+	return out
 }
 
 var e2eCounter int

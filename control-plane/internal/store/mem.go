@@ -48,6 +48,10 @@ type MemStore struct {
 	idemKeys  map[string]string
 	jobs      map[string]JobRow
 	attempts  []WorkItemAttemptRow
+
+	// Phase 6 (§5/§6) — the append-only external-verifier call log (spend + provenance). Tests read
+	// it to assert spend-once (exactly one row per settled escalation, even under a reclaim).
+	ExternalCalls []ExternalCallRow
 }
 
 // callerRow mirrors one api_callers row (per-caller key + validity window).
@@ -531,7 +535,7 @@ func (m *MemStore) DequeueReady(_ context.Context, workerID string, limit int, n
 // item is still in_flight AND held by workerID; otherwise ErrLeaseLost (no LOG row appended). On
 // success: append the ONE LOG row, stamp verification_id, NULL the ciphertext, bump the job
 // counter, append the transcript — all atomically under the single lock.
-func (m *MemStore) SettleWorkItem(_ context.Context, itemID, workerID, terminal string, verdict VerificationRow, raw *RawRow, attempt WorkItemAttemptRow) error {
+func (m *MemStore) SettleWorkItem(_ context.Context, itemID, workerID, terminal string, verdict VerificationRow, raw *RawRow, attempt WorkItemAttemptRow, extCall *ExternalCallRow) error {
 	if terminal != "settled" && terminal != "dead" {
 		return fmt.Errorf("store: settle: invalid terminal %q", terminal)
 	}
@@ -539,7 +543,7 @@ func (m *MemStore) SettleWorkItem(_ context.Context, itemID, workerID, terminal 
 	defer m.mu.Unlock()
 	w, ok := m.workItems[itemID]
 	if !ok || w.LockedBy != workerID || w.Status != "in_flight" {
-		return ErrLeaseLost // reclaimed or already transitioned → discard (GAP-37); NO LOG row
+		return ErrLeaseLost // reclaimed or already transitioned → discard (GAP-37/42); NO LOG/spend row
 	}
 	// (1) append the one LOG row (Door 2).
 	m.Log = append(m.Log, verdict)
@@ -565,7 +569,57 @@ func (m *MemStore) SettleWorkItem(_ context.Context, itemID, workerID, terminal 
 	if attempt.ID != "" {
 		m.attempts = append(m.attempts, attempt)
 	}
+	// (5) SPEND-ONCE (P6 §5.4/GAP-42): the vendor spend record commits with the settle. A reclaimed
+	// attempt hit ErrLeaseLost above and never reaches here → the charge is recorded exactly once.
+	if extCall != nil {
+		m.ExternalCalls = append(m.ExternalCalls, *extCall)
+	}
 	return nil
+}
+
+// AppendExternalCall records a SYNC-path external call (§6.1) — a plain append (no CAS).
+func (m *MemStore) AppendExternalCall(_ context.Context, call ExternalCallRow) error {
+	if call.ID == "" {
+		return fmt.Errorf("store: external call requires an id")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ExternalCalls = append(m.ExternalCalls, call)
+	return nil
+}
+
+// ExternalSpendSince mirrors PG: spend (ok calls only) over day/month/job + call/error counts over
+// the error-rate window, from the append-only external-call log.
+func (m *MemStore) ExternalSpendSince(_ context.Context, vendor, jobID string, dayStart, monthStart, errWindowStart, minuteStart, now time.Time) (ExternalSpend, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var s ExternalSpend
+	for _, c := range m.ExternalCalls {
+		if c.Vendor != vendor {
+			continue
+		}
+		if c.Outcome == "ok" {
+			if !c.CalledAt.Before(dayStart) {
+				s.SpentDay += c.CostUnits
+			}
+			if !c.CalledAt.Before(monthStart) {
+				s.SpentMonth += c.CostUnits
+			}
+			if jobID != "" && c.JobID == jobID {
+				s.SpentJob += c.CostUnits
+			}
+		}
+		if !c.CalledAt.Before(errWindowStart) {
+			s.Calls++
+			if c.Outcome == "error" {
+				s.Errors++
+			}
+		}
+		if !c.CalledAt.Before(minuteStart) {
+			s.CallsLastMinute++ // the rate_ceiling brake (§5.2) — all calls in the last minute
+		}
+	}
+	return s, nil
 }
 
 // RequeueWorkItem mirrors PG's GAP-37 CAS requeue: transition ONLY when in_flight AND held by

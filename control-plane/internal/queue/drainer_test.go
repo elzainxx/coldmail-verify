@@ -23,7 +23,7 @@ type byAttemptComputer struct {
 	lastAddr string
 }
 
-func (c *byAttemptComputer) ComputeForQueue(_ context.Context, rawEmail string, _ *policy.Definition) (orchestrator.QueueOutcome, error) {
+func (c *byAttemptComputer) ComputeForQueue(_ context.Context, rawEmail string, _ *policy.Definition, _ string) (orchestrator.QueueOutcome, error) {
 	if c.calls == nil {
 		c.calls = map[string]int{}
 	}
@@ -57,6 +57,13 @@ func (c *byAttemptComputer) ComputeForQueue(_ context.Context, rawEmail string, 
 		PolicyKey: "cold-email", PolicyVersion: 1, APIVersion: "v1", ConfigFingerprint: "cfg",
 	}
 	return orchestrator.QueueOutcome{Class: class, LastReason: string(reason), Row: row}, nil
+}
+
+// EscalateExhausted: this fake has no fallback wired → return the outcome unchanged (the no-egress
+// default; the P5 drainer behavior is exactly as before). The P6 escalation path is exercised by the
+// orchestrator-level fail-verify tests against a real orchestrator + mock vendor.
+func (c *byAttemptComputer) EscalateExhausted(_ context.Context, _ string, _ *policy.Definition, out orchestrator.QueueOutcome, _, _ string) orchestrator.QueueOutcome {
+	return out
 }
 
 type fakePolicy struct{}
@@ -145,6 +152,83 @@ func TestDrainer_GreylistRetriesThenSettlesUnknownNeverInvalid(t *testing.T) {
 	// max_attempts-1. Assert we actually retried (not a first-attempt give-up).
 	if w.Attempt != 2 {
 		t.Fatalf("with max_attempts=3 the item settles on the 3rd try with attempt=2 recorded, got %d", w.Attempt)
+	}
+}
+
+// escalatingComputer is a byAttemptComputer whose EscalateExhausted DOES escalate (mimicking the
+// real orchestrator + a mock vendor): at the drainer's give-up point it replaces the residue verdict
+// with external_verified and attaches a spend record. It lets the drainer test assert the P6 queued
+// escalation wiring (§2.2/§5.4) WITHOUT a real orchestrator/DB: that EscalateExhausted is called ONLY
+// at exhaustion, and its spend record is threaded into the settle CAS (spend-once, GAP-42).
+type escalatingComputer struct {
+	byAttemptComputer
+	escalations int
+}
+
+func (c *escalatingComputer) EscalateExhausted(_ context.Context, _ string, _ *policy.Definition, out orchestrator.QueueOutcome, jobID, workItemID string) orchestrator.QueueOutcome {
+	c.escalations++
+	// Replace the residue (unknown/greylisted) with a rented verdict (risky/external_verified) and a
+	// spend record — exactly what the real orchestrator's EscalateExhausted returns on a vendor hit.
+	out.Row.Status = string(vocab.StatusRisky)
+	out.Row.Reason = string(vocab.ReasonExternalVerified)
+	out.Row.Confidence = 60
+	out.Row.Recommendation = string(vocab.RecReview)
+	out.ExternalCall = &store.ExternalCallRow{
+		ID: "018f0000-0000-7000-8000-00000000ce01", VerificationID: out.Row.ID, WorkItemID: workItemID,
+		JobID: jobID, Vendor: "millionverifier", ResidueClass: "retry_exhausted_greylisted",
+		CostUnits: 1, Outcome: "ok", CalledAt: time.Unix(1, 0),
+	}
+	return out
+}
+
+// TestDrainer_ExhaustedGreylistEscalatesToVendor_SpendOnce is the P6 queued-escalation test (§2.2,
+// §4.1c): a greylist that exhausts the retry budget is offered to the fallback at the give-up point.
+// It asserts (a) EscalateExhausted is called ONLY at exhaustion (never on an intermediate retry —
+// escalating a still-retryable greylist would rent an answer the pool was about to earn free), and
+// (b) the escalated verdict settles external_verified with EXACTLY ONE spend record threaded through
+// the settle CAS (spend-once). The retry-first invariant (P5) is preserved: escalation is the tail.
+func TestDrainer_ExhaustedGreylistEscalatesToVendor_SpendOnce(t *testing.T) {
+	ctx := context.Background()
+	clock := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	mem := store.NewMem(func() time.Time { return clock })
+	comp := &escalatingComputer{byAttemptComputer: byAttemptComputer{sequence: []orchestrator.QueueClass{
+		orchestrator.QGreylisted, orchestrator.QGreylisted, orchestrator.QGreylisted,
+	}}}
+	dr, err := NewDrainer(Deps{
+		Store: mem, Compute: comp, Policy: fakePolicy{}, Cipher: plainCipher{},
+		Backoff: testBackoff(), Now: func() time.Time { return clock },
+		WorkerID: "w1", LeaseTTL: time.Minute, MaxSMTPDeadline: 10 * time.Second,
+		MaxAttempts: 3, MaxRetryAge: 24 * time.Hour, BatchSize: 5, ReclaimEvery: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewDrainer: %v", err)
+	}
+	enqueue(t, mem, "018f0000-0000-7000-8000-000000000201", "gx", "ex.com", "jane@ex.com", "", clock)
+
+	for i := 0; i < 10; i++ {
+		dr.TickOnce(ctx)
+		w, _, _ := mem.GetWorkItem(ctx, "018f0000-0000-7000-8000-000000000201")
+		if w.Status == "dead" || w.Status == "settled" {
+			break
+		}
+		clock = clock.Add(2 * time.Hour)
+	}
+
+	// EscalateExhausted must have fired EXACTLY ONCE — at the give-up point, not on the intermediate
+	// retries (the retry-first invariant: we escalate the tail, not every greylist).
+	if comp.escalations != 1 {
+		t.Fatalf("EscalateExhausted must fire exactly once (only at exhaustion), fired %d times", comp.escalations)
+	}
+	// The settled verdict is the rented one (external_verified), and there is EXACTLY ONE spend record
+	// (threaded through the settle CAS — spend-once).
+	if len(mem.Log) != 1 || mem.Log[0].Reason != string(vocab.ReasonExternalVerified) {
+		t.Fatalf("exhausted greylist must settle the rented external_verified verdict, got %d rows: %+v", len(mem.Log), mem.Log)
+	}
+	if len(mem.ExternalCalls) != 1 {
+		t.Fatalf("queued escalation must record EXACTLY one spend record (spend-once), got %d", len(mem.ExternalCalls))
+	}
+	if mem.ExternalCalls[0].WorkItemID != "018f0000-0000-7000-8000-000000000201" {
+		t.Errorf("the spend record must be stamped with the work-item id, got %q", mem.ExternalCalls[0].WorkItemID)
 	}
 }
 

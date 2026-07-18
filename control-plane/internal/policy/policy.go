@@ -36,6 +36,29 @@ type Definition struct {
 	// on P1/P2/P3 policies (no shape change); the P4 limiter reads it when present. Global-with-
 	// per-provider-override (OQ-P4-5): Default applies to any bucket lacking a ByProvider entry.
 	RateLimits *RateLimits `json:"rate_limits,omitempty"`
+
+	// External is the P6 third-party-fallback config (§3.2) — the ADDITIVE `external` open key P1
+	// §7.2 reserved (reason=external_verified was reserved a phase-ago). It is nil on P1–P5 policies
+	// (no shape change) AND on any policy that opts OUT of fallback — a policy WITHOUT this block
+	// simply never runs the external layer (the mechanical privacy opt-out lever, §7.5/OQ-P6-6). Even
+	// when present, the layer only egresses when Enabled AND the runtime kill-switch permits it AND a
+	// vendor key + DPA are configured (buildExternal) — four independent switches (enabling is hard).
+	External *External `json:"external,omitempty"`
+}
+
+// External is the P6 fallback layer's per-policy config (§3.2). The layer id `external` is LAST in
+// `order` (the most expensive layer, runs only on residue). route_when is the residue predicate as
+// DATA (a per-policy DIAL — which of the 4 §4.1 classes this policy escalates; may never add a 5th).
+// The on_* fields are all keep_residue (LOCKED, §3.2): a vendor unknown / breaker-open / vendor-error
+// leaves the residue verdict UNCHANGED — never fabricates, never worse than P5 (principle 2).
+type External struct {
+	Enabled           bool     `json:"enabled"`
+	RouteWhen         []string `json:"route_when"`         // §4.1 residue classes this policy escalates (subset of the closed 4)
+	Vendor            string   `json:"vendor"`             // adapter handle (§8) — the per-vendor budget/breaker key
+	ConfidenceCap     int      `json:"confidence_cap"`     // §3.4 anti-laundering ceiling (recommend 60) — external is never SMTP-grade
+	OnVendorUnknown   string   `json:"on_vendor_unknown"`  // keep_residue (§3.2) — the only safe value
+	OnBudgetExhausted string   `json:"on_budget_exhausted"` // keep_residue (§3.2)
+	OnVendorError     string   `json:"on_vendor_error"`    // keep_residue (§3.2)
 }
 
 // RateLimits carries the token-bucket + jitter DIALs per provider bucket (§4.2). All values are

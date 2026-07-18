@@ -256,6 +256,44 @@ type WorkItemResult struct {
 	Verdict    VerificationRow // the settled verdict from the LOG (joined via verification_id)
 }
 
+// ── Phase 6 (§5/§6) — the external-verifier spend record + provenance sidecar ──────────────────
+
+// ExternalCallRow is one append-only external-verifier call transcript (P6 §6.1) — the spend record
+// AND the P7 provenance the weaning decision runs on. It is DISTINCT from the verdict LOG (a sidecar,
+// the P5 work_item_attempts pattern): it records what the vendor said + what the call cost, without
+// bloating the verdict row. It stores NO plaintext — only email_hash (Door 3), for SAR/deletion
+// queryability (PN-10). Recorded INSIDE the settlement CAS for a queued escalation (spend-once,
+// GAP-42) so a lost-lease attempt's spend record rolls back with its (discarded) settlement.
+type ExternalCallRow struct {
+	ID                  string    // UUIDv7
+	VerificationID      string    // FK-less pointer to the settled verdict (join the rented population); "" if none
+	WorkItemID          string    // "" for a sync call; the queue item id for a queued escalation
+	JobID               string    // "" for a singular/sync check; the bulk job (per_job budget, §5.2)
+	Vendor              string    // which adapter answered — the per-vendor budget/breaker key (§5.3)
+	ResidueClass        string    // which of the 4 §4.1 classes triggered escalation (§6.2)
+	EmailHash           []byte    // Door-3 identity for SAR/deletion (PN-10); NEVER plaintext
+	VendorStatusRaw     string    // the vendor's own status string, verbatim (§6.2 — P7 measures their grade)
+	VendorConfidenceRaw int       // the vendor's own confidence/score if any (§6.2)
+	RequestID           string    // vendor call id (idempotency + audit trace to a billed call, §5.4)
+	CostUnits           int       // what the call cost — spend accounting (§5, §6.2). 0 for an errored call.
+	Outcome             string    // "ok" | "error" — feeds the error-rate breaker condition (§5.3)
+	LatencyMS           int       // vendor round-trip (§6.2)
+	CalledAt            time.Time // when the call was made (passed in — no wall-clock in the store)
+}
+
+// ExternalSpend is the durable spend/error state the breaker reasons over (§5.2/§5.3), derived from
+// windowed reads of the append-only external_calls table (so it survives a brain restart — the
+// PM4-analogue hazard for MONEY). The store returns store-local counts; the orchestrator maps them to
+// external.SpendFacts (the store never imports the external package — layering).
+type ExternalSpend struct {
+	SpentDay        int // cost-units in the rolling day window (ok calls)
+	SpentMonth      int // cost-units in the rolling month window (ok calls)
+	SpentJob        int // cost-units this bulk job has spent (0 when jobID == "")
+	Calls           int // total calls in the error-rate window (ok + error) — the denominator
+	Errors          int // errored calls in the error-rate window — the numerator
+	CallsLastMinute int // total calls in the last rolling minute — the rate_ceiling brake (§5.2)
+}
+
 // ErrNotWired marks the no-DB stub. ErrCacheMiss is a normal (non-error) cache absence.
 var (
 	ErrNotWired  = errors.New("store: no database wired")
@@ -400,15 +438,36 @@ type Store interface {
 	// UNCHANGED P4 router+gates (§8) and then settles/requeues via the CAS methods below.
 	DequeueReady(ctx context.Context, workerID string, limit int, now time.Time) ([]WorkItemRow, error)
 
-	// SettleWorkItem is the GAP-37/33/38 conditional-CAS settlement (§5.3), all in ONE transaction:
+	// SettleWorkItem is the GAP-37/33/38/42 conditional-CAS settlement (§5.3 + P6 §5.4), all in ONE
+	// transaction:
 	// (1) INSERT the one verifications LOG row (+ optional raw sidecar) — Door 2 append;
 	// (2) CAS UPDATE work_items SET status=<terminal>, verification_id=verdict.ID, settled_at,
 	//     addr_ciphertext=NULL, lease cleared  WHERE id=itemID AND locked_by=workerID AND
-	//     status='in_flight';  (3) if job-owned, jobs.settled_count++;  (4) INSERT the attempt row.
+	//     status='in_flight';  (3) if job-owned, jobs.settled_count++;  (4) INSERT the attempt row;
+	// (5) P6 SPEND-ONCE (GAP-42): if extCall != nil (a paid vendor call was made for this settle),
+	//     INSERT the external_calls spend record IN THE SAME TX. Because the vendor call + its
+	//     cost-record + the settle all commit under the ONE CAS on the lease-holder, a lost/reclaimed
+	//     attempt matches ZERO rows and the WHOLE tx rolls back — the spend record is discarded with
+	//     the (discarded) settlement, so a slow-drainer reclaim can never double-charge. This is the
+	//     GAP-37 invariant extended from "settle-once" to "spend-once".
 	// terminal is "settled" (a real verdict) or "dead" (retry-exhausted — still logs the reserved
 	// unknown/greylisted verdict). If the CAS matches ZERO rows the whole tx ROLLS BACK (no LOG
-	// row, GAP-33) and it returns ErrLeaseLost — the lost attempt discards its result.
-	SettleWorkItem(ctx context.Context, itemID, workerID, terminal string, verdict VerificationRow, raw *RawRow, attempt WorkItemAttemptRow) error
+	// row, no spend row — GAP-33/42) and it returns ErrLeaseLost — the lost attempt discards its result.
+	SettleWorkItem(ctx context.Context, itemID, workerID, terminal string, verdict VerificationRow, raw *RawRow, attempt WorkItemAttemptRow, extCall *ExternalCallRow) error
+
+	// AppendExternalCall records a SYNC-path external-verifier call (§6.1) — the append-only spend +
+	// provenance record for a /v1/verify escalation (no work-item, no CAS: the sync path settles by
+	// logging, so the spend record is a plain append alongside the verdict). INSERT-only (append-only,
+	// mirrors work_item_attempts). For a QUEUED escalation the spend record rides SettleWorkItem's CAS
+	// instead (spend-once, GAP-42) — never both.
+	AppendExternalCall(ctx context.Context, call ExternalCallRow) error
+
+	// ExternalSpendSince returns the durable per-vendor spend/error facts for the breaker (§5.2/§5.3):
+	// cost-units + call/error counts over the day, month, error-rate, and last-minute (rate_ceiling)
+	// windows. jobID scopes the per-job spend (SpentJob; "" => 0). Derived from the append-only
+	// external_calls table so a restart cannot reset the window (the MONEY analogue of the P4
+	// restart-safe budget). now anchors the windows; minuteStart is the rate_ceiling minute boundary.
+	ExternalSpendSince(ctx context.Context, vendor, jobID string, dayStart, monthStart, errWindowStart, minuteStart, now time.Time) (ExternalSpend, error)
 
 	// RequeueWorkItem is the GAP-37 conditional-CAS requeue (§4.2): CAS UPDATE work_items SET
 	// status='waiting_retry', attempt=(bumpAttempt? attempt+1 : attempt), not_before=notBefore,
@@ -514,8 +573,12 @@ func (StubStore) EnqueueWorkItem(context.Context, WorkItemRow) (string, bool, er
 func (StubStore) DequeueReady(context.Context, string, int, time.Time) ([]WorkItemRow, error) {
 	return nil, ErrNotWired
 }
-func (StubStore) SettleWorkItem(context.Context, string, string, string, VerificationRow, *RawRow, WorkItemAttemptRow) error {
+func (StubStore) SettleWorkItem(context.Context, string, string, string, VerificationRow, *RawRow, WorkItemAttemptRow, *ExternalCallRow) error {
 	return ErrNotWired
+}
+func (StubStore) AppendExternalCall(context.Context, ExternalCallRow) error { return ErrNotWired }
+func (StubStore) ExternalSpendSince(context.Context, string, string, time.Time, time.Time, time.Time, time.Time, time.Time) (ExternalSpend, error) {
+	return ExternalSpend{}, ErrNotWired
 }
 func (StubStore) RequeueWorkItem(context.Context, string, string, time.Time, string, bool, WorkItemAttemptRow) error {
 	return ErrNotWired

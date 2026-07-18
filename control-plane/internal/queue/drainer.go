@@ -20,8 +20,15 @@ import (
 // Computer is the log-FREE compute path the drainer runs each item through — satisfied by
 // *orchestrator.Orchestrator.ComputeForQueue. Injected so drainer tests use a fake without a real
 // orchestrator/DB. The drainer NEVER calls Verify (which logs unconditionally); it settles via CAS.
+//
+// EscalateExhausted is the P6 give-up escalation (§2.2, §4.1 classes c/d): at retry-exhaustion the
+// drainer offers the residue verdict (about to be settled "dead") to the fallback for ONE rented
+// answer. It returns a possibly-replaced QueueOutcome (external_verified at capped confidence + the
+// spend record recorded inside the settle CAS — spend-once, GAP-42). Not eligible / fallback off /
+// breaker open / vendor unknown → the outcome is returned UNCHANGED (settle the residue as-is).
 type Computer interface {
-	ComputeForQueue(ctx context.Context, rawEmail string, def *policy.Definition) (orchestrator.QueueOutcome, error)
+	ComputeForQueue(ctx context.Context, rawEmail string, def *policy.Definition, jobID string) (orchestrator.QueueOutcome, error)
+	EscalateExhausted(ctx context.Context, addr string, def *policy.Definition, out orchestrator.QueueOutcome, jobID, workItemID string) orchestrator.QueueOutcome
 }
 
 // PolicyResolver loads a policy definition for a work-item (§3 — a queued check runs under the same
@@ -188,30 +195,34 @@ func (dr *Drainer) drainOne(ctx context.Context, it store.WorkItemRow) {
 		return
 	}
 
-	out, err := dr.d.Compute.ComputeForQueue(ctx, addr, def)
+	out, err := dr.d.Compute.ComputeForQueue(ctx, addr, def, it.JobID)
 	if err != nil {
 		dr.requeueCapacity(ctx, it, "compute_error")
 		return
 	}
-	dr.apply(ctx, it, out)
+	dr.apply(ctx, it, out, addr, def)
 }
 
 // apply maps a QueueOutcome onto a work-item transition (§3.5), all via the GAP-37 CAS. See the
 // table in the P5 spec §4/§8.3. Every branch's store call is a CAS on (id, locked_by=<me>,
 // status='in_flight'); an ErrLeaseLost means a reclaim already re-owned the item — we discard.
-func (dr *Drainer) apply(ctx context.Context, it store.WorkItemRow, out orchestrator.QueueOutcome) {
+func (dr *Drainer) apply(ctx context.Context, it store.WorkItemRow, out orchestrator.QueueOutcome, addr string, def *policy.Definition) {
 	now := dr.now()
 	switch out.Class {
 	case orchestrator.QSettled:
+		// A terminal verdict. compute() ALREADY escalated the terminal residue (catch_all/
+		// provider_no_smtp) inline (out.ExternalCall may be set) — nothing more to do here; settle.
 		dr.settle(ctx, it, "settled", out)
 
 	case orchestrator.QGreylisted, orchestrator.QTransientNet:
 		// A provider-transient: retry on backoff, bumping the attempt count — UNLESS the retry
 		// budget is exhausted, in which case settle as the reserved unknown/greylisted verdict
 		// ComputeForQueue already produced (§4.5 — retrying doesn't manufacture certainty; exhausting
-		// is itself an honest terminal unknown, NEVER invalid).
+		// is itself an honest terminal unknown, NEVER invalid). At exhaustion (the give-up path), P6
+		// offers the retry-exhausted-greylisted residue (§4.1c) to the fallback for ONE rented answer.
 		age := now.Sub(it.CreatedAt)
 		if Exhausted(it.Attempt+1, dr.d.MaxAttempts, age, dr.d.MaxRetryAge) {
+			out = dr.d.Compute.EscalateExhausted(ctx, addr, def, out, it.JobID, it.ID)
 			dr.settle(ctx, it, "dead", out)
 			return
 		}
@@ -226,7 +237,9 @@ func (dr *Drainer) apply(ctx context.Context, it store.WorkItemRow, out orchestr
 		age := now.Sub(it.CreatedAt)
 		if dr.d.MaxRetryAge > 0 && age >= dr.d.MaxRetryAge {
 			// Give up waiting for capacity → settle the cheap/degraded verdict compute produced
-			// (risky/plausible + smtp_skipped_reason). Terminal, honest, Door-4-clean.
+			// (risky/plausible + smtp_skipped_reason). Terminal, honest, Door-4-clean. At this give-up
+			// point P6 offers the gave-up-capacity residue (§4.1d) to the fallback for a rented answer.
+			out = dr.d.Compute.EscalateExhausted(ctx, addr, def, out, it.JobID, it.ID)
 			dr.settle(ctx, it, "dead", out)
 			return
 		}
@@ -240,7 +253,13 @@ func (dr *Drainer) apply(ctx context.Context, it store.WorkItemRow, out orchestr
 // the sync path's separate cache write). terminal ∈ {settled, dead}.
 func (dr *Drainer) settle(ctx context.Context, it store.WorkItemRow, terminal string, out orchestrator.QueueOutcome) {
 	attempt := dr.attemptRow(it, out.Row, out.LastReason)
-	err := dr.d.Store.SettleWorkItem(ctx, it.ID, dr.d.WorkerID, terminal, out.Row, out.Raw, attempt)
+	// P6 (§5.4/GAP-42): stamp the work-item id on the spend record (the drainer owns it) so a queued
+	// escalation's charge is traceable to its item. SettleWorkItem records it INSIDE the CAS — a lost
+	// lease discards the settle AND the charge (spend-once).
+	if out.ExternalCall != nil {
+		out.ExternalCall.WorkItemID = it.ID
+	}
+	err := dr.d.Store.SettleWorkItem(ctx, it.ID, dr.d.WorkerID, terminal, out.Row, out.Raw, attempt, out.ExternalCall)
 	if errors.Is(err, store.ErrLeaseLost) {
 		return // another attempt owns it (GAP-37) — discard, do not re-settle or double-log
 	}

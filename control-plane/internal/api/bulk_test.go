@@ -196,7 +196,7 @@ func TestBulk_EndToEnd_HandleThenDrainThenResults(t *testing.T) {
 // settleComputer settles every check on the first attempt (valid/accepted).
 type settleComputer struct{}
 
-func (settleComputer) ComputeForQueue(_ context.Context, _ string, _ *policy.Definition) (orchestrator.QueueOutcome, error) {
+func (settleComputer) ComputeForQueue(_ context.Context, _ string, _ *policy.Definition, _ string) (orchestrator.QueueOutcome, error) {
 	row := store.VerificationRow{
 		ID: "018f0000-0000-7000-8000-00000000f" + randHex(), RequestID: "018f0000-0000-7000-8000-000000000fff",
 		CheckedAt: time.Unix(1, 0), CreatedAt: time.Unix(1, 0),
@@ -204,6 +204,11 @@ func (settleComputer) ComputeForQueue(_ context.Context, _ string, _ *policy.Def
 		Domain: "acmecorp.com", PolicyKey: "cold-email", PolicyVersion: 1, APIVersion: "v1", ConfigFingerprint: "cfg",
 	}
 	return orchestrator.QueueOutcome{Class: orchestrator.QSettled, Row: row}, nil
+}
+
+// EscalateExhausted: no fallback wired in this bulk-endpoint test → outcome unchanged.
+func (settleComputer) EscalateExhausted(_ context.Context, _ string, _ *policy.Definition, out orchestrator.QueueOutcome, _, _ string) orchestrator.QueueOutcome {
+	return out
 }
 
 type fixedPolicy struct{}

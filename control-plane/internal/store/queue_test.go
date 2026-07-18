@@ -73,10 +73,10 @@ func TestSettle_ExactlyOnceUnderSlowDrainerReclaim(t *testing.T) {
 	// attempt B finishes with a greylist. Only the CURRENT lease-holder (B) may transition the item.
 	vA := mkVerdict(t, now)
 	vA.Status, vA.Reason, vA.Recommendation = "valid", "accepted", "send"
-	errA := mem.SettleWorkItem(ctx, item.ID, "worker-A", "settled", vA, nil, WorkItemAttemptRow{})
+	errA := mem.SettleWorkItem(ctx, item.ID, "worker-A", "settled", vA, nil, WorkItemAttemptRow{}, nil)
 
 	vB := mkVerdict(t, now)
-	errB := mem.SettleWorkItem(ctx, item.ID, "worker-B", "settled", vB, nil, WorkItemAttemptRow{})
+	errB := mem.SettleWorkItem(ctx, item.ID, "worker-B", "settled", vB, nil, WorkItemAttemptRow{}, nil)
 
 	// Exactly one lost its lease, exactly one succeeded.
 	lostCount := 0
@@ -128,7 +128,7 @@ func TestSettle_PurgesPlaintextInTransaction(t *testing.T) {
 	if len(leased) != 1 {
 		t.Fatalf("leased %d", len(leased))
 	}
-	if err := mem.SettleWorkItem(ctx, item.ID, "w1", "settled", mkVerdict(t, now), nil, WorkItemAttemptRow{}); err != nil {
+	if err := mem.SettleWorkItem(ctx, item.ID, "w1", "settled", mkVerdict(t, now), nil, WorkItemAttemptRow{}, nil); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
 	// After settle: ciphertext purged (§5.3 step 4).
@@ -138,6 +138,109 @@ func TestSettle_PurgesPlaintextInTransaction(t *testing.T) {
 	}
 	if w.Status != "settled" || w.VerificationID == "" {
 		t.Fatalf("settled item must be status=settled with verification_id set; got %s / %q", w.Status, w.VerificationID)
+	}
+}
+
+// TestSpendOnce_UnderSlowDrainerReclaim is the P6 GAP-42 fail-verify: the paid vendor call's spend
+// record commits UNDER THE SAME CAS as the settle, so a slow-drainer reclaim (two live attempts,
+// each having called the vendor) records the charge EXACTLY ONCE — the stale attempt's spend record
+// rolls back with its discarded settlement. This is the GAP-37 invariant extended from settle-once to
+// spend-once (money instead of state).
+//
+// FAIL-VERIFY: neuter the CAS in SettleWorkItem (drop the locked_by/status guard) → BOTH attempts
+// settle → TWO spend records appear → this test's "exactly one" assertion fails (a double-charge).
+func TestSpendOnce_UnderSlowDrainerReclaim(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	mem := NewMem(func() time.Time { return now })
+
+	item := mkWorkItem("018f0000-0000-7000-8000-0000000000d1", "idem-spend", "gmail.com")
+	if _, _, err := mem.EnqueueWorkItem(ctx, item); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	// Attempt A leases; a reclaim (A is slow, not dead) re-readies it; attempt B leases it — the
+	// two-live-attempts scenario, now with a PAID vendor call on each attempt.
+	if l, _ := mem.DequeueReady(ctx, "worker-A", 1, now); len(l) != 1 {
+		t.Fatalf("attempt A leased %d", len(l))
+	}
+	later := now.Add(2 * time.Minute)
+	if n, _ := mem.ReclaimExpiredLeases(ctx, time.Minute, later); n != 1 {
+		t.Fatalf("reclaim %d, want 1", n)
+	}
+	if l, _ := mem.DequeueReady(ctx, "worker-B", 1, later); len(l) != 1 {
+		t.Fatalf("attempt B leased %d", len(l))
+	}
+
+	// Both attempts made a paid vendor call and try to settle external_verified with a spend record.
+	vA := mkVerdict(t, now)
+	vA.Status, vA.Reason = "risky", "external_verified"
+	callA := &ExternalCallRow{ID: "018f0000-0000-7000-8000-00000000ca01", VerificationID: vA.ID, Vendor: "millionverifier", CostUnits: 1, Outcome: "ok", CalledAt: now}
+	errA := mem.SettleWorkItem(ctx, item.ID, "worker-A", "settled", vA, nil, WorkItemAttemptRow{}, callA)
+
+	vB := mkVerdict(t, now)
+	vB.Status, vB.Reason = "risky", "external_verified"
+	callB := &ExternalCallRow{ID: "018f0000-0000-7000-8000-00000000cb02", VerificationID: vB.ID, Vendor: "millionverifier", CostUnits: 1, Outcome: "ok", CalledAt: now}
+	errB := mem.SettleWorkItem(ctx, item.ID, "worker-B", "settled", vB, nil, WorkItemAttemptRow{}, callB)
+
+	// Exactly one attempt lost its lease (the stale A); exactly one settled.
+	if errA != ErrLeaseLost {
+		t.Fatalf("the stale-lease attempt A must lose the CAS, got errA=%v", errA)
+	}
+	if errB != nil {
+		t.Fatalf("the current lease-holder B must settle, got errB=%v", errB)
+	}
+	// SPEND-ONCE (GAP-42): exactly ONE spend record — B's. A's charge rolled back with its lost CAS.
+	if len(mem.ExternalCalls) != 1 {
+		t.Fatalf("GAP-42 VIOLATED (double-charge): %d spend records for one settle, want exactly 1", len(mem.ExternalCalls))
+	}
+	if mem.ExternalCalls[0].ID != callB.ID {
+		t.Fatalf("the surviving spend record must be the current lease-holder's (B), got %s", mem.ExternalCalls[0].ID)
+	}
+	// And exactly one LOG row (settle-once still holds).
+	if len(mem.Log) != 1 {
+		t.Fatalf("exactly one LOG row, got %d", len(mem.Log))
+	}
+}
+
+// TestExternalSpendSince_WindowsAndOutcomes proves the budget read: only 'ok' calls count toward
+// spend; all calls count toward the error-rate window; job/day/month windows scope correctly.
+func TestExternalSpendSince_WindowsAndOutcomes(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	mem := NewMem(func() time.Time { return now })
+	mk := func(id string, cost int, outcome, job string, at time.Time) ExternalCallRow {
+		return ExternalCallRow{ID: id, Vendor: "v1", JobID: job, CostUnits: cost, Outcome: outcome, CalledAt: at}
+	}
+	_ = mem.AppendExternalCall(ctx, mk("018f0000-0000-7000-8000-00000000e001", 3, "ok", "job1", now.Add(-time.Hour)))
+	_ = mem.AppendExternalCall(ctx, mk("018f0000-0000-7000-8000-00000000e002", 5, "ok", "", now.Add(-2*time.Hour)))
+	_ = mem.AppendExternalCall(ctx, mk("018f0000-0000-7000-8000-00000000e003", 0, "error", "job1", now.Add(-30*time.Minute)))
+	// An OLD ok call outside the day window (25h ago) — counts toward month, not day.
+	_ = mem.AppendExternalCall(ctx, mk("018f0000-0000-7000-8000-00000000e004", 7, "ok", "", now.Add(-25*time.Hour)))
+
+	// A very recent call (10s ago) to exercise the last-minute rate_ceiling window.
+	_ = mem.AppendExternalCall(ctx, mk("018f0000-0000-7000-8000-00000000e005", 1, "ok", "", now.Add(-10*time.Second)))
+
+	s, err := mem.ExternalSpendSince(ctx, "v1", "job1", now.Add(-24*time.Hour), now.Add(-30*24*time.Hour), now.Add(-time.Hour), now.Add(-time.Minute), now)
+	if err != nil {
+		t.Fatalf("spend: %v", err)
+	}
+	if s.SpentDay != 9 { // 3 + 5 + the 1 recent (the 25h-old 7 is outside the day)
+		t.Errorf("SpentDay = %d, want 9 (ok calls within the day only)", s.SpentDay)
+	}
+	if s.SpentMonth != 16 { // 3 + 5 + 7 + 1
+		t.Errorf("SpentMonth = %d, want 16", s.SpentMonth)
+	}
+	if s.SpentJob != 3 { // only job1's ok call (the error cost 0)
+		t.Errorf("SpentJob = %d, want 3", s.SpentJob)
+	}
+	// Error-rate window = last hour: ok@-1h (boundary) + error@-30m + ok@-10s = 3 calls, 1 error.
+	if s.Calls != 3 || s.Errors != 1 {
+		t.Errorf("error window: calls=%d errors=%d, want 3/1", s.Calls, s.Errors)
+	}
+	// Rate-ceiling window = last minute: only the ok@-10s call.
+	if s.CallsLastMinute != 1 {
+		t.Errorf("last-minute window: CallsLastMinute=%d, want 1", s.CallsLastMinute)
 	}
 }
 
@@ -166,7 +269,7 @@ func TestJobCompletion_AuthoritativeNotCounter(t *testing.T) {
 	for _, it := range []WorkItemRow{i1, i2} {
 		leased, _ := mem.DequeueReady(ctx, "w1", 1, now)
 		_ = leased
-		if err := mem.SettleWorkItem(ctx, it.ID, "w1", "settled", mkVerdict(t, now), nil, WorkItemAttemptRow{}); err != nil {
+		if err := mem.SettleWorkItem(ctx, it.ID, "w1", "settled", mkVerdict(t, now), nil, WorkItemAttemptRow{}, nil); err != nil {
 			t.Fatalf("settle %s: %v", it.ID, err)
 		}
 	}

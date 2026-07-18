@@ -13,6 +13,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"log"
 	"time"
 
 	"github.com/mnfi/codmailling/control-plane/internal/hash"
@@ -48,6 +49,13 @@ type Orchestrator struct {
 	// state / kill-switch Rung 3). When wired AND the cheap verdict is the non-terminal residue
 	// AND a node is routable, the SMTP stage resolves it against the verifier-node.
 	smtp *SMTPDeps
+
+	// external is the OPTIONAL Phase-6 third-party-fallback stage (§3). nil => fallback fully OFF
+	// (the P1–P5 posture and the default — enabling is a deliberate owner action gated on the §7.4
+	// DPA checklist, never a code default). When wired AND the settled verdict is an escalatable
+	// residue class AND the policy opts in AND the budget/breaker is open, it rents a verdict at
+	// CAPPED confidence (never SMTP-grade — anti-laundering §3.4). See external_stage.go.
+	external *ExternalDeps
 }
 
 // Deps carries the orchestrator's dependencies.
@@ -61,6 +69,9 @@ type Deps struct {
 	// SMTP is the OPTIONAL Phase-2 stage. nil => cheap-layers-only (P1 steady state). Wire it
 	// only when SMTP is enabled (kill-switch not SMTP-off) and a node list exists.
 	SMTP *SMTPDeps
+	// External is the OPTIONAL Phase-6 fallback stage. nil => fallback OFF (default). Wire it only
+	// when an owner enabled it (Fallback==enabled) AND a vendor key + DPA are configured (§7.4).
+	External *ExternalDeps
 }
 
 // New wires an orchestrator. Resolver defaults to the real net resolver; Now to time.Now.
@@ -83,6 +94,7 @@ func New(d Deps) *Orchestrator {
 		cacheTTL:       d.CacheTTL,
 		cfgFingerprint: d.ConfigFingerprint,
 		smtp:           d.SMTP,
+		external:       d.External,
 	}
 }
 
@@ -135,6 +147,13 @@ type computed struct {
 	class      QueueClass
 	retryHintS int    // seed for the greylist backoff (§4.2), from signals.retry_after_hint_s
 	lastReason string // work_items.last_reason (operational)
+
+	// extCall is the P6 external-fallback spend/provenance record (§6.1) when compute() escalated a
+	// TERMINAL residue (catch_all/provider_no_smtp) to the vendor inline. nil when no vendor call was
+	// made (fallback off, not eligible, breaker open, cache hit). The settler persists it: the sync
+	// path appends it (AppendExternalCall), the queue path records it INSIDE the settlement CAS
+	// (spend-once, GAP-42). Its VerificationID is stamped by the settler (which owns the LOG row id).
+	extCall *store.ExternalCallRow
 }
 
 // QueueOutcome is what the P5 drainer receives from ComputeForQueue: the transition class plus the
@@ -148,6 +167,13 @@ type QueueOutcome struct {
 	Row        store.VerificationRow // id assigned; ready for SettleWorkItem's in-tx LOG insert
 	Raw        *store.RawRow         // nil unless an engine blob was produced
 	Cache      *store.CachedVerdict  // nil unless the settled verdict is cacheable (post-settle write)
+
+	// ExternalCall is the P6 spend/provenance record when this settle escalated a residue to the
+	// vendor (§6.1). The drainer passes it to SettleWorkItem so it commits INSIDE the CAS (spend-once,
+	// GAP-42): a reclaimed attempt's charge rolls back with its discarded settlement. nil when no
+	// vendor call was made. Its VerificationID is already stamped (ComputeForQueue/EscalateExhausted
+	// assign the Row id first, then the vendor call, so the record points at the LOG row it produced).
+	ExternalCall *store.ExternalCallRow
 }
 
 // classifyRan maps a folded SMTP verdict's reason to a queue class (§4.5). Greylist + network
@@ -204,7 +230,9 @@ func (o *Orchestrator) Verify(ctx context.Context, rawEmail string, def *policy.
 	if o.hasher == nil || o.store == nil {
 		return verdict.Response{}, ErrNotReady
 	}
-	c, err := o.compute(ctx, rawEmail, def)
+	// Sync /verify has no bulk job → jobID "" (the per_job cap applies only to bulk jobs; a sync
+	// check's escalation is bounded by the day/month caps).
+	c, err := o.compute(ctx, rawEmail, def, "")
 	if err != nil {
 		return verdict.Response{}, err
 	}
@@ -223,7 +251,7 @@ func (o *Orchestrator) settleSync(ctx context.Context, c computed) error {
 	case logReject, logFromCache:
 		return o.logOnly(ctx, c.resp, c.row)
 	default: // logFull
-		return o.logAndCacheRaw(ctx, c.resp, c.row, c.emailHash, c.domain, c.prov, c.cacheable, c.rawBlob)
+		return o.logAndCacheRaw(ctx, c.resp, c.row, c.emailHash, c.domain, c.prov, c.cacheable, c.rawBlob, c.extCall)
 	}
 }
 
@@ -231,7 +259,11 @@ func (o *Orchestrator) settleSync(ctx context.Context, c computed) error {
 // former Verify with every log/cache CALL removed (moved to settleSync) — the assemble steps and
 // the P4 gate path (runSMTP) are unchanged. It additionally derives the QueueClass (ignored by
 // sync). Precondition: o.hasher and o.store are non-nil (Verify/ComputeForQueue check ErrNotReady).
-func (o *Orchestrator) compute(ctx context.Context, rawEmail string, def *policy.Definition) (computed, error) {
+// jobID is the owning bulk job for a QUEUED check ("" for a sync /verify), threaded so an INLINE
+// external escalation (a terminal residue) enforces the per_job spend cap (§5.2/§4.4) and stamps the
+// spend record's job_id — the drainer's exhaustion path already threads it; this closes the same for
+// the inline path (the dominant residue class in bulk jobs).
+func (o *Orchestrator) compute(ctx context.Context, rawEmail string, def *policy.Definition, jobID string) (computed, error) {
 	start := o.now()
 
 	// 1. Normalize + hash (Door 3). An unparseable address is an un-addressable reject:
@@ -312,17 +344,48 @@ func (o *Orchestrator) compute(ctx context.Context, rawEmail string, def *policy
 		NodeID:                nodeID,
 		VerifierIP:            verifierIP, // §5.4: real SMTP egress IP (== audited IP); "" when SMTP didn't run
 	}
+	// 3c. Phase-6 external fallback (§3), INLINE for the TERMINAL residue classes (catch_all,
+	//     provider_no_smtp) — the classes that are settled the moment they occur, escalatable on both
+	//     sync /verify and the queue's settle path (§2.2). The retry-eligible residue (greylisted,
+	//     gave-up capacity) is NOT escalated here — it still RETRIES (the queue absorbs the transient);
+	//     the drainer escalates it only at exhaustion via EscalateExhausted (classifyResidue(...,true)).
+	//     This runs AFTER the SMTP fold, so `normalized` is the plaintext (reused, not a new store)
+	//     and `v` is the settled residue. keep_residue (no change) when not eligible / off / breaker
+	//     open / vendor unknown. A vendor call's spend record rides c.extCall to the settler.
+	var extCall *store.ExternalCallRow
+	if class == QSettled {
+		if rc, ok := classifyResidue(v, false /* inline: terminal residue only */); ok {
+			// jobID is "" for sync (no per_job cap) and the work-item's job for a queued check (so the
+			// per_job cap is enforced + the spend record's job_id is stamped). workItemID is filled by
+			// the drainer at settle (it owns the id); "" here.
+			out := o.runExternal(ctx, normalized, v, rc, def, jobID, "", emailHash)
+			if out.Call != nil {
+				extCall = out.Call
+			}
+			if out.Escalated {
+				v = out.Verdict
+				if len(out.RawBlob) > 0 {
+					rawBlob = out.RawBlob
+				}
+				lastReason = string(v.Reason)
+			}
+		}
+	}
+
 	resp, row := verdict.Assemble(toCore(v), prov)
 	// Cache only SETTLED verdicts (§6.5/OQ-P2-6 + PB1): a transient/your-fault unknown from SMTP is
 	// non-cacheable, AND a capacity-gap fallback (SMTP was eligible but no node served it —
 	// provisional=true) is non-cacheable even though its cheap reason looks settled. Caching a
 	// capacity-gap verdict would freeze a lower-quality answer and suppress the SMTP verdict once the
 	// node recovers / the cap lifts (PB1). A provider_mx_routed skip is NOT provisional (settled).
+	// An external_verified verdict IS a settled verdict and caches like any other (§4.3/OQ-P6-9) — so
+	// a re-uploaded list returns the cached rented verdict with NO second vendor call (escalate-once
+	// at verdict-mint, GAP-43): the cache hit path (computeFromCache) never reaches this stage.
 	cacheable := smtp.CacheableReason(v.Status, v.Reason) && !provisional
 	return computed{
 		resp: resp, row: row, kind: logFull,
 		emailHash: emailHash, domain: domain, prov: prov, cacheable: cacheable, rawBlob: rawBlob,
-		class: class, retryHintS: retryHintS, lastReason: lastReason,
+		class: class, retryHintS: retryHintS, lastReason: lastReason, extCall: extCall,
 	}, nil
 }
 
@@ -423,11 +486,11 @@ func (o *Orchestrator) computeFromCache(rawEmail, domain string, emailHash []byt
 // (no LOG row for an intermediate greylist) compatible with Door 2: the LOG write lives in
 // settleSync/SettleWorkItem, and the drainer bypasses settleSync. The Row it returns already has its
 // id assigned (so SettleWorkItem's in-tx LOG insert + verification_id stamp are one atomic write).
-func (o *Orchestrator) ComputeForQueue(ctx context.Context, rawEmail string, def *policy.Definition) (QueueOutcome, error) {
+func (o *Orchestrator) ComputeForQueue(ctx context.Context, rawEmail string, def *policy.Definition, jobID string) (QueueOutcome, error) {
 	if o.hasher == nil || o.store == nil {
 		return QueueOutcome{}, ErrNotReady
 	}
-	c, err := o.compute(ctx, rawEmail, def)
+	c, err := o.compute(ctx, rawEmail, def, jobID)
 	if err != nil {
 		return QueueOutcome{}, err
 	}
@@ -455,9 +518,20 @@ func (o *Orchestrator) ComputeForQueue(ctx context.Context, rawEmail string, def
 			CachedAt: now, ExpiresAt: now.Add(o.cacheTTL),
 		}
 	}
+	// P6 (§5.4/GAP-42): if compute() escalated a terminal residue to the vendor inline, stamp the
+	// spend record with the LOG row id we just assigned and hand it to the drainer, which passes it to
+	// SettleWorkItem so it commits INSIDE the CAS (spend-once — a reclaimed attempt's charge rolls
+	// back with its discarded settlement).
+	extCall := c.extCall
+	if extCall != nil {
+		extCall.VerificationID = id
+		extCall.WorkItemID = "" // stamped by the drainer (it owns the work-item id)
+		// JobID is already set (compute threaded it into runExternal → externalCallRow), so both the
+		// per_job budget DECISION and the recorded row see the real job — closing the inline-path hole.
+	}
 	return QueueOutcome{
 		Class: c.class, RetryHintS: c.retryHintS, LastReason: c.lastReason,
-		Row: row, Raw: raw, Cache: cache,
+		Row: row, Raw: raw, Cache: cache, ExternalCall: extCall,
 	}, nil
 }
 
@@ -466,9 +540,20 @@ func (o *Orchestrator) ComputeForQueue(ctx context.Context, rawEmail string, def
 // the cache. cacheable=false skips the cache write (§6.5: never cache a transient unknown). The
 // raw blob (the fork's /v1/verify response incl. smtp_debug) rides the verification_raw sidecar
 // (§6.4 — no new column, no append-only violation).
-func (o *Orchestrator) logAndCacheRaw(ctx context.Context, resp verdict.Response, row store.VerificationRow, emailHash []byte, domain string, prov verdict.Provenance, cacheable bool, rawBlob []byte) error {
-	if err := o.logWithRaw(ctx, resp, row, rawBlob); err != nil {
+func (o *Orchestrator) logAndCacheRaw(ctx context.Context, resp verdict.Response, row store.VerificationRow, emailHash []byte, domain string, prov verdict.Provenance, cacheable bool, rawBlob []byte, extCall *store.ExternalCallRow) error {
+	logID, err := o.logWithRawID(ctx, resp, row, rawBlob)
+	if err != nil {
 		return err
+	}
+	// P6 (§6.1): a sync escalation's spend/provenance record appends AFTER the LOG row (the sync path
+	// settles by logging, not a CAS). Stamp the verification_id we just assigned so the record points
+	// at the verdict it produced (the rented population is joinable — §6.3). Best-effort: a
+	// spend-record write failure must NOT drop an already-logged verdict (Door 2), but it IS logged.
+	if extCall != nil {
+		extCall.VerificationID = logID
+		if cerr := o.store.AppendExternalCall(ctx, *extCall); cerr != nil {
+			logExternalCallErr(cerr)
+		}
 	}
 	// Cache only when the verdict is settled AND a TTL is set (expires_at is NOT NULL, §4.2). No
 	// TTL configured (OQ-9 unset) => skip caching, never write a guessed TTL. A transient unknown
@@ -498,20 +583,37 @@ func (o *Orchestrator) logOnly(ctx context.Context, resp verdict.Response, row s
 // (the fork's /v1/verify response) into the verification_raw sidecar (§6.4). The append is atomic
 // (the store wraps both in one tx). A failure FAILS the request (Door 2).
 func (o *Orchestrator) logWithRaw(ctx context.Context, resp verdict.Response, row store.VerificationRow, rawBlob []byte) error {
+	_, err := o.logWithRawID(ctx, resp, row, rawBlob)
+	return err
+}
+
+// logWithRawID is logWithRaw returning the assigned LOG id (so a sync external-call record can stamp
+// its verification_id — §6.1). Same append semantics; the id is a plain UUIDv7 (Door 2 join anchor).
+func (o *Orchestrator) logWithRawID(ctx context.Context, resp verdict.Response, row store.VerificationRow, rawBlob []byte) (string, error) {
 	id, err := idgen.NewV7String(o.now())
 	if err != nil {
-		return err
+		return "", err
 	}
 	row.ID = id
 	// Defensive: never persist/emit an out-of-contract verdict (Door 1/4).
 	if !resp.Valid() {
-		return errors.New("orchestrator: refusing to log an out-of-contract verdict")
+		return "", errors.New("orchestrator: refusing to log an out-of-contract verdict")
 	}
 	var raw *store.RawRow
 	if len(rawBlob) > 0 {
 		raw = &store.RawRow{VerificationID: id, Raw: rawBlob}
 	}
-	return o.store.AppendVerification(ctx, row, raw)
+	if err := o.store.AppendVerification(ctx, row, raw); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// logExternalCallErr surfaces a best-effort external-call spend-record write failure. The verdict is
+// already logged authoritatively (Door 2); a lost spend record is an observability gap, not a
+// verdict failure — but it is never silent (§9 duplicate/spend-record health).
+func logExternalCallErr(err error) {
+	log.Printf("orchestrator: external-call spend record write failed (verdict is logged; spend accounting may under-count): %v", err)
 }
 
 func (o *Orchestrator) providerCanonical(normalized string, signals map[string]any) []byte {

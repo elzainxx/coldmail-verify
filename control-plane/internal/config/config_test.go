@@ -220,6 +220,105 @@ func TestLoad_P5QueueDialsDefaultAndOverride(t *testing.T) {
 	}
 }
 
+// TestLoad_P6ExternalDefaultsAndDials pins the P6 external-fallback config surface: the
+// anti-laundering cap defaults to 60 (§3.4), the spend ceilings are owner-OQ → UNSET (never guessed),
+// and the breaker dials carry their defaults. Env overrides apply; a set spend cap reads Set.
+func TestLoad_P6ExternalDefaultsAndDials(t *testing.T) {
+	def := Defaults()
+	if def.Dials.ExternalConfidenceCap != 60 {
+		t.Fatalf("external confidence cap default want 60 (§3.4 anti-laundering), got %d", def.Dials.ExternalConfidenceCap)
+	}
+	if def.Dials.ExternalBreakerCooldownSeconds != 300 || def.Dials.ExternalErrorMinSamples != 20 {
+		t.Fatalf("external breaker defaults not set: %+v", def.Dials)
+	}
+	// The spend ceilings are owner-OQ → UNSET, never a guessed number (config-manifest §6.3).
+	for name, d := range map[string]Dial{
+		"daily": def.Dials.ExternalDailyCap, "monthly": def.Dials.ExternalMonthlyCap,
+		"per_job": def.Dials.ExternalPerJobCap, "rate_ceiling": def.Dials.ExternalRateCeiling,
+	} {
+		if d.Set {
+			t.Errorf("external %s cap must default UNSET (owner-OQ), never a guessed number", name)
+		}
+		if d.String() != "UNSET(owner-OQ)" {
+			t.Errorf("external %s cap UNSET String()=%q", name, d.String())
+		}
+	}
+	// Overrides apply.
+	env := map[string]string{
+		"TM_EXTERNAL_CONFIDENCE_CAP": "50", "TM_EXTERNAL_DAILY_CAP": "1000",
+		"TM_EXTERNAL_PER_JOB_CAP": "100", "TM_EXTERNAL_ERROR_RATE_PCT": "40",
+	}
+	c, err := Load(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Dials.ExternalConfidenceCap != 50 || c.Dials.ExternalErrorRatePct != 40 {
+		t.Errorf("external int-dial overrides not applied: %+v", c.Dials)
+	}
+	if !c.Dials.ExternalDailyCap.Set || c.Dials.ExternalDailyCap.Value != 1000 {
+		t.Errorf("TM_EXTERNAL_DAILY_CAP override not applied: %+v", c.Dials.ExternalDailyCap)
+	}
+	if !c.Dials.ExternalPerJobCap.Set || c.Dials.ExternalPerJobCap.Value != 100 {
+		t.Errorf("TM_EXTERNAL_PER_JOB_CAP override not applied: %+v", c.Dials.ExternalPerJobCap)
+	}
+}
+
+// TestExternalFallback_DisabledByDefault_RefusesWithoutChecklist is the §7.4 "enabling is hard"
+// gate + acceptance criterion 14 (disabled by default; refuses to enable without the DPA checklist).
+// The layer must NOT be egress-enabled unless BOTH the kill-switch fallback rung is on AND the DPA is
+// confirmed — enabling pre-DPA is unlawful sub-processing, so neither switch alone suffices, and the
+// default (both off) is disabled.
+func TestExternalFallback_DisabledByDefault_RefusesWithoutChecklist(t *testing.T) {
+	// Default: fallback OFF + DPA unconfirmed → disabled.
+	if Defaults().ExternalFallbackEnabled() {
+		t.Fatal("the external fallback must be DISABLED by default (§7.4 — ships disabled until the DPA checklist passes)")
+	}
+	// DPA confirmed but the kill-switch fallback rung still OFF → STILL disabled (the rung wins;
+	// global-fallback-kill overrides the DPA flag — § kill-switch-ladder Global A).
+	dpaOnly, err := Load(func(k string) string {
+		if k == "TM_EXTERNAL_DPA_CONFIRMED" {
+			return "true"
+		}
+		return "" // fallback mode stays default = off
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if dpaOnly.ExternalFallbackEnabled() {
+		t.Fatal("DPA confirmed but fallback rung OFF must STILL be disabled (the global-fallback-kill overrides the DPA flag)")
+	}
+	// Fallback rung ON but DPA NOT confirmed → STILL disabled (pre-DPA egress is unlawful).
+	rungOnly, err := Load(func(k string) string {
+		if k == "TM_FALLBACK_MODE" {
+			return "enabled"
+		}
+		return "" // DPA stays default = false
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if rungOnly.ExternalFallbackEnabled() {
+		t.Fatal("fallback rung ON but DPA NOT confirmed must STILL be disabled (enabling pre-DPA = unlawful sub-processing)")
+	}
+	// ONLY when BOTH are affirmative is the layer egress-eligible (and buildExternal still requires a
+	// vendor key on top — three independent switches).
+	both, err := Load(func(k string) string {
+		switch k {
+		case "TM_FALLBACK_MODE":
+			return "enabled"
+		case "TM_EXTERNAL_DPA_CONFIRMED":
+			return "true"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !both.ExternalFallbackEnabled() {
+		t.Fatal("fallback rung ON + DPA confirmed must be egress-eligible (a vendor key is the third, separate switch)")
+	}
+}
+
 // TestLoad_P5LeaseMarginGuard is the GAP-37 config-layer guard: the lease margin MUST be > 0 so the
 // lease TTL strictly exceeds the max SMTP deadline (else a slow attempt loses its lease → double-run).
 func TestLoad_P5LeaseMarginGuard(t *testing.T) {

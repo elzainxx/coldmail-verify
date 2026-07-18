@@ -643,10 +643,13 @@ RETURNING id, idempotency_key, COALESCE(job_id::text,''), domain, email_hash, po
 	return out, nil
 }
 
-// SettleWorkItem is the GAP-37/33/38 conditional-CAS settlement (§5.3) in ONE transaction. See the
-// interface doc. The CAS (WHERE id=? AND locked_by=? AND status='in_flight') is the exactly-once
-// guarantee: zero rows → ROLLBACK (no LOG row, GAP-33) → ErrLeaseLost. terminal ∈ {settled, dead}.
-func (p *PG) SettleWorkItem(ctx context.Context, itemID, workerID, terminal string, verdict VerificationRow, raw *RawRow, attempt WorkItemAttemptRow) error {
+// SettleWorkItem is the GAP-37/33/38/42 conditional-CAS settlement (§5.3 + P6 §5.4) in ONE
+// transaction. See the interface doc. The CAS (WHERE id=? AND locked_by=? AND status='in_flight') is
+// the exactly-once guarantee: zero rows → ROLLBACK (no LOG row, no spend row — GAP-33/42) →
+// ErrLeaseLost. terminal ∈ {settled, dead}. extCall != nil => a paid vendor call was made for this
+// settle; its spend record is inserted IN THIS TX (spend-once — a reclaimed attempt's charge rolls
+// back with its discarded settlement).
+func (p *PG) SettleWorkItem(ctx context.Context, itemID, workerID, terminal string, verdict VerificationRow, raw *RawRow, attempt WorkItemAttemptRow, extCall *ExternalCallRow) error {
 	if terminal != "settled" && terminal != "dead" {
 		return fmt.Errorf("store: settle: invalid terminal %q", terminal)
 	}
@@ -669,7 +672,7 @@ WHERE id=$1 AND locked_by=$4 AND status='in_flight'`
 		return fmt.Errorf("store: settle CAS: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrLeaseLost // lease reclaimed or item already transitioned → discard (GAP-37)
+		return ErrLeaseLost // lease reclaimed or item already transitioned → discard (GAP-37/42)
 	}
 
 	// (1) INSERT the one verifications LOG row (Door 2 append) + optional raw sidecar.
@@ -689,6 +692,15 @@ WHERE id=$1 AND locked_by=$4 AND status='in_flight'`
 	// (4) INSERT the per-attempt transcript (append-only, OQ-P5-8).
 	if err := insertAttemptTx(ctx, tx, attempt); err != nil {
 		return err
+	}
+
+	// (5) SPEND-ONCE (P6 §5.4/GAP-42): if a paid vendor call produced this verdict, its spend record
+	// commits UNDER THE SAME CAS. A reclaimed attempt never reaches here (the CAS returned zero rows
+	// above); so the charge is recorded exactly once, atomically with the settle.
+	if extCall != nil {
+		if err := insertExternalCallTx(ctx, tx, *extCall); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }
@@ -925,6 +937,79 @@ INSERT INTO verifications (
 		}
 	}
 	return nil
+}
+
+// AppendExternalCall records a SYNC-path external call (§6.1) — a plain append (no CAS: the sync
+// path settles by logging, not by a lease transition). INSERT-only, append-only. For a QUEUED
+// escalation the spend record rides SettleWorkItem's CAS instead (spend-once) — never both.
+func (p *PG) AppendExternalCall(ctx context.Context, call ExternalCallRow) error {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: external call begin: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if err := insertExternalCallTx(ctx, tx, call); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// insertExternalCallTx appends one external-call spend/provenance row inside an existing tx (§6.1).
+// Append-only (mirrors work_item_attempts). Stores email_hash (Door 3), never plaintext (PN-10 —
+// queryable by email_hash for SAR/deletion). Empty FK-less pointers (verification_id/work_item_id/
+// job_id) map to SQL NULL.
+func insertExternalCallTx(ctx context.Context, tx pgx.Tx, c ExternalCallRow) error {
+	if c.ID == "" {
+		return fmt.Errorf("store: external call requires an id")
+	}
+	const q = `
+INSERT INTO external_calls (
+  id, verification_id, work_item_id, job_id, vendor, residue_class, email_hash,
+  vendor_status_raw, vendor_confidence_raw, request_id, cost_units, outcome, latency_ms, called_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`
+	if _, err := tx.Exec(ctx, q,
+		c.ID, nullStr(c.VerificationID), nullStr(c.WorkItemID), nullStr(c.JobID),
+		c.Vendor, nullStr(c.ResidueClass), nullBytes(c.EmailHash),
+		nullStr(c.VendorStatusRaw), nullInt(c.VendorConfidenceRaw), nullStr(c.RequestID),
+		c.CostUnits, c.Outcome, nullInt(c.LatencyMS), c.CalledAt.UTC(),
+	); err != nil {
+		return fmt.Errorf("store: insert external call: %w", err)
+	}
+	return nil
+}
+
+// ExternalSpendSince derives the breaker's durable spend/error facts (§5.2/§5.3) from the append-only
+// external_calls table. Only "ok" calls count toward spend (an errored call produced no verdict and
+// costs 0); ALL calls count toward the error-rate denominator. Windowed so a restart can't reset the
+// day (the MONEY analogue of the P4 restart-safe budget). jobID scopes SpentJob ("" => 0).
+func (p *PG) ExternalSpendSince(ctx context.Context, vendor, jobID string, dayStart, monthStart, errWindowStart, minuteStart, now time.Time) (ExternalSpend, error) {
+	var s ExternalSpend
+	// Spend (ok calls only) over day / month, and this job.
+	const spendQ = `
+SELECT
+  COALESCE(SUM(cost_units) FILTER (WHERE outcome='ok' AND called_at >= $2), 0),
+  COALESCE(SUM(cost_units) FILTER (WHERE outcome='ok' AND called_at >= $3), 0),
+  COALESCE(SUM(cost_units) FILTER (WHERE outcome='ok' AND $4 <> '' AND job_id::text = $4), 0)
+FROM external_calls
+WHERE vendor = $1`
+	if err := p.pool.QueryRow(ctx, spendQ, vendor, dayStart.UTC(), monthStart.UTC(), jobID).
+		Scan(&s.SpentDay, &s.SpentMonth, &s.SpentJob); err != nil {
+		return ExternalSpend{}, fmt.Errorf("store: external spend: %w", err)
+	}
+	// Error-rate window: all calls (denominator) + errored calls (numerator). Last-minute window: all
+	// calls (the rate_ceiling brake, §5.2 — a burst count, distinct from the cumulative cost caps).
+	const errQ = `
+SELECT
+  COUNT(*) FILTER (WHERE called_at >= $2),
+  COUNT(*) FILTER (WHERE outcome='error' AND called_at >= $2),
+  COUNT(*) FILTER (WHERE called_at >= $3)
+FROM external_calls
+WHERE vendor = $1 AND called_at >= LEAST($2, $3)`
+	if err := p.pool.QueryRow(ctx, errQ, vendor, errWindowStart.UTC(), minuteStart.UTC()).
+		Scan(&s.Calls, &s.Errors, &s.CallsLastMinute); err != nil {
+		return ExternalSpend{}, fmt.Errorf("store: external error-rate: %w", err)
+	}
+	return s, nil
 }
 
 // insertAttemptTx appends one per-attempt transcript row inside an existing tx (OQ-P5-8).

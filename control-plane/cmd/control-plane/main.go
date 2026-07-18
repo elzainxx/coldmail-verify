@@ -18,6 +18,7 @@ import (
 	"github.com/mnfi/codmailling/control-plane/internal/api"
 	"github.com/mnfi/codmailling/control-plane/internal/audit"
 	"github.com/mnfi/codmailling/control-plane/internal/config"
+	"github.com/mnfi/codmailling/control-plane/internal/external"
 	"github.com/mnfi/codmailling/control-plane/internal/hash"
 	"github.com/mnfi/codmailling/control-plane/internal/health"
 	"github.com/mnfi/codmailling/control-plane/internal/node"
@@ -128,12 +129,20 @@ func buildAPI(appCtx context.Context, cfg config.Config, sec *secrets.Secrets, h
 	// (which rides appCtx so it lives for the whole process, not the 10s setup ctx).
 	smtpDeps, cfgFingerprint := buildSMTP(ctx, appCtx, cfg, sec, pg)
 
+	// P6 (§3): wire the external-fallback stage IFF it is deliberately enabled (Fallback==enabled AND
+	// the §7.4 DPA confirmed) AND a vendor key is loaded. Otherwise externalDeps is nil → the layer
+	// is fully OFF (the P1–P5 posture, the default). buildExternal enforces the "enabling is hard"
+	// discipline: three independent affirmative switches, or no egress. The global-fallback-kill
+	// (Fallback==off) forces it off regardless (ExternalFallbackEnabled returns false).
+	externalDeps := buildExternal(cfg, sec)
+
 	orch := orchestrator.New(orchestrator.Deps{
 		Hasher:            hasher,
 		Store:             pg,
 		CacheTTL:          cfg.CacheTTL(),
 		ConfigFingerprint: cfgFingerprint,
 		SMTP:              smtpDeps,
+		External:          externalDeps,
 	})
 	mode := "cheap-layers-only"
 	if smtpDeps != nil {
@@ -208,6 +217,78 @@ func buildQueue(appCtx context.Context, cfg config.Config, sec *secrets.Secrets,
 	log.Printf("queue: bulk endpoint wired; drainer starting (lease_ttl=%s max_smtp=%s max_attempts=%d max_age=%s)",
 		leaseTTL, maxSMTP, cfg.Dials.QueueMaxAttempts, cfg.QueueMaxRetryAge())
 	go drainer.Run(appCtx)
+}
+
+// buildExternal wires the P6 third-party-fallback stage — but ONLY when it is DELIBERATELY enabled:
+// the kill-switch fallback rung is ON (Fallback==enabled — DEFAULT off) AND the §7.4 DPA is confirmed
+// (TM_EXTERNAL_DPA_CONFIRMED=true — DEFAULT false) AND a vendor key is loaded. Any switch missing =>
+// nil => the layer is fully OFF (the P1–P5 posture, the safe default). This is the "enabling is hard"
+// discipline: enabling pre-DPA is unlawful sub-processing, so it takes THREE independent affirmative
+// operator actions, and the global-fallback-kill (Fallback==off) overrides all of them.
+//
+// PENDING-REAL-VENDOR: this phase ships NO real HTTP vendor client — the real vendor is not enabled
+// (GAP-47: vendor accuracy on the residue is untestable pre-integration). A configured real vendor
+// is a swappable adapter behind external.Vendor (§8); the mock proves the mechanics locally. Until a
+// real adapter is added, buildExternal wires a DISABLED-by-safety stub even when the switches are on,
+// logging loudly — so a misconfiguration can't silently egress to a non-existent vendor.
+func buildExternal(cfg config.Config, sec *secrets.Secrets) *orchestrator.ExternalDeps {
+	if !cfg.ExternalFallbackEnabled() {
+		// The common, safe path: fallback off (default), or DPA not confirmed. No egress, ever.
+		if cfg.KillSwitch.Fallback == config.FallbackOff {
+			log.Printf("external: fallback OFF (kill-switch Rung 2 / global-fallback-kill) — no vendor egress")
+		} else {
+			log.Printf("external: fallback layer disabled (DPA not confirmed: set TM_EXTERNAL_DPA_CONFIRMED=true only AFTER the §7.4 checklist passes — pre-DPA egress is unlawful sub-processing)")
+		}
+		return nil
+	}
+	// Enabled + DPA confirmed: a vendor key MUST be present for the named vendor, or we stay off.
+	def, err := policy.ColdEmailDefinition()
+	if err != nil || def.External == nil || def.External.Vendor == "" {
+		log.Printf("external: no external policy block/vendor configured — fallback stays off")
+		return nil
+	}
+	vendorName := def.External.Vendor
+	if _, ok := sec.VendorKey(vendorName); !ok {
+		log.Printf("external: %s enabled + DPA confirmed but no vendor API key for %q (set TM_VENDOR_KEYS) — fallback stays off (honest not-ready, never a fake vendor)", secrets.EnvVendorKeys, vendorName)
+		return nil
+	}
+	// The budget + breaker DIALs are mapped from config here (so the §5 dials are genuinely CONSUMED,
+	// never settable-but-ignored). This is the exact wiring a real adapter uses; only the vendor
+	// itself is missing this phase.
+	deps := &orchestrator.ExternalDeps{
+		Vendor:           nil, // PENDING-REAL-VENDOR — a real external.Vendor adapter slots in HERE (§8)
+		Budget:           configToBudget(cfg),
+		Breaker:          configToBreaker(cfg),
+		GloballyDisabled: cfg.KillSwitch.Fallback == config.FallbackOff, // global-fallback-kill
+	}
+	_ = deps // built to prove the config mapping; not returned until a real adapter exists (below).
+	// A real adapter is not built this phase (PENDING-REAL-VENDOR). Refuse to wire a live-looking
+	// stage against a non-existent HTTP client — that would be faking green. The mechanics are proven
+	// in tests against external.MockVendor; a real adapter slots into deps.Vendor above to go live.
+	log.Printf("external: PENDING-REAL-VENDOR — fallback is enabled + DPA confirmed + key present, but no real vendor adapter ships this phase (GAP-47). The layer is built + fail-verified locally against the mock; set deps.Vendor to a real external.Vendor adapter (budget=%d/day breaker_cooldown=%s) to go live.",
+		cfg.Dials.ExternalDailyCap.Value, cfg.ExternalBreakerCooldown())
+	return nil
+}
+
+// configToBudget maps the §5.2 spend-ceiling dials to external.Budget. An UNSET dial (owner-OQ) →
+// 0 → "not enforced" (never "unbounded" — the layer only egresses when deliberately enabled). This
+// is where the TM_EXTERNAL_*_CAP / RATE_CEILING dials are consumed (not settable-but-ignored).
+func configToBudget(cfg config.Config) external.Budget {
+	return external.Budget{
+		DailyCap:    cfg.Dials.ExternalDailyCap.Value,   // 0 when UNSET (Dial.Value is 0 unless Set)
+		MonthlyCap:  cfg.Dials.ExternalMonthlyCap.Value,
+		PerJobCap:   cfg.Dials.ExternalPerJobCap.Value,
+		RateCeiling: cfg.Dials.ExternalRateCeiling.Value, // §5.2 calls/min burst brake — now consumed
+	}
+}
+
+// configToBreaker maps the §5.3 circuit-breaker dials to external.BreakerParams.
+func configToBreaker(cfg config.Config) external.BreakerParams {
+	return external.BreakerParams{
+		ErrorRateThreshold: float64(cfg.Dials.ExternalErrorRatePct) / 100.0,
+		MinSamples:         cfg.Dials.ExternalErrorMinSamples,
+		Cooldown:           cfg.ExternalBreakerCooldown(),
+	}
 }
 
 // policyResolver adapts the single default policy to queue.PolicyResolver. P5 ships one policy (as

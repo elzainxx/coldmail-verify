@@ -716,19 +716,37 @@ func TestPGWorkItem_CASSettlementExactlyOnce(t *testing.T) {
 	vA := VerificationRow{ID: mustV7(t, now), RequestID: rid, CheckedAt: now, CreatedAt: now, Status: "valid",
 		Reason: "accepted", Confidence: 90, Recommendation: "send", PolicyKey: "cold-email",
 		PolicyVersion: 1, APIVersion: "v1", ConfigFingerprint: "cfg"}
-	errA := pg.SettleWorkItem(ctx, itemID, "worker-A", "settled", vA, nil, WorkItemAttemptRow{})
+	// P6 SPEND-ONCE (GAP-42): BOTH attempts made a paid vendor call and attach a spend record. Only
+	// the winning CAS may record the charge; the stale attempt's spend record must roll back with its
+	// discarded settle — exactly one external_calls row, proven against REAL Postgres.
+	callA := &ExternalCallRow{ID: mustV7(t, now), VerificationID: vA.ID, WorkItemID: itemID, Vendor: "millionverifier", ResidueClass: "retry_exhausted_greylisted", CostUnits: 1, Outcome: "ok", CalledAt: now}
+	errA := pg.SettleWorkItem(ctx, itemID, "worker-A", "settled", vA, nil, WorkItemAttemptRow{}, callA)
 	if errA != ErrLeaseLost {
 		t.Fatalf("stale-lease attempt A must get ErrLeaseLost, got %v", errA)
 	}
 	vB := VerificationRow{ID: mustV7(t, now), RequestID: rid, CheckedAt: now, CreatedAt: now, Status: "unknown",
 		Reason: "greylisted", Confidence: 10, Recommendation: "review", PolicyKey: "cold-email",
 		PolicyVersion: 1, APIVersion: "v1", ConfigFingerprint: "cfg"}
-	if err := pg.SettleWorkItem(ctx, itemID, "worker-B", "settled", vB, nil, WorkItemAttemptRow{}); err != nil {
+	callB := &ExternalCallRow{ID: mustV7(t, now), VerificationID: vB.ID, WorkItemID: itemID, Vendor: "millionverifier", ResidueClass: "retry_exhausted_greylisted", CostUnits: 1, Outcome: "ok", CalledAt: now}
+	if err := pg.SettleWorkItem(ctx, itemID, "worker-B", "settled", vB, nil, WorkItemAttemptRow{}, callB); err != nil {
 		t.Fatalf("current-lease attempt B must settle, got %v", err)
 	}
 	t.Cleanup(func() {
+		_, _ = pg.pool.Exec(context.Background(), `DELETE FROM external_calls WHERE work_item_id=$1`, itemID)
 		_, _ = pg.pool.Exec(context.Background(), `DELETE FROM verifications WHERE id=$1`, vB.ID)
 	})
+	// SPEND-ONCE assertion: exactly ONE external_calls row for this item (B's). A's charge rolled back.
+	var spendRows int
+	if err := pg.pool.QueryRow(ctx, `SELECT count(*) FROM external_calls WHERE work_item_id=$1`, itemID).Scan(&spendRows); err != nil {
+		t.Fatalf("count spend rows: %v", err)
+	}
+	if spendRows != 1 {
+		t.Fatalf("GAP-42 VIOLATED (double-charge on real PG): %d external_calls rows for one settle, want exactly 1", spendRows)
+	}
+	var survivingCallID string
+	if err := pg.pool.QueryRow(ctx, `SELECT id FROM external_calls WHERE work_item_id=$1`, itemID).Scan(&survivingCallID); err == nil && survivingCallID != callB.ID {
+		t.Fatalf("the surviving spend record must be the winner B's (%s), got %s", callB.ID, survivingCallID)
+	}
 
 	// The item is settled, plaintext purged, pointing at B's verdict; A's verdict was NEVER logged.
 	w, known, err := pg.GetWorkItem(ctx, itemID)

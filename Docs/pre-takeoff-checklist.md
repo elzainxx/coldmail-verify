@@ -66,9 +66,16 @@ The prompt named four as outstanding. Each is surfaced with its blocking phase; 
 - [ ] Vet **before paying** (V1–V5 behaviorally checkable: egress-25 smoke test, PTR propagation, clean-IP on blocklists, egress==PTR). V6–V8 (ToS, uptime, region) are procurement judgment gates, not automatable.
 - [ ] Decide the private-network mechanism per host (VLAN if co-located, else WireGuard, OQ-P3-12) — this becomes the control-plane perimeter at N boxes (security F-2).
 
-### 3.3 Vendor DPA / due-diligence (P6) — **gates P6**
-- [ ] The `external` layer **ships DISABLED until the §7.4 checklist passes** (DPA signed, retention understood, TLS, key custody). Enabling pre-DPA = unlawful sub-processing.
-- [ ] **[Security F-5, PN-7 accepted]** the checklist records vendor retention; *add* a cumulative-distinct-addresses-egressed metric + a periodic vendor-deletion process (retention is a standing exposure, not a one-time tick). Cross-ref P6 §7.4 note.
+### 3.3 Vendor DPA / due-diligence (P6) — **gates P6 GO-LIVE (not the build)**
+> **Build status (2026-07-18):** the `external` layer is **BUILT and fail-verified locally against a
+> mock vendor, DISABLED by default** (ADR-0012, [`phase-6-status.md`](phase-6-status.md)). This
+> checklist now gates **enabling** it (turning a real vendor on), **not** the code — enabling is
+> guarded in code by three independent switches (`TM_FALLBACK_MODE=enabled` AND
+> `TM_EXTERNAL_DPA_CONFIRMED=true` AND a `TM_VENDOR_KEYS` entry), and a real vendor adapter is still
+> PENDING-REAL-VENDOR (no live HTTP client ships this phase).
+- [ ] The `external` layer **ships DISABLED until this §7.4 checklist passes** (DPA signed, retention understood, TLS, key custody). Enabling pre-DPA = unlawful sub-processing. **Setting `TM_EXTERNAL_DPA_CONFIRMED=true` is the operator's affirmation this checklist passed** — do not set it before.
+- [ ] **[Security F-5, PN-7 accepted]** the checklist records vendor retention; *add* a cumulative-distinct-addresses-egressed metric + a periodic vendor-deletion process (retention is a standing exposure, not a one-time tick). The `external_calls` table is queryable by `email_hash` for SAR/deletion (PN-10). Cross-ref P6 §7.4 note.
+- [ ] Implement + wire a real `external.Vendor` adapter (one at launch, OQ-P6-8) in `buildExternal`; set the budget ceilings (`TM_EXTERNAL_DAILY_CAP`/`_MONTHLY_CAP`/`_PER_JOB_CAP`/`_RATE_CEILING`) conservatively from observed residue-tail volume before enabling (OQ-P6-5).
 
 ### Phase-gates (design conditions accepted 2026-07-17 — [`DECISIONS.md`](DECISIONS.md))
 

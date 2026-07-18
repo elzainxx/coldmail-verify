@@ -14,10 +14,10 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | bucket | count |
 |---|---|
 | secrets | 9 |
-| feature-flags | 145 |
-| dials | 108 |
+| feature-flags | 146 |
+| dials | 116 |
 | other/uncategorized | 2 |
-| **total knobs** | **264** |
+| **total knobs** | **273** |
 
 > One-way doors are **not** dials: the frozen contracts (response shape, LOG, hashing,
 > vocabulary, never-fork) live in code (`control-plane/internal/{vocab,hash,verdict,store,router}`),
@@ -38,7 +38,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | vendor API key (P6) | no rotation story; leak = budget-DoS + billed enumeration oracle (security F-6) | no rotation story; leak = budget-DoS + billed enumeration oracle (security F-6) |
 | front-door bearer token | no per-caller scoping/rotation brain-side; guards bulk-PII endpoint by P5 (security F-20) | no per-caller scoping/rotation brain-side; guards bulk-PII endpoint by P5 (security F-20) |
 
-## Feature-flags (145)
+## Feature-flags (146)
 
 | knob | default / state | source |
 |---|---|---|
@@ -172,6 +172,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | vendor DPA / due-diligence gate | layer ships DISABLED until checklist passes (§7.4) | P6 §7.4 |
 | platform disclosure posture | disclose + opt-out (options 1+2) (OQ-P6-6); per-policy opt-out mechanical | P6 §7.5, OQ-P6-6, GAP-45 |
 | sync-residue: inline vs async-requeue | inline with tight timeout, keep_residue on timeout (OQ-P6-7); async = opt-in SEAM | P6 §2.2, OQ-P6-7 |
+| `TM_EXTERNAL_DPA_CONFIRMED` (§7.4 legal enablement gate) | **false** — layer stays disabled; only `"true"` enables (after the DPA checklist passes) | P6 §7.4 |
 | outcome transport | sender-owned append feed P7 ingests (OQ-P7-1) | P7 §3.2, OQ-P7-1, GAP-48 |
 | ingestion idempotency key | `(message_id, event)` dedup, no-op append-guard | P7 §3.4 |
 | integrity reject-and-flag (unknown verification_id / sent_at<created_at / malformed) | reject + `ingest_error`, exclude from calibration (GAP-51) | P7 §3.3, §3.4, GAP-51 |
@@ -188,7 +189,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | `unknown` not pressured to `valid` | LOCKED — first-class unknown survives flywheel | P7 §8.4 |
 | platform "your sends train our accuracy" disclosure | surface it (OQ-P7-8), disclose-don't-hide | P7 §14, OQ-P7-8 |
 
-## Dials (108)
+## Dials (116)
 
 | knob | default / state | source |
 |---|---|---|
@@ -287,6 +288,14 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | `per_job_cap` | UNSET — low enough one list can't drain global (OQ-P6-5) | P6 §5.2, §4.4, OQ-P6-5 |
 | `rate_ceiling` (vendor calls/min) | UNSET | P6 §5.2, OQ-P6-5 |
 | vendor error-rate trip threshold + cooldown | UNSET | P6 §5.3 |
+| `TM_EXTERNAL_CONFIDENCE_CAP` (anti-laundering ceiling) | 60 | P6 §3.4, OQ-P6-1 |
+| `TM_EXTERNAL_DAILY_CAP` (cost-units/day) | **UNSET — owner OQ** (0/unset ⇒ not enforced) | P6 §5.2, OQ-P6-5 |
+| `TM_EXTERNAL_MONTHLY_CAP` (cost-units/month) | **UNSET — owner OQ** | P6 §5.2, OQ-P6-5 |
+| `TM_EXTERNAL_PER_JOB_CAP` (cost-units per bulk job) | **UNSET — owner OQ** | P6 §5.2, §4.4, OQ-P6-5 |
+| `TM_EXTERNAL_RATE_CEILING` (vendor calls/min) | **UNSET — owner OQ** | P6 §5.2, OQ-P6-5 |
+| `TM_EXTERNAL_ERROR_RATE_PCT` (breaker cond-2 trip %) | 0 (error-rate condition off; budget ceilings still apply) | P6 §5.3 |
+| `TM_EXTERNAL_ERROR_MIN_SAMPLES` (error-rate sample gate) | 20 | P6 §5.3, GAP-27 |
+| `TM_EXTERNAL_BREAKER_COOLDOWN_SECONDS` (open→half-open) | 300 (5 min) | P6 §5.3 |
 | DSN-code → event mapping | provider-specific, tunable; three-class taxonomy LOCKED | P7 §4.3 |
 | evidence-strength weights | ordering LOCKED (mailbox_full ≥ discriminating-delivery > catch-all-delivery ≈ 0); weights DIAL | P7 §4.5 |
 | historical-bounce TTL | 6–12 months on confirmed mailbox_not_found only, then degrades to penalty (OQ-P7-2) | P7 §4.6, OQ-P7-2, App C PB2 |
