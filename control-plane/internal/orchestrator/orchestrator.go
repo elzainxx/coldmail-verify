@@ -90,22 +90,158 @@ func New(d Deps) *Orchestrator {
 // cannot hash or log, so it must not pretend to verify. The API maps this to 503.
 var ErrNotReady = errors.New("orchestrator: not ready (missing hasher or store)")
 
+// QueueClass tells the P5 drainer how to transition a work-item after a queued check's compute
+// (§3.5). It is derived (in compute) from data the sync path already produces — NO new state on the
+// SMTP stage, and the SYNC path never reads it (inert for sync by construction). It exists so the
+// drainer can settle vs requeue while sharing the IDENTICAL P4 gate path (§8 master invariant).
+type QueueClass int
+
+const (
+	QSettled        QueueClass = iota // terminal verdict → settle + log once (§5.3)
+	QGreylisted                       // greylist transient → requeue on backoff, bump attempt (§4.2)
+	QTransientNet                     // smtp_timeout/connection_failed → requeue, bump (secondary, OQ-P5-12)
+	QRateLimited                      // rate_limited skip → requeue as a CAPACITY wait, NO attempt bump (§4.6/OQ-P5-7)
+	QNoEligibleNode                   // audit_red/no_eligible_node/warmup_cap → requeue as a health/capacity wait, no bump
+)
+
+// logKind selects which settlement path a computed verdict takes — the three pre-existing sync log
+// calls, preserved exactly (byte-identical proof for the sync path).
+type logKind int
+
+const (
+	logFull      logKind = iota // main path → logAndCacheRaw (LOG + optional cache write)
+	logReject                   // un-addressable reject → logOnly (NULL hash)
+	logFromCache                // cache hit → logOnly (from_cache=true)
+)
+
+// computed is the log-FREE result of the compute path — everything both the sync settler and the
+// queue drainer need, produced ONCE. The sync path (settleSync) reads resp/row/kind/cache inputs;
+// the queue path (ComputeForQueue) additionally reads class/retryHintS/lastReason. Nothing here is
+// logged or cached — that is the caller's decision (sync logs unconditionally; the queue settles
+// via CAS or requeues without logging — resolving §5.3 vs Door-2 "the log is the point").
+type computed struct {
+	resp verdict.Response
+	row  store.VerificationRow
+	kind logKind
+
+	// logFull inputs (for the sync cache write / the queue post-settle cache).
+	emailHash []byte
+	domain    string
+	prov      verdict.Provenance
+	cacheable bool
+	rawBlob   []byte
+
+	// Queue classifier (ignored by the sync path).
+	class      QueueClass
+	retryHintS int    // seed for the greylist backoff (§4.2), from signals.retry_after_hint_s
+	lastReason string // work_items.last_reason (operational)
+}
+
+// QueueOutcome is what the P5 drainer receives from ComputeForQueue: the transition class plus the
+// settle inputs (the LOG row with its id already assigned, the optional raw sidecar, and the
+// cache row when cacheable). The drainer maps Class → SettleWorkItem (QSettled) or RequeueWorkItem
+// (the transient/capacity classes), NEVER logging outside the CAS settlement.
+type QueueOutcome struct {
+	Class      QueueClass
+	RetryHintS int
+	LastReason string
+	Row        store.VerificationRow // id assigned; ready for SettleWorkItem's in-tx LOG insert
+	Raw        *store.RawRow         // nil unless an engine blob was produced
+	Cache      *store.CachedVerdict  // nil unless the settled verdict is cacheable (post-settle write)
+}
+
+// classifyRan maps a folded SMTP verdict's reason to a queue class (§4.5). Greylist + network
+// transients are retryable; everything else (accepted/mailbox_not_found/catch_all/mailbox_full/
+// smtp_blocked/…) is terminal — smtp_blocked is NOT retried by the greylist loop (reputation is
+// the health-watcher's job, §4.5). retryHintS seeds the backoff from signals.retry_after_hint_s.
+func classifyRan(v policy.Verdict) (QueueClass, int, string) {
+	switch v.Reason {
+	case vocab.ReasonGreylisted:
+		return QGreylisted, hintSeconds(v.Signals), string(vocab.ReasonGreylisted)
+	case vocab.ReasonSMTPTimeout, vocab.ReasonConnectionFailed:
+		return QTransientNet, 0, string(v.Reason)
+	default:
+		return QSettled, 0, string(v.Reason)
+	}
+}
+
+// classifySkip maps a frozen §8 smtp_skipped_reason to a queue class (§4.6). rate_limited is a pure
+// capacity wait (queue absorbs the P4 backpressure); the health/routing gaps also wait for the
+// pool to recover. Both requeue WITHOUT bumping the attempt count (a capacity/health wait must not
+// burn the greylist retry budget, §4.6/OQ-P5-7).
+func classifySkip(skip string) (QueueClass, string) {
+	if skip == reasonRateLimited {
+		return QRateLimited, reasonRateLimited
+	}
+	return QNoEligibleNode, skip
+}
+
+// hintSeconds reads signals.retry_after_hint_s tolerating int or float64 (JSON round-trips numbers
+// as float64). Absent/zero → 0 (the scheduler uses the policy default first step, §4.2).
+func hintSeconds(signals map[string]any) int {
+	switch v := signals["retry_after_hint_s"].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	}
+	return 0
+}
+
 // Verify runs the full lifecycle for one address under the given policy definition, and
 // returns the Door-1 response. The verdict is LOGged (append-only) before returning.
+//
+// It is compute + settleSync: compute() runs the log-FREE lifecycle (normalize→cache→cheap→SMTP
+// gates), settleSync() dispatches to the three pre-existing log calls (logOnly ×2, logAndCacheRaw)
+// arg-for-arg. The split is a pure statement-move — the sync path is byte-identical to the prior
+// single-function Verify (the queue classifier fields compute() also sets are never read here). It
+// exists so the P5 drainer can reuse the IDENTICAL P4 gate path via ComputeForQueue (log-free) and
+// settle via CAS, resolving §5.3 (no LOG row for an intermediate greylist) vs Door 2 (the log is
+// the point) — see §8 master invariant.
 func (o *Orchestrator) Verify(ctx context.Context, rawEmail string, def *policy.Definition) (verdict.Response, error) {
 	if o.hasher == nil || o.store == nil {
 		return verdict.Response{}, ErrNotReady
 	}
+	c, err := o.compute(ctx, rawEmail, def)
+	if err != nil {
+		return verdict.Response{}, err
+	}
+	if err := o.settleSync(ctx, c); err != nil {
+		return verdict.Response{}, err
+	}
+	return c.resp, nil
+}
+
+// settleSync performs the sync path's settlement — the three pre-existing log calls, unchanged.
+// logReject/logFromCache → logOnly (as the old finishReject/finishFromCache did); logFull →
+// logAndCacheRaw (as the old main path did), arg-for-arg. This is the ONLY code sync executes
+// beyond compute; it is a dispatch, not new logic — the byte-identical proof.
+func (o *Orchestrator) settleSync(ctx context.Context, c computed) error {
+	switch c.kind {
+	case logReject, logFromCache:
+		return o.logOnly(ctx, c.resp, c.row)
+	default: // logFull
+		return o.logAndCacheRaw(ctx, c.resp, c.row, c.emailHash, c.domain, c.prov, c.cacheable, c.rawBlob)
+	}
+}
+
+// compute runs the log-FREE lifecycle and returns everything a settler needs. It is the body of the
+// former Verify with every log/cache CALL removed (moved to settleSync) — the assemble steps and
+// the P4 gate path (runSMTP) are unchanged. It additionally derives the QueueClass (ignored by
+// sync). Precondition: o.hasher and o.store are non-nil (Verify/ComputeForQueue check ErrNotReady).
+func (o *Orchestrator) compute(ctx context.Context, rawEmail string, def *policy.Definition) (computed, error) {
 	start := o.now()
 
 	// 1. Normalize + hash (Door 3). An unparseable address is an un-addressable reject:
 	//    logged with a NULL hash (§3.2.7), status invalid/invalid_syntax — never dropped.
 	normalized, domain, err := o.hasher.Normalize(rawEmail)
 	if errors.Is(err, hash.ErrUnparseable) {
-		return o.finishReject(ctx, rawEmail, start, def)
+		return o.computeReject(rawEmail, start, def), nil
 	}
 	if err != nil {
-		return verdict.Response{}, err
+		return computed{}, err
 	}
 	emailHash := o.hasher.EmailHash(normalized)
 	localPart := normalized[:indexAt(normalized)]
@@ -113,16 +249,16 @@ func (o *Orchestrator) Verify(ctx context.Context, rawEmail string, def *policy.
 	// 2. Cache lookup on the COMPOSITE key (email_hash, config_fingerprint) — §4.2. A hit is
 	//    still LOGged with from_cache=true (§4.2/OQ-9). A miss/expiry falls through to compute.
 	if cv, cerr := o.store.GetCachedVerdict(ctx, emailHash, o.cfgFingerprint); cerr == nil {
-		return o.finishFromCache(ctx, rawEmail, domain, emailHash, localPart, cv, start, def)
+		return o.computeFromCache(rawEmail, domain, emailHash, localPart, cv, start, def), nil
 	} else if !errors.Is(cerr, store.ErrCacheMiss) {
-		return verdict.Response{}, cerr
+		return computed{}, cerr
 	}
 
 	// 3. Evaluate the cheap layers under the policy (cheapest-sufficient stop-early).
 	ev := layers.NewEvidence(rawEmail, normalized, localPart, domain, o.resolver, listAdapter{o.store})
 	v, err := o.engine.Evaluate(ctx, def, ev, o.layerSet)
 	if err != nil {
-		return verdict.Response{}, err
+		return computed{}, err
 	}
 
 	requestID := mustID(o.now())
@@ -138,6 +274,11 @@ func (o *Orchestrator) Verify(ctx context.Context, rawEmail string, def *policy.
 	var rawBlob []byte
 	var nodeID, verifierIP string
 	provisional := false
+	// The queue class defaults to QSettled: a pure cheap-path verdict (no SMTP eligible, or a
+	// :mx-routed provider_no_smtp) is terminal — it settles, never retries.
+	class := QSettled
+	retryHintS := 0
+	lastReason := string(v.Reason)
 	if smtpEligible(v) {
 		out := o.runSMTP(ctx, normalized, domain, requestID, v)
 		switch {
@@ -145,11 +286,13 @@ func (o *Orchestrator) Verify(ctx context.Context, rawEmail string, def *policy.
 			v = foldSMTP(v, out.Result)
 			rawBlob, nodeID, verifierIP = out.RawBlob, out.NodeID, out.VerifierIP
 			o.persistCatchAll(ctx, domain, out.Result)
+			class, retryHintS, lastReason = classifyRan(v)
 		case out.SkipReason != "":
 			// Eligible residue, but no node ran it. Keep the cheap verdict; record WHY SMTP was
 			// skipped (frozen §8 token) and carry the PB1 provisional flag to suppress caching.
 			setSkipSignal(&v, out.SkipReason)
 			provisional = out.Provisional
+			class, lastReason = classifySkip(out.SkipReason)
 		}
 	} else if v.Reason == vocab.ReasonProviderNoSMTP {
 		// A :mx-routed big provider (Gmail/O365/Yahoo, §5.1) never reaches the SMTP call — its
@@ -158,7 +301,7 @@ func (o *Orchestrator) Verify(ctx context.Context, rawEmail string, def *policy.
 		setSkipSignal(&v, reasonProviderMX)
 	}
 
-	// 4. Assemble (single source: response + LOG row), 5. LOG, 6. cache write, 7. respond.
+	// 4. Assemble (single source: response + LOG row). LOG + cache are the SETTLER's job now.
 	prov := verdict.Provenance{
 		RequestID: requestID, CheckedAt: start, LatencyMS: sinceMS(o.now(), start),
 		PolicyKey: def.Key, PolicyVersion: def.Version, ConfigFingerprint: o.cfgFingerprint,
@@ -176,10 +319,11 @@ func (o *Orchestrator) Verify(ctx context.Context, rawEmail string, def *policy.
 	// capacity-gap verdict would freeze a lower-quality answer and suppress the SMTP verdict once the
 	// node recovers / the cap lifts (PB1). A provider_mx_routed skip is NOT provisional (settled).
 	cacheable := smtp.CacheableReason(v.Status, v.Reason) && !provisional
-	if err := o.logAndCacheRaw(ctx, resp, row, emailHash, domain, prov, cacheable, rawBlob); err != nil {
-		return verdict.Response{}, err
-	}
-	return resp, nil
+	return computed{
+		resp: resp, row: row, kind: logFull,
+		emailHash: emailHash, domain: domain, prov: prov, cacheable: cacheable, rawBlob: rawBlob,
+		class: class, retryHintS: retryHintS, lastReason: lastReason,
+	}, nil
 }
 
 // setSkipSignal records the frozen §8 signals.smtp_skipped_reason (additive to the open signals
@@ -232,8 +376,9 @@ func recommendationFor(status vocab.Status, reason vocab.Reason) vocab.Recommend
 	}
 }
 
-// finishReject handles an un-addressable input: invalid/invalid_syntax, NULL hash, logged.
-func (o *Orchestrator) finishReject(ctx context.Context, rawEmail string, start time.Time, def *policy.Definition) (verdict.Response, error) {
+// computeReject assembles an un-addressable input (invalid/invalid_syntax, NULL hash) WITHOUT
+// logging — the settler logs it (logOnly, as the former finishReject did). kind=logReject.
+func (o *Orchestrator) computeReject(rawEmail string, start time.Time, def *policy.Definition) computed {
 	core := verdict.Core{
 		Status: vocab.StatusInvalid, Reason: vocab.ReasonInvalidSyntax,
 		Confidence: confidenceForReject(def), Recommendation: vocab.RecSkip,
@@ -245,15 +390,13 @@ func (o *Orchestrator) finishReject(ctx context.Context, rawEmail string, start 
 		RawEmail: rawEmail, NormalizedDomain: "", EmailHash: nil, // NULL hash (§3.2.7)
 	}
 	resp, row := verdict.Assemble(core, prov)
-	// An un-hashable reject is NOT cached (its key would be NULL) — logged only.
-	if err := o.logOnly(ctx, resp, row); err != nil {
-		return verdict.Response{}, err
-	}
-	return resp, nil
+	// A reject is terminal (settles, never retries) and NOT cached (its key would be NULL).
+	return computed{resp: resp, row: row, kind: logReject, class: QSettled, lastReason: string(vocab.ReasonInvalidSyntax)}
 }
 
-// finishFromCache re-logs a cache hit (from_cache=true) and returns the cached verdict.
-func (o *Orchestrator) finishFromCache(ctx context.Context, rawEmail, domain string, emailHash []byte, localPart string, cv store.CachedVerdict, start time.Time, def *policy.Definition) (verdict.Response, error) {
+// computeFromCache assembles a cache hit (from_cache=true) WITHOUT logging — the settler logs it
+// (logOnly, as the former finishFromCache did). kind=logFromCache; a cache hit is never re-cached.
+func (o *Orchestrator) computeFromCache(rawEmail, domain string, emailHash []byte, localPart string, cv store.CachedVerdict, start time.Time, def *policy.Definition) computed {
 	core := verdict.Core{
 		Status: vocab.Status(cv.Status), Reason: vocab.Reason(cv.Reason),
 		Confidence: cv.Confidence, Recommendation: vocab.Recommendation(cv.Recommendation),
@@ -267,11 +410,55 @@ func (o *Orchestrator) finishFromCache(ctx context.Context, rawEmail, domain str
 		HashScheme: hash.SchemeTag, LocalPartLen: len(localPart), MXProvider: cv.MXProvider,
 	}
 	resp, row := verdict.Assemble(core, prov)
-	// A cache hit is logged (from_cache=true) but NOT re-written to the cache.
-	if err := o.logOnly(ctx, resp, row); err != nil {
-		return verdict.Response{}, err
+	// A cached verdict is (by P2 OQ-P2-6) always a SETTLED verdict → the queue is satisfied without
+	// SMTP (§5.5); terminal, never retried.
+	return computed{resp: resp, row: row, kind: logFromCache, emailHash: emailHash, domain: domain,
+		class: QSettled, lastReason: string(cv.Reason)}
+}
+
+// ComputeForQueue runs the log-FREE P4 gate path for a QUEUED check (the P5 drainer's entry point,
+// §3/§4.4/§8). It calls the IDENTICAL compute() the sync path uses — same eligibility→sticky→
+// rate-limit→warmup gates — and returns a QueueOutcome the drainer maps onto a work-item transition
+// (settle via CAS, or requeue), NEVER logging outside the CAS settlement. This is what keeps §5.3
+// (no LOG row for an intermediate greylist) compatible with Door 2: the LOG write lives in
+// settleSync/SettleWorkItem, and the drainer bypasses settleSync. The Row it returns already has its
+// id assigned (so SettleWorkItem's in-tx LOG insert + verification_id stamp are one atomic write).
+func (o *Orchestrator) ComputeForQueue(ctx context.Context, rawEmail string, def *policy.Definition) (QueueOutcome, error) {
+	if o.hasher == nil || o.store == nil {
+		return QueueOutcome{}, ErrNotReady
 	}
-	return resp, nil
+	c, err := o.compute(ctx, rawEmail, def)
+	if err != nil {
+		return QueueOutcome{}, err
+	}
+	// Assign the LOG row id now (mirrors logWithRaw): the drainer hands Row to SettleWorkItem, which
+	// inserts it + stamps work_items.verification_id in one tx (GAP-33). A queued reject can't happen
+	// (a bulk item is a real address that normalized), but if it did it settles like any terminal.
+	row := c.row
+	id, ierr := idgen.NewV7String(o.now())
+	if ierr != nil {
+		return QueueOutcome{}, ierr
+	}
+	row.ID = id
+	var raw *store.RawRow
+	if len(c.rawBlob) > 0 {
+		raw = &store.RawRow{VerificationID: id, Raw: c.rawBlob}
+	}
+	var cache *store.CachedVerdict
+	if c.class == QSettled && c.cacheable && o.cacheTTL > 0 && len(c.emailHash) > 0 {
+		now := o.now()
+		cache = &store.CachedVerdict{
+			EmailHash: c.emailHash, ConfigFingerprint: o.cfgFingerprint, Domain: c.domain,
+			MXProvider: c.prov.MXProvider, HashScheme: hash.SchemeTag,
+			Status: string(c.resp.Status), Reason: string(c.resp.Reason), Confidence: c.resp.Confidence,
+			Recommendation: string(c.resp.Recommendation), Flags: c.resp.Flags, Signals: c.resp.Signals,
+			CachedAt: now, ExpiresAt: now.Add(o.cacheTTL),
+		}
+	}
+	return QueueOutcome{
+		Class: c.class, RetryHintS: c.retryHintS, LastReason: c.lastReason,
+		Row: row, Raw: raw, Cache: cache,
+	}, nil
 }
 
 // logAndCacheRaw assigns the LOG id, appends the row + optional raw engine sidecar blob (Door 2),
