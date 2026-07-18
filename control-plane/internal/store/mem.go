@@ -8,6 +8,7 @@ package store
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -40,6 +41,13 @@ type MemStore struct {
 
 	// Phase 5 (§7.5/PN-13) — per-caller front-door keys. Keyed hex(key_sha256) -> callerRow.
 	callers map[string]callerRow
+
+	// Phase 5 (§3.3/§5/§7) — the durable async queue. workItems keyed by id; idemKeys maps
+	// hex(idempotency_key) -> id for dedup; jobs keyed by id; attempts is the append-only transcript.
+	workItems map[string]WorkItemRow
+	idemKeys  map[string]string
+	jobs      map[string]JobRow
+	attempts  []WorkItemAttemptRow
 }
 
 // callerRow mirrors one api_callers row (per-caller key + validity window).
@@ -79,6 +87,9 @@ func NewMem(now func() time.Time) *MemStore {
 		warmup:     map[string]warmupWindow{},
 		rateBudget: map[string]rateBucket{},
 		callers:    map[string]callerRow{},
+		workItems:  map[string]WorkItemRow{},
+		idemKeys:   map[string]string{},
+		jobs:       map[string]JobRow{},
 	}
 }
 
@@ -456,6 +467,226 @@ func (m *MemStore) ResetWarmup(_ context.Context, nodeID string, windowStart tim
 	defer m.mu.Unlock()
 	m.warmup[warmupKey(nodeID, windowStart)] = warmupWindow{windowStart: windowStart.UTC(), count: 0, cap: cap}
 	return nil
+}
+
+// ── Phase 5 (§3.3/§5/§7) — the durable async queue (Mem parity; CAS/lease faithfully reproduced) ──
+
+// EnqueueWorkItem inserts a work-item, deduping on idempotency_key (mirrors PG ON CONFLICT DO
+// NOTHING): a duplicate key is a no-op returning alreadyExists=true.
+func (m *MemStore) EnqueueWorkItem(_ context.Context, item WorkItemRow) (string, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := hex.EncodeToString(item.IdempotencyKey)
+	if existing, ok := m.idemKeys[key]; ok {
+		return existing, true, nil // dedup (§5.5)
+	}
+	if item.Status == "" {
+		item.Status = "ready"
+	}
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = item.NotBefore
+	}
+	m.workItems[item.ID] = item
+	m.idemKeys[key] = item.ID
+	return item.ID, false, nil
+}
+
+// DequeueReady leases up to `limit` ready items in group-by-domain order (§6.2). The MemStore's
+// single-lock discipline gives SKIP-LOCKED-equivalent exclusivity (no concurrent dequeue races).
+func (m *MemStore) DequeueReady(_ context.Context, workerID string, limit int, now time.Time) ([]WorkItemRow, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if limit <= 0 {
+		limit = 10
+	}
+	var ready []WorkItemRow
+	for _, w := range m.workItems {
+		if (w.Status == "ready" || w.Status == "waiting_retry") && !now.Before(w.NotBefore) {
+			ready = append(ready, w)
+		}
+	}
+	// ORDER BY domain, not_before (mirrors PG) — domain-spread + oldest-due within a domain.
+	sort.Slice(ready, func(i, j int) bool {
+		if ready[i].Domain != ready[j].Domain {
+			return ready[i].Domain < ready[j].Domain
+		}
+		if !ready[i].NotBefore.Equal(ready[j].NotBefore) {
+			return ready[i].NotBefore.Before(ready[j].NotBefore)
+		}
+		return ready[i].ID < ready[j].ID // stable tiebreak
+	})
+	var out []WorkItemRow
+	for i := 0; i < len(ready) && len(out) < limit; i++ {
+		w := ready[i]
+		w.Status = "in_flight"
+		w.LockedBy = workerID
+		w.LockedAt = now.UTC()
+		m.workItems[w.ID] = w
+		out = append(out, w)
+	}
+	return out, nil
+}
+
+// SettleWorkItem mirrors PG's GAP-37/33/38 CAS settlement: the transition applies ONLY when the
+// item is still in_flight AND held by workerID; otherwise ErrLeaseLost (no LOG row appended). On
+// success: append the ONE LOG row, stamp verification_id, NULL the ciphertext, bump the job
+// counter, append the transcript — all atomically under the single lock.
+func (m *MemStore) SettleWorkItem(_ context.Context, itemID, workerID, terminal string, verdict VerificationRow, raw *RawRow, attempt WorkItemAttemptRow) error {
+	if terminal != "settled" && terminal != "dead" {
+		return fmt.Errorf("store: settle: invalid terminal %q", terminal)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	w, ok := m.workItems[itemID]
+	if !ok || w.LockedBy != workerID || w.Status != "in_flight" {
+		return ErrLeaseLost // reclaimed or already transitioned → discard (GAP-37); NO LOG row
+	}
+	// (1) append the one LOG row (Door 2).
+	m.Log = append(m.Log, verdict)
+	if raw != nil {
+		m.Raw = append(m.Raw, *raw)
+	}
+	// (2) CAS transition + purge ciphertext + clear lease.
+	w.Status = terminal
+	w.VerificationID = verdict.ID
+	w.SettledAt = verdict.CheckedAt
+	w.AddrCiphertext = nil // purge-on-settle (§5.3 step 4)
+	w.LockedBy = ""
+	w.LockedAt = time.Time{}
+	m.workItems[itemID] = w
+	// (3) bump the job counter (cheap progress; completion is authoritative — GAP-38).
+	if w.JobID != "" {
+		if j, ok := m.jobs[w.JobID]; ok {
+			j.SettledCount++
+			m.jobs[w.JobID] = j
+		}
+	}
+	// (4) append the transcript (OQ-P5-8) — only if the caller recorded one.
+	if attempt.ID != "" {
+		m.attempts = append(m.attempts, attempt)
+	}
+	return nil
+}
+
+// RequeueWorkItem mirrors PG's GAP-37 CAS requeue: transition ONLY when in_flight AND held by
+// workerID, else ErrLeaseLost. bumpAttempt=false for a capacity wait (§4.6/OQ-P5-7).
+func (m *MemStore) RequeueWorkItem(_ context.Context, itemID, workerID string, notBefore time.Time, reason string, bumpAttempt bool, attempt WorkItemAttemptRow) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	w, ok := m.workItems[itemID]
+	if !ok || w.LockedBy != workerID || w.Status != "in_flight" {
+		return ErrLeaseLost
+	}
+	w.Status = "waiting_retry"
+	if bumpAttempt {
+		w.Attempt++
+	}
+	w.NotBefore = notBefore
+	w.LastReason = reason
+	w.LockedBy = ""
+	w.LockedAt = time.Time{}
+	m.workItems[itemID] = w
+	if attempt.ID != "" {
+		m.attempts = append(m.attempts, attempt)
+	}
+	return nil
+}
+
+// ReclaimExpiredLeases resets in_flight items whose lease predates now-leaseTTL (mirrors PG).
+func (m *MemStore) ReclaimExpiredLeases(_ context.Context, leaseTTL time.Duration, now time.Time) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cutoff := now.Add(-leaseTTL)
+	n := 0
+	for id, w := range m.workItems {
+		if w.Status == "in_flight" && w.LockedAt.Before(cutoff) {
+			if !now.Before(w.NotBefore) {
+				w.Status = "ready"
+			} else {
+				w.Status = "waiting_retry"
+			}
+			w.LockedBy = ""
+			w.LockedAt = time.Time{}
+			m.workItems[id] = w
+			n++
+		}
+	}
+	return n, nil
+}
+
+// GetWorkItem reads one item by id.
+func (m *MemStore) GetWorkItem(_ context.Context, itemID string) (WorkItemRow, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	w, ok := m.workItems[itemID]
+	return w, ok, nil
+}
+
+// CreateJob inserts a jobs row.
+func (m *MemStore) CreateJob(_ context.Context, job JobRow) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if job.Status == "" {
+		job.Status = "submitted"
+	}
+	m.jobs[job.ID] = job
+	return job.ID, nil
+}
+
+// GetJob reads one job by id.
+func (m *MemStore) GetJob(_ context.Context, jobID string) (JobRow, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j, ok := m.jobs[jobID]
+	return j, ok, nil
+}
+
+// JobCompletion judges completion AUTHORITATIVELY (mirrors PG NOT EXISTS — GAP-38): iterate items,
+// not the counter. Returns total/settled from the job row for cheap display only.
+func (m *MemStore) JobCompletion(_ context.Context, jobID string) (bool, int, int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j, ok := m.jobs[jobID]
+	if !ok {
+		return false, 0, 0, ErrNotWired
+	}
+	complete := true
+	for _, w := range m.workItems {
+		if w.JobID == jobID && w.Status != "settled" && w.Status != "dead" {
+			complete = false
+			break
+		}
+	}
+	return complete, j.TotalCount, j.SettledCount, nil
+}
+
+// ListJobResults returns settled items for a job joined to their verdicts, cursor-paginated by id.
+func (m *MemStore) ListJobResults(_ context.Context, jobID, cursor string, limit int) ([]WorkItemResult, string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if limit <= 0 {
+		limit = 100
+	}
+	logByID := map[string]VerificationRow{}
+	for _, r := range m.Log {
+		logByID[r.ID] = r
+	}
+	var ids []string
+	for id, w := range m.workItems {
+		if w.JobID == jobID && (w.Status == "settled" || w.Status == "dead") && w.VerificationID != "" && id > cursor {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	var out []WorkItemResult
+	for _, id := range ids {
+		if len(out) >= limit {
+			return out, out[len(out)-1].WorkItemID, nil
+		}
+		w := m.workItems[id]
+		out = append(out, WorkItemResult{WorkItemID: id, EmailHash: w.EmailHash, Verdict: logByID[w.VerificationID]})
+	}
+	return out, "", nil
 }
 
 // LookupCaller resolves a caller from sha256(bearer key) honoring the validity window (PN-13,

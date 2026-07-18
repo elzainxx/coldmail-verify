@@ -671,6 +671,95 @@ func TestPGLookupCaller_WindowEnforced(t *testing.T) {
 	check("rotation-new", kRotNew, true, "caller_rot_"+tag)
 }
 
+// TestPGWorkItem_CASSettlementExactlyOnce proves the GAP-37 CAS against REAL Postgres: the
+// settlement UPDATE ... WHERE locked_by=<me> AND status='in_flight' returns zero rows for a
+// stale-lease attempt (→ ErrLeaseLost, no LOG row), and exactly one attempt commits. This is the
+// PG parity of the Mem TestSettle_ExactlyOnceUnderSlowDrainerReclaim — they MUST agree.
+func TestPGWorkItem_CASSettlementExactlyOnce(t *testing.T) {
+	pg := testPG(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	itemID, _ := idgen.NewV7String(now)
+	idem := []byte("pg-cas-" + now.Format("150405.000000000"))
+	item := WorkItemRow{
+		ID: itemID, IdempotencyKey: idem, Domain: "ex.com", EmailHash: []byte("h"),
+		PolicyKey: "cold-email", PolicyVersion: 1, ConfigFingerprint: "cfg", Status: "ready",
+		NotBefore: now.Add(-time.Minute), AddrCiphertext: []byte("ct"),
+	}
+	if _, _, err := pg.EnqueueWorkItem(ctx, item); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	t.Cleanup(func() {
+		// Owner-role cleanup (cp_runtime can't DELETE — retention posture).
+		_, _ = pg.pool.Exec(context.Background(), `DELETE FROM work_item_attempts WHERE work_item_id=$1`, itemID)
+		_, _ = pg.pool.Exec(context.Background(), `DELETE FROM work_items WHERE id=$1`, itemID)
+	})
+
+	// Attempt A leases it.
+	leasedA, err := pg.DequeueReady(ctx, "worker-A", 1, now)
+	if err != nil || len(leasedA) != 1 {
+		t.Fatalf("dequeue A: %v (n=%d)", err, len(leasedA))
+	}
+	// Reclaim (A is slow) then B leases it.
+	later := now.Add(2 * time.Minute)
+	if n, err := pg.ReclaimExpiredLeases(ctx, time.Minute, later); err != nil || n != 1 {
+		t.Fatalf("reclaim: %v (n=%d)", err, n)
+	}
+	leasedB, err := pg.DequeueReady(ctx, "worker-B", 1, later)
+	if err != nil || len(leasedB) != 1 {
+		t.Fatalf("dequeue B: %v (n=%d)", err, len(leasedB))
+	}
+
+	// A (stale lease) settles → must lose the CAS. B (current) settles → wins.
+	rid := mustV7(t, now)
+	vA := VerificationRow{ID: mustV7(t, now), RequestID: rid, CheckedAt: now, CreatedAt: now, Status: "valid",
+		Reason: "accepted", Confidence: 90, Recommendation: "send", PolicyKey: "cold-email",
+		PolicyVersion: 1, APIVersion: "v1", ConfigFingerprint: "cfg"}
+	errA := pg.SettleWorkItem(ctx, itemID, "worker-A", "settled", vA, nil, WorkItemAttemptRow{})
+	if errA != ErrLeaseLost {
+		t.Fatalf("stale-lease attempt A must get ErrLeaseLost, got %v", errA)
+	}
+	vB := VerificationRow{ID: mustV7(t, now), RequestID: rid, CheckedAt: now, CreatedAt: now, Status: "unknown",
+		Reason: "greylisted", Confidence: 10, Recommendation: "review", PolicyKey: "cold-email",
+		PolicyVersion: 1, APIVersion: "v1", ConfigFingerprint: "cfg"}
+	if err := pg.SettleWorkItem(ctx, itemID, "worker-B", "settled", vB, nil, WorkItemAttemptRow{}); err != nil {
+		t.Fatalf("current-lease attempt B must settle, got %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pg.pool.Exec(context.Background(), `DELETE FROM verifications WHERE id=$1`, vB.ID)
+	})
+
+	// The item is settled, plaintext purged, pointing at B's verdict; A's verdict was NEVER logged.
+	w, known, err := pg.GetWorkItem(ctx, itemID)
+	if err != nil || !known {
+		t.Fatalf("get item: %v known=%v", err, known)
+	}
+	if w.Status != "settled" || w.VerificationID != vB.ID {
+		t.Fatalf("item must be settled pointing at B (%s); got status=%s vid=%s", vB.ID, w.Status, w.VerificationID)
+	}
+	if len(w.AddrCiphertext) != 0 {
+		t.Fatal("addr_ciphertext must be purged in the settlement tx (OQ-P5-9)")
+	}
+	// A's verdict id must NOT exist in the LOG (GAP-33: the lost attempt wrote nothing).
+	var cnt int
+	if err := pg.pool.QueryRow(ctx, `SELECT count(*) FROM verifications WHERE id=$1`, vA.ID).Scan(&cnt); err != nil {
+		t.Fatalf("count A verdict: %v", err)
+	}
+	if cnt != 0 {
+		t.Fatalf("GAP-33 VIOLATED: the lost attempt A wrote a LOG row (%d rows for its id)", cnt)
+	}
+}
+
+func mustV7(t *testing.T, now time.Time) string {
+	t.Helper()
+	id, err := idgen.NewV7String(now)
+	if err != nil {
+		t.Fatalf("idgen: %v", err)
+	}
+	return id
+}
+
 func must(s string, err error) string {
 	if err != nil {
 		panic(err)

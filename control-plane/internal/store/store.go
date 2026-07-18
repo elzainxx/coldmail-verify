@@ -193,10 +193,78 @@ type MetricRow struct {
 	Signals    map[string]any // for smtp_skipped_reason (rate-saturation metric)
 }
 
+// ── Phase 5 (§3.3/§5/§7) — the durable async queue types ─────────────────────────────────────
+
+// WorkItemRow is one durable queue item (§3.3). It carries the plaintext address as ENCRYPTED
+// bytes (AddrCiphertext — DR-4/ADR-0002, sealed by the queue layer with a key separate from the
+// pepper); the store is crypto-AGNOSTIC (it persists/returns the ciphertext, never plaintext, and
+// never holds the DR-4 key). The plaintext lives only in the queue/orchestrator layer at attempt
+// time; AddrCiphertext is NULLed in the settlement transaction (§5.3 step 4).
+type WorkItemRow struct {
+	ID                string    // UUIDv7 — the lease unit AND the AEAD AAD (queue layer seals against it)
+	IdempotencyKey    []byte    // sha256(email_hash‖policy_key‖policy_version‖config_fingerprint) — §5.1
+	JobID             string    // owning bulk job; "" => a singular queued check
+	Domain            string    // in-clear (Door 3) — group-by-domain ordering + P4 sticky key
+	EmailHash         []byte    // Door-3 identity for cache lookup + LOG join
+	PolicyKey         string
+	PolicyVersion     int
+	ConfigFingerprint string
+	Status            string // ready | in_flight | waiting_retry | settled | dead (§3.5)
+	Attempt           int
+	NotBefore         time.Time
+	LockedBy          string
+	LockedAt          time.Time
+	LastReason        string
+	VerificationID    string    // FK-less; set at settle (GAP-33). Non-empty => already settled.
+	AddrCiphertext    []byte    // DR-4 AES-256-GCM ciphertext of the plaintext address; NULL post-settle
+	CreatedAt         time.Time
+	SettledAt         time.Time
+}
+
+// JobRow is one bulk job handle (§7.2) — brain-side verification-work state ONLY (no user id,
+// credits, CSV, filename — §7.6/GAP-36). caller_ref is opaque, echoed, never interpreted.
+type JobRow struct {
+	ID            string
+	PolicyKey     string
+	PolicyVersion int
+	Status        string // submitted | running | complete | complete_with_unknowns (§7.3)
+	TotalCount    int
+	SettledCount  int // denormalized progress (GAP-38); completion is authoritative, never this
+	SubmittedAt   time.Time
+	CompletedAt   time.Time
+	CallerRef     string // opaque (§7.6); the sole platform coupling
+}
+
+// WorkItemAttemptRow is one per-attempt transcript (OQ-P5-8) — append-only, distinct from the
+// verdict LOG. Any transcript in Signals must already be Door-3 address-redacted (ADR-0008).
+type WorkItemAttemptRow struct {
+	ID          string
+	WorkItemID  string
+	Attempt     int
+	AttemptedAt time.Time
+	NodeID      string
+	VerifierIP  string
+	Reason      string
+	Signals     map[string]any
+	LatencyMS   int
+}
+
+// WorkItemResult is one settled work-item paired with its verdict (for ListJobResults, §7.1).
+type WorkItemResult struct {
+	WorkItemID string
+	EmailHash  []byte
+	Verdict    VerificationRow // the settled verdict from the LOG (joined via verification_id)
+}
+
 // ErrNotWired marks the no-DB stub. ErrCacheMiss is a normal (non-error) cache absence.
 var (
 	ErrNotWired  = errors.New("store: no database wired")
 	ErrCacheMiss = errors.New("store: cache miss")
+	// ErrLeaseLost is returned by a CAS settle/requeue when the WHERE (id, locked_by=<me>,
+	// status='in_flight') matched ZERO rows (GAP-37): the lease was reclaimed or the item already
+	// transitioned. The caller DISCARDS its result — it neither settled nor requeued. This is not a
+	// failure to retry; it is the exactly-once guarantee firing (another attempt owns the item).
+	ErrLeaseLost = errors.New("store: work-item lease lost (CAS matched zero rows)")
 )
 
 // applyRefill is the SINGLE source of the token-bucket math (§4.4/OQ-P4-3). Given a bucket's stored
@@ -318,6 +386,64 @@ type Store interface {
 	// the window so the next reservation starts the ramp over. Idempotent.
 	ResetWarmup(ctx context.Context, nodeID string, windowStart time.Time, cap int) error
 
+	// ── Phase 5 (§3.3/§5/§7) — the durable async queue ──
+
+	// EnqueueWorkItem inserts one work-item, DEDUPING on idempotency_key (§5.5): if the key already
+	// exists, it is a no-op returning alreadyExists=true (ON CONFLICT DO NOTHING). The caller seals
+	// AddrCiphertext (DR-4) before calling — the store persists ciphertext, never plaintext. itemID
+	// is the row's id (the caller's WorkItemRow.ID, which is also the AEAD AAD).
+	EnqueueWorkItem(ctx context.Context, item WorkItemRow) (itemID string, alreadyExists bool, err error)
+
+	// DequeueReady leases up to `limit` ready items (status IN (ready,waiting_retry) AND
+	// now>=not_before) via FOR UPDATE SKIP LOCKED, in group-by-domain order (§6.2), setting
+	// status='in_flight', locked_by=workerID, locked_at=now. The caller runs each through the
+	// UNCHANGED P4 router+gates (§8) and then settles/requeues via the CAS methods below.
+	DequeueReady(ctx context.Context, workerID string, limit int, now time.Time) ([]WorkItemRow, error)
+
+	// SettleWorkItem is the GAP-37/33/38 conditional-CAS settlement (§5.3), all in ONE transaction:
+	// (1) INSERT the one verifications LOG row (+ optional raw sidecar) — Door 2 append;
+	// (2) CAS UPDATE work_items SET status=<terminal>, verification_id=verdict.ID, settled_at,
+	//     addr_ciphertext=NULL, lease cleared  WHERE id=itemID AND locked_by=workerID AND
+	//     status='in_flight';  (3) if job-owned, jobs.settled_count++;  (4) INSERT the attempt row.
+	// terminal is "settled" (a real verdict) or "dead" (retry-exhausted — still logs the reserved
+	// unknown/greylisted verdict). If the CAS matches ZERO rows the whole tx ROLLS BACK (no LOG
+	// row, GAP-33) and it returns ErrLeaseLost — the lost attempt discards its result.
+	SettleWorkItem(ctx context.Context, itemID, workerID, terminal string, verdict VerificationRow, raw *RawRow, attempt WorkItemAttemptRow) error
+
+	// RequeueWorkItem is the GAP-37 conditional-CAS requeue (§4.2): CAS UPDATE work_items SET
+	// status='waiting_retry', attempt=(bumpAttempt? attempt+1 : attempt), not_before=notBefore,
+	// last_reason=reason, lease cleared  WHERE id=itemID AND locked_by=workerID AND
+	// status='in_flight'; then INSERT the attempt row. bumpAttempt is false for a rate_limited /
+	// no-eligible-node capacity wait (§4.6/OQ-P5-7 — a capacity wait must not burn the greylist
+	// retry budget) and true for a provider-transient (greylist/timeout). Zero rows => ErrLeaseLost.
+	RequeueWorkItem(ctx context.Context, itemID, workerID string, notBefore time.Time, reason string, bumpAttempt bool, attempt WorkItemAttemptRow) error
+
+	// ReclaimExpiredLeases resets in_flight items whose lease is older than leaseTTL back to
+	// dequeueable (ready, or waiting_retry when not_before is still in the future), clearing the
+	// lease (§5.2). The lease TTL MUST exceed the brain's max SMTP deadline (GAP-37) so a live
+	// attempt never loses its lease — a reclaim then provably means the holder is dead. Returns the
+	// count reclaimed (for observability / the drainer-liveness alert).
+	ReclaimExpiredLeases(ctx context.Context, leaseTTL time.Duration, now time.Time) (reclaimed int, err error)
+
+	// GetWorkItem reads one work-item by id (progress/debugging). known=false => no such row.
+	GetWorkItem(ctx context.Context, itemID string) (item WorkItemRow, known bool, err error)
+
+	// CreateJob inserts a jobs row (§7.2) and returns its id.
+	CreateJob(ctx context.Context, job JobRow) (jobID string, err error)
+
+	// GetJob reads one job by id (progress polling). known=false => no such job.
+	GetJob(ctx context.Context, jobID string) (job JobRow, known bool, err error)
+
+	// JobCompletion judges completion AUTHORITATIVELY (§7.3/GAP-38): complete iff
+	// NOT EXISTS(work_items WHERE job_id=jobID AND status NOT IN ('settled','dead')). It also
+	// returns the (denormalized) total/settled counts for cheap progress display — but completion
+	// is NEVER settled==total (the counter can drift under the reclaim/no-op path).
+	JobCompletion(ctx context.Context, jobID string) (complete bool, total, settled int, err error)
+
+	// ListJobResults returns settled work-items for a job joined to their verdicts, cursor-paginated
+	// (§7.1). cursor is the last-seen work_item.id ("" => from the start); nextCursor is "" at the end.
+	ListJobResults(ctx context.Context, jobID, cursor string, limit int) (results []WorkItemResult, nextCursor string, err error)
+
 	// ── Phase 5 (§7.5 / PN-13) — per-caller front-door auth ──
 
 	// LookupCaller resolves an authenticated caller from the sha256 of a presented bearer key
@@ -382,6 +508,34 @@ func (StubStore) MetricRowsSince(context.Context, time.Time, int) ([]MetricRow, 
 }
 func (StubStore) SetNodeStatus(context.Context, string, string) error       { return ErrNotWired }
 func (StubStore) ResetWarmup(context.Context, string, time.Time, int) error { return ErrNotWired }
+func (StubStore) EnqueueWorkItem(context.Context, WorkItemRow) (string, bool, error) {
+	return "", false, ErrNotWired
+}
+func (StubStore) DequeueReady(context.Context, string, int, time.Time) ([]WorkItemRow, error) {
+	return nil, ErrNotWired
+}
+func (StubStore) SettleWorkItem(context.Context, string, string, string, VerificationRow, *RawRow, WorkItemAttemptRow) error {
+	return ErrNotWired
+}
+func (StubStore) RequeueWorkItem(context.Context, string, string, time.Time, string, bool, WorkItemAttemptRow) error {
+	return ErrNotWired
+}
+func (StubStore) ReclaimExpiredLeases(context.Context, time.Duration, time.Time) (int, error) {
+	return 0, ErrNotWired
+}
+func (StubStore) GetWorkItem(context.Context, string) (WorkItemRow, bool, error) {
+	return WorkItemRow{}, false, ErrNotWired
+}
+func (StubStore) CreateJob(context.Context, JobRow) (string, error) { return "", ErrNotWired }
+func (StubStore) GetJob(context.Context, string) (JobRow, bool, error) {
+	return JobRow{}, false, ErrNotWired
+}
+func (StubStore) JobCompletion(context.Context, string) (bool, int, int, error) {
+	return false, 0, 0, ErrNotWired
+}
+func (StubStore) ListJobResults(context.Context, string, string, int) ([]WorkItemResult, string, error) {
+	return nil, "", ErrNotWired
+}
 func (StubStore) LookupCaller(context.Context, []byte, time.Time) (string, bool, error) {
 	return "", false, ErrNotWired
 }

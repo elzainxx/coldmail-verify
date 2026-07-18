@@ -65,62 +65,16 @@ func nullInt(i int) any {
 }
 
 func (p *PG) AppendVerification(ctx context.Context, row VerificationRow, raw *RawRow) error {
-	flagsJSON, err := json.Marshal(orEmptyFlags(row.Flags))
-	if err != nil {
-		return fmt.Errorf("store: marshal flags: %w", err)
-	}
-	signalsJSON, err := json.Marshal(orEmptySignals(row.Signals))
-	if err != nil {
-		return fmt.Errorf("store: marshal signals: %w", err)
-	}
-
-	// A raw sidecar row (when an engine was consulted) must be atomic with the LOG row, so
-	// a crash never leaves a blob without its verdict or vice-versa. Wrap both in one tx.
+	// A raw sidecar row (when an engine was consulted) must be atomic with the LOG row, so a crash
+	// never leaves a blob without its verdict or vice-versa. Wrap both in one tx. The INSERT body
+	// is shared with the P5 queue settlement (insertVerificationTx) so the LOG-row shape can't drift.
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("store: begin: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // rollback after a successful commit is a no-op
-
-	var engineSuccess any
-	if row.EngineSuccessSet {
-		engineSuccess = row.EngineSuccess
-	}
-
-	const q = `
-INSERT INTO verifications (
-  id, request_id, checked_at, created_at,
-  email_hash, hash_scheme, domain, provider_canonical_hash, local_part_len,
-  status, reason, confidence, recommendation, flags, signals, mx_provider,
-  policy_key, policy_version, api_version,
-  verifier_ip, node_id, engine_version, engine_core_version, config_fingerprint,
-  engine_validation_type, engine_success, from_cache, latency_ms
-) VALUES (
-  $1,$2,$3,$4,
-  $5,$6,$7,$8,$9,
-  $10,$11,$12,$13,$14,$15,$16,
-  $17,$18,$19,
-  $20,$21,$22,$23,$24,
-  $25,$26,$27,$28
-)`
-	if _, err := tx.Exec(ctx, q,
-		row.ID, row.RequestID, row.CheckedAt.UTC(), row.CreatedAt.UTC(),
-		nullBytes(row.EmailHash), nullStr(row.HashScheme), nullStr(row.Domain), nullBytes(row.ProviderCanonicalHash), nullInt(row.LocalPartLen),
-		row.Status, row.Reason, row.Confidence, row.Recommendation, flagsJSON, signalsJSON, nullStr(row.MXProvider),
-		row.PolicyKey, row.PolicyVersion, row.APIVersion,
-		nullStr(row.VerifierIP), nullStr(row.NodeID), nullStr(row.EngineVersion), nullStr(row.EngineCoreVersion), row.ConfigFingerprint,
-		nullStr(row.EngineValidationType), engineSuccess, row.FromCache, nullInt(row.LatencyMS),
-	); err != nil {
-		return fmt.Errorf("store: insert verification: %w", err)
-	}
-
-	if raw != nil {
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO verification_raw (verification_id, raw, created_at) VALUES ($1,$2,$3)`,
-			raw.VerificationID, raw.Raw, row.CreatedAt.UTC(),
-		); err != nil {
-			return fmt.Errorf("store: insert raw: %w", err)
-		}
+	if err := insertVerificationTx(ctx, tx, row, raw); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }
@@ -595,6 +549,391 @@ VALUES ($1, $2, 0, $3, now())
 ON CONFLICT (node_id, window_start) DO UPDATE SET count = 0, cap = EXCLUDED.cap, updated_at = now()`
 	if _, err := p.pool.Exec(ctx, q, nodeID, windowStart.UTC(), cap); err != nil {
 		return fmt.Errorf("store: reset warmup: %w", err)
+	}
+	return nil
+}
+
+// ── Phase 5 (§3.3/§5/§7) — the durable async queue ──────────────────────────────────────────
+
+// EnqueueWorkItem inserts a work-item, deduping on idempotency_key (§5.5). ON CONFLICT DO NOTHING
+// makes a duplicate submission (same address×policy×config) a no-op returning alreadyExists=true.
+// The caller sealed AddrCiphertext (DR-4) — this store persists ciphertext, never plaintext.
+func (p *PG) EnqueueWorkItem(ctx context.Context, item WorkItemRow) (string, bool, error) {
+	const q = `
+INSERT INTO work_items (
+  id, idempotency_key, job_id, domain, email_hash, policy_key, policy_version,
+  config_fingerprint, status, attempt, not_before, addr_ciphertext, created_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+ON CONFLICT (idempotency_key) DO NOTHING
+RETURNING id`
+	status := item.Status
+	if status == "" {
+		status = "ready"
+	}
+	created := item.CreatedAt
+	if created.IsZero() {
+		created = item.NotBefore
+	}
+	var returnedID string
+	err := p.pool.QueryRow(ctx, q,
+		item.ID, item.IdempotencyKey, nullStr(item.JobID), item.Domain, item.EmailHash,
+		item.PolicyKey, item.PolicyVersion, item.ConfigFingerprint, status, item.Attempt,
+		item.NotBefore.UTC(), nullBytes(item.AddrCiphertext), created.UTC(),
+	).Scan(&returnedID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", true, nil // idempotency_key already present → dedup (§5.5)
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("store: enqueue work item: %w", err)
+	}
+	return returnedID, false, nil
+}
+
+// DequeueReady leases up to `limit` ready items with FOR UPDATE SKIP LOCKED in group-by-domain
+// order (§6.2). The inner SELECT locks the chosen rows; the outer UPDATE stamps the lease. ORDER
+// BY domain, not_before spreads across domains (a domain's items cluster, so distinct domains
+// interleave) while draining the oldest-due first within a domain.
+func (p *PG) DequeueReady(ctx context.Context, workerID string, limit int, now time.Time) ([]WorkItemRow, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	const q = `
+UPDATE work_items SET status='in_flight', locked_by=$2, locked_at=$3
+WHERE id IN (
+  SELECT id FROM work_items
+  WHERE status IN ('ready','waiting_retry') AND not_before <= $3
+  ORDER BY domain, not_before
+  FOR UPDATE SKIP LOCKED
+  LIMIT $1
+)
+RETURNING id, idempotency_key, COALESCE(job_id::text,''), domain, email_hash, policy_key,
+          policy_version, config_fingerprint, status, attempt, not_before, addr_ciphertext,
+          created_at`
+	rows, err := p.pool.Query(ctx, q, limit, workerID, now.UTC())
+	if err != nil {
+		return nil, fmt.Errorf("store: dequeue: %w", err)
+	}
+	defer rows.Close()
+	var out []WorkItemRow
+	for rows.Next() {
+		var w WorkItemRow
+		var addrCT []byte
+		if err := rows.Scan(
+			&w.ID, &w.IdempotencyKey, &w.JobID, &w.Domain, &w.EmailHash, &w.PolicyKey,
+			&w.PolicyVersion, &w.ConfigFingerprint, &w.Status, &w.Attempt, &w.NotBefore, &addrCT,
+			&w.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("store: dequeue scan: %w", err)
+		}
+		w.AddrCiphertext = addrCT
+		w.LockedBy = workerID
+		w.LockedAt = now.UTC()
+		out = append(out, w)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: dequeue rows: %w", err)
+	}
+	return out, nil
+}
+
+// SettleWorkItem is the GAP-37/33/38 conditional-CAS settlement (§5.3) in ONE transaction. See the
+// interface doc. The CAS (WHERE id=? AND locked_by=? AND status='in_flight') is the exactly-once
+// guarantee: zero rows → ROLLBACK (no LOG row, GAP-33) → ErrLeaseLost. terminal ∈ {settled, dead}.
+func (p *PG) SettleWorkItem(ctx context.Context, itemID, workerID, terminal string, verdict VerificationRow, raw *RawRow, attempt WorkItemAttemptRow) error {
+	if terminal != "settled" && terminal != "dead" {
+		return fmt.Errorf("store: settle: invalid terminal %q", terminal)
+	}
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: settle begin: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
+
+	// (2 first — do the CAS BEFORE the LOG insert so a lost lease costs no wasted INSERT work and,
+	// critically, so a zero-row CAS returns ErrLeaseLost with NOTHING written. verification_id is
+	// set to verdict.ID here; the LOG row with that id is inserted in step (1) below within the
+	// same tx, so the FK-less pointer and the row commit atomically — GAP-33.)
+	const casUpdate = `
+UPDATE work_items SET
+  status=$5, verification_id=$2, settled_at=$3, addr_ciphertext=NULL, locked_by=NULL, locked_at=NULL
+WHERE id=$1 AND locked_by=$4 AND status='in_flight'`
+	tag, err := tx.Exec(ctx, casUpdate, itemID, verdict.ID, verdict.CheckedAt.UTC(), workerID, terminal)
+	if err != nil {
+		return fmt.Errorf("store: settle CAS: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrLeaseLost // lease reclaimed or item already transitioned → discard (GAP-37)
+	}
+
+	// (1) INSERT the one verifications LOG row (Door 2 append) + optional raw sidecar.
+	if err := insertVerificationTx(ctx, tx, verdict, raw); err != nil {
+		return err
+	}
+
+	// (3) If job-owned, bump the denormalized progress counter (cheap display; completion is
+	// authoritative via JobCompletion — GAP-38). Guarded so a NULL job_id is a no-op.
+	if _, err := tx.Exec(ctx,
+		`UPDATE jobs SET settled_count = settled_count + 1
+		 WHERE id = (SELECT job_id FROM work_items WHERE id=$1 AND job_id IS NOT NULL)`,
+		itemID); err != nil {
+		return fmt.Errorf("store: settle job count: %w", err)
+	}
+
+	// (4) INSERT the per-attempt transcript (append-only, OQ-P5-8).
+	if err := insertAttemptTx(ctx, tx, attempt); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// RequeueWorkItem is the GAP-37 conditional-CAS requeue (§4.2). Zero rows → ErrLeaseLost.
+func (p *PG) RequeueWorkItem(ctx context.Context, itemID, workerID string, notBefore time.Time, reason string, bumpAttempt bool, attempt WorkItemAttemptRow) error {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: requeue begin: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	// attempt=attempt+CASE: a capacity wait (rate_limited/no-eligible) must NOT burn the greylist
+	// retry budget (§4.6/OQ-P5-7) → bumpAttempt=false; a provider-transient bumps.
+	inc := 0
+	if bumpAttempt {
+		inc = 1
+	}
+	const casUpdate = `
+UPDATE work_items SET
+  status='waiting_retry', attempt=attempt+$5, not_before=$2, last_reason=$3,
+  locked_by=NULL, locked_at=NULL
+WHERE id=$1 AND locked_by=$4 AND status='in_flight'`
+	tag, err := tx.Exec(ctx, casUpdate, itemID, notBefore.UTC(), nullStr(reason), workerID, inc)
+	if err != nil {
+		return fmt.Errorf("store: requeue CAS: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrLeaseLost
+	}
+	if err := insertAttemptTx(ctx, tx, attempt); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// ReclaimExpiredLeases resets in_flight items whose lease predates now-leaseTTL (§5.2). An item
+// past its lease goes back to 'ready' when it's due, else 'waiting_retry' (its not_before is still
+// future). The lease is cleared so DequeueReady can pick it up again.
+func (p *PG) ReclaimExpiredLeases(ctx context.Context, leaseTTL time.Duration, now time.Time) (int, error) {
+	cutoff := now.Add(-leaseTTL).UTC()
+	const q = `
+UPDATE work_items SET
+  status = CASE WHEN not_before <= $2 THEN 'ready' ELSE 'waiting_retry' END,
+  locked_by=NULL, locked_at=NULL
+WHERE status='in_flight' AND locked_at < $1`
+	tag, err := p.pool.Exec(ctx, q, cutoff, now.UTC())
+	if err != nil {
+		return 0, fmt.Errorf("store: reclaim leases: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// GetWorkItem reads one work-item by id.
+func (p *PG) GetWorkItem(ctx context.Context, itemID string) (WorkItemRow, bool, error) {
+	const q = `
+SELECT id, idempotency_key, COALESCE(job_id::text,''), domain, email_hash, policy_key,
+       policy_version, config_fingerprint, status, attempt, not_before,
+       COALESCE(locked_by,''), COALESCE(last_reason,''), COALESCE(verification_id::text,''),
+       addr_ciphertext, created_at
+FROM work_items WHERE id=$1`
+	var w WorkItemRow
+	var addrCT []byte
+	err := p.pool.QueryRow(ctx, q, itemID).Scan(
+		&w.ID, &w.IdempotencyKey, &w.JobID, &w.Domain, &w.EmailHash, &w.PolicyKey, &w.PolicyVersion,
+		&w.ConfigFingerprint, &w.Status, &w.Attempt, &w.NotBefore, &w.LockedBy, &w.LastReason,
+		&w.VerificationID, &addrCT, &w.CreatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return WorkItemRow{}, false, nil
+	}
+	if err != nil {
+		return WorkItemRow{}, false, fmt.Errorf("store: get work item: %w", err)
+	}
+	w.AddrCiphertext = addrCT
+	return w, true, nil
+}
+
+// CreateJob inserts a jobs row (§7.2).
+func (p *PG) CreateJob(ctx context.Context, job JobRow) (string, error) {
+	status := job.Status
+	if status == "" {
+		status = "submitted"
+	}
+	const q = `
+INSERT INTO jobs (id, policy_key, policy_version, status, total_count, settled_count, caller_ref)
+VALUES ($1,$2,$3,$4,$5,$6,$7)`
+	if _, err := p.pool.Exec(ctx, q,
+		job.ID, job.PolicyKey, job.PolicyVersion, status, job.TotalCount, job.SettledCount,
+		nullStr(job.CallerRef),
+	); err != nil {
+		return "", fmt.Errorf("store: create job: %w", err)
+	}
+	return job.ID, nil
+}
+
+// GetJob reads one job by id.
+func (p *PG) GetJob(ctx context.Context, jobID string) (JobRow, bool, error) {
+	const q = `
+SELECT id, policy_key, policy_version, status, total_count, settled_count, submitted_at,
+       COALESCE(completed_at, 'epoch'::timestamptz), COALESCE(caller_ref,'')
+FROM jobs WHERE id=$1`
+	var j JobRow
+	var completed time.Time
+	err := p.pool.QueryRow(ctx, q, jobID).Scan(
+		&j.ID, &j.PolicyKey, &j.PolicyVersion, &j.Status, &j.TotalCount, &j.SettledCount,
+		&j.SubmittedAt, &completed, &j.CallerRef,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return JobRow{}, false, nil
+	}
+	if err != nil {
+		return JobRow{}, false, fmt.Errorf("store: get job: %w", err)
+	}
+	if completed.Unix() > 0 {
+		j.CompletedAt = completed
+	}
+	return j, true, nil
+}
+
+// JobCompletion judges completion AUTHORITATIVELY (§7.3/GAP-38): NOT EXISTS a non-terminal item.
+func (p *PG) JobCompletion(ctx context.Context, jobID string) (bool, int, int, error) {
+	var total, settled int
+	if err := p.pool.QueryRow(ctx,
+		`SELECT total_count, settled_count FROM jobs WHERE id=$1`, jobID).Scan(&total, &settled); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, 0, 0, ErrNotWired
+		}
+		return false, 0, 0, fmt.Errorf("store: job completion counts: %w", err)
+	}
+	var complete bool
+	if err := p.pool.QueryRow(ctx,
+		`SELECT NOT EXISTS(SELECT 1 FROM work_items WHERE job_id=$1 AND status NOT IN ('settled','dead'))`,
+		jobID).Scan(&complete); err != nil {
+		return false, 0, 0, fmt.Errorf("store: job completion authoritative: %w", err)
+	}
+	return complete, total, settled, nil
+}
+
+// ListJobResults returns settled work-items joined to their verdicts, cursor-paginated by id (§7.1).
+func (p *PG) ListJobResults(ctx context.Context, jobID, cursor string, limit int) ([]WorkItemResult, string, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	const q = `
+SELECT w.id, w.email_hash,
+       v.id, v.status, v.reason, v.confidence, v.recommendation, v.flags, v.signals,
+       COALESCE(v.mx_provider,''), COALESCE(v.domain,''), v.policy_key, v.policy_version, v.api_version
+FROM work_items w
+JOIN verifications v ON v.id = w.verification_id
+WHERE w.job_id=$1 AND w.status IN ('settled','dead') AND w.verification_id IS NOT NULL
+  AND w.id > $2
+ORDER BY w.id
+LIMIT $3`
+	rows, err := p.pool.Query(ctx, q, jobID, cursor, limit+1) // +1 to compute nextCursor
+	if err != nil {
+		return nil, "", fmt.Errorf("store: list job results: %w", err)
+	}
+	defer rows.Close()
+	var out []WorkItemResult
+	for rows.Next() {
+		var r WorkItemResult
+		var v VerificationRow
+		var flagsJSON, signalsJSON []byte
+		if err := rows.Scan(
+			&r.WorkItemID, &r.EmailHash,
+			&v.ID, &v.Status, &v.Reason, &v.Confidence, &v.Recommendation, &flagsJSON, &signalsJSON,
+			&v.MXProvider, &v.Domain, &v.PolicyKey, &v.PolicyVersion, &v.APIVersion,
+		); err != nil {
+			return nil, "", fmt.Errorf("store: list job results scan: %w", err)
+		}
+		_ = json.Unmarshal(flagsJSON, &v.Flags)
+		_ = json.Unmarshal(signalsJSON, &v.Signals)
+		r.Verdict = v
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("store: list job results rows: %w", err)
+	}
+	nextCursor := ""
+	if len(out) > limit {
+		out = out[:limit]
+		nextCursor = out[len(out)-1].WorkItemID
+	}
+	return out, nextCursor, nil
+}
+
+// insertVerificationTx inserts one LOG row (+ optional raw sidecar) inside an existing tx — the
+// shared body of AppendVerification and the queue settlement (§5.3). Door 2 append; never UPDATE.
+func insertVerificationTx(ctx context.Context, tx pgx.Tx, row VerificationRow, raw *RawRow) error {
+	flagsJSON, err := json.Marshal(orEmptyFlags(row.Flags))
+	if err != nil {
+		return fmt.Errorf("store: marshal flags: %w", err)
+	}
+	signalsJSON, err := json.Marshal(orEmptySignals(row.Signals))
+	if err != nil {
+		return fmt.Errorf("store: marshal signals: %w", err)
+	}
+	var engineSuccess any
+	if row.EngineSuccessSet {
+		engineSuccess = row.EngineSuccess
+	}
+	const q = `
+INSERT INTO verifications (
+  id, request_id, checked_at, created_at,
+  email_hash, hash_scheme, domain, provider_canonical_hash, local_part_len,
+  status, reason, confidence, recommendation, flags, signals, mx_provider,
+  policy_key, policy_version, api_version,
+  verifier_ip, node_id, engine_version, engine_core_version, config_fingerprint,
+  engine_validation_type, engine_success, from_cache, latency_ms
+) VALUES (
+  $1,$2,$3,$4, $5,$6,$7,$8,$9, $10,$11,$12,$13,$14,$15,$16, $17,$18,$19,
+  $20,$21,$22,$23,$24, $25,$26,$27,$28
+)`
+	if _, err := tx.Exec(ctx, q,
+		row.ID, row.RequestID, row.CheckedAt.UTC(), row.CreatedAt.UTC(),
+		nullBytes(row.EmailHash), nullStr(row.HashScheme), nullStr(row.Domain), nullBytes(row.ProviderCanonicalHash), nullInt(row.LocalPartLen),
+		row.Status, row.Reason, row.Confidence, row.Recommendation, flagsJSON, signalsJSON, nullStr(row.MXProvider),
+		row.PolicyKey, row.PolicyVersion, row.APIVersion,
+		nullStr(row.VerifierIP), nullStr(row.NodeID), nullStr(row.EngineVersion), nullStr(row.EngineCoreVersion), row.ConfigFingerprint,
+		nullStr(row.EngineValidationType), engineSuccess, row.FromCache, nullInt(row.LatencyMS),
+	); err != nil {
+		return fmt.Errorf("store: settle insert verification: %w", err)
+	}
+	if raw != nil {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO verification_raw (verification_id, raw, created_at) VALUES ($1,$2,$3)`,
+			raw.VerificationID, raw.Raw, row.CreatedAt.UTC(),
+		); err != nil {
+			return fmt.Errorf("store: settle insert raw: %w", err)
+		}
+	}
+	return nil
+}
+
+// insertAttemptTx appends one per-attempt transcript row inside an existing tx (OQ-P5-8).
+func insertAttemptTx(ctx context.Context, tx pgx.Tx, a WorkItemAttemptRow) error {
+	if a.ID == "" {
+		return nil // no transcript to record (caller opted out) — the settle/requeue still holds
+	}
+	signalsJSON, err := json.Marshal(orEmptySignals(a.Signals))
+	if err != nil {
+		return fmt.Errorf("store: marshal attempt signals: %w", err)
+	}
+	const q = `
+INSERT INTO work_item_attempts (id, work_item_id, attempt, attempted_at, node_id, verifier_ip, reason, signals, latency_ms)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`
+	if _, err := tx.Exec(ctx, q,
+		a.ID, a.WorkItemID, a.Attempt, a.AttemptedAt.UTC(), nullStr(a.NodeID), nullStr(a.VerifierIP),
+		nullStr(a.Reason), signalsJSON, nullInt(a.LatencyMS),
+	); err != nil {
+		return fmt.Errorf("store: insert attempt: %w", err)
 	}
 	return nil
 }
