@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -181,9 +182,12 @@ func TestSMTPRoute_RecoveringIsCanaryOnlyWhenAllowed(t *testing.T) {
 	}
 }
 
-// An ACTIVE node is preferred over a recovering canary: with both eligible, the active node is
-// picked and IsCanary is false (the canary is the fallback only, never steals normal traffic).
-func TestSMTPRoute_ActivePreferredOverRecoveringCanary(t *testing.T) {
+// THE FINDING-B-REGRESSION GUARD (§5.4/GAP-30): with an active node AND a recovering node both
+// eligible, MOST domains route to active (the canary never steals normal traffic), but a METERED
+// FRACTION of distinct domains reach the recovering node so the canary accrues REAL samples in a
+// HEALTHY pool. The pre-fix bug routed EVERY domain to active (recovering was fallback-only) → the
+// canary got zero traffic → zero samples → stuck-forever. This test fails against that bug.
+func TestSMTPRoute_CanaryGetsMeteredTrickleInHealthyPool_FindingB(t *testing.T) {
 	nodes := []Node{
 		{ID: "active1", BaseURL: "http://box1", Enabled: true, PublicEgressIP: "203.0.113.10"},
 		{ID: "recov1", BaseURL: "http://box2", Enabled: true, PublicEgressIP: "203.0.113.11"},
@@ -195,16 +199,37 @@ func TestSMTPRoute_ActivePreferredOverRecoveringCanary(t *testing.T) {
 	}}
 	f := fc()
 	f.AllowRecovering = true
-	// Try many domains: every pick must land on the ACTIVE node (recovering is fallback-only).
-	for _, d := range []string{"a.com", "b.com", "c.com", "d.com", "e.com"} {
+	f.CanarySampleN = 5 // ≈1/5 of distinct domains canary-sampled
+
+	toActive, toCanary := 0, 0
+	for i := 0; i < 200; i++ {
+		d := fmt.Sprintf("domain-%d.example", i)
 		res := reg.SMTPRoute(context.Background(), Plan{Domain: d}, h, f)
-		if res.Err != nil || res.Node.ID != "active1" {
-			t.Fatalf("domain %s must route to the ACTIVE node, not the canary, got node=%q err=%v", d, res.Node.ID, res.Err)
+		if res.Err != nil {
+			t.Fatalf("domain %s: unexpected err %v", d, res.Err)
 		}
-		if res.IsCanary {
-			t.Fatalf("an active pick must not be flagged canary (domain %s)", d)
+		switch res.Node.ID {
+		case "active1":
+			if res.IsCanary {
+				t.Fatalf("an active pick must not be flagged canary (domain %s)", d)
+			}
+			toActive++
+		case "recov1":
+			if !res.IsCanary {
+				t.Fatalf("a recovering pick MUST be flagged canary so the caller meters it (domain %s)", d)
+			}
+			toCanary++
 		}
 	}
+	// The canary MUST get a nonzero trickle (the whole point — else stuck-forever)...
+	if toCanary == 0 {
+		t.Fatal("FINDING-B REGRESSION: the canary got ZERO traffic in a healthy pool — it can never accrue samples → stuck-forever")
+	}
+	// ...but active MUST still get the majority (the canary is a trickle, not the main path).
+	if toActive <= toCanary {
+		t.Fatalf("active must serve the majority; got active=%d canary=%d (canary should be ~1/5)", toActive, toCanary)
+	}
+	t.Logf("healthy-pool routing over 200 domains: active=%d canary=%d (~1/%d sampled)", toActive, toCanary, f.CanarySampleN)
 }
 
 // Rate saturation via the sticky headroom oracle must emit smtp_skipped_reason="rate_limited", NOT

@@ -117,6 +117,24 @@ type SMTPFilterConfig struct {
 	// metered canary that lets it accrue REAL block-rate samples to prove recovery (without this, a
 	// recovering node gets zero traffic → zero samples → can never recover; the Phase-4 review finding).
 	AllowRecovering bool
+	// CanarySampleN meters how much traffic a `recovering` node receives when active nodes ALSO exist
+	// (§5.4/GAP-30). A recovering node must get a METERED TRICKLE of real checks even in a healthy pool
+	// — otherwise it accrues zero samples and is stuck-forever (the Phase-4 review's Finding-B
+	// regression: fallback-only routing gave a canary zero traffic whenever any active node was up).
+	// The trickle is deterministic + per-domain: a domain is canary-sampled iff hash(domain) mod
+	// CanarySampleN == 0 (≈ 1/N of DISTINCT domains go to the canary; the rest route active — so no
+	// active-eligible domain is ever starved). N<=1 disables sampling (every domain canary-eligible —
+	// only for tests); the canary's TOTAL volume is further bounded downstream by the low canary
+	// warmup cap (the orchestrator's CanaryCap), so it is a trickle in two senses: few domains, few
+	// checks each.
+	CanarySampleN int
+	// ForceActiveOnly excludes `recovering` nodes from candidacy for THIS route, even when
+	// AllowRecovering is set (§5.4). The orchestrator sets it on a RE-ROUTE after a canary node's low
+	// warmup cap denied a canary-sampled check: rather than degrade that domain to cheap (it has a
+	// healthy active peer), the caller re-routes forcing active. Without this, a canary-sampled domain
+	// would degrade on EVERY check once the canary cap fills — a residual starvation the P4→P5 review
+	// caught. When set, a recovering node is treated exactly as in the pre-canary P3 behavior (excluded).
+	ForceActiveOnly bool
 }
 
 // SMTPRouteResult reports the routing outcome for the SMTP stage. When Node is valid, SMTP runs on
@@ -197,15 +215,33 @@ func (r *Registry) SMTPRoute(ctx context.Context, plan Plan, health HealthSource
 		}
 	}
 
-	// Prefer active; the canary (recovering) is the fallback ONLY when no active node can serve.
+	// Routing (§3.3/§5.4): active nodes serve normal traffic; a `recovering` node gets a METERED
+	// canary trickle. Two cases:
+	//   • No active node → the recovering node(s) ARE the pool for this cycle (full fallback). This is
+	//     the "pool would otherwise all-degrade" case; a recovering node serving is strictly better
+	//     than degrading everything, and its low canary cap still bounds it.
+	//   • Active node(s) present → route to active UNLESS this domain is canary-sampled
+	//     (canarySampled), in which case route to a recovering node so the canary accrues REAL samples
+	//     in a healthy pool (the Finding-B-regression fix: fallback-only routing starved the canary of
+	//     samples → stuck-forever). Only ≈1/CanarySampleN of DISTINCT domains are sampled, and a
+	//     sampled domain still falls through to active if no recovering node can take it — so no
+	//     active-eligible domain is ever starved, and the canary is never flooded.
+	canaryEligible := len(recovering) > 0 && fc.AllowRecovering && !fc.ForceActiveOnly
 	if len(active) > 0 {
+		if canaryEligible && canarySampled(plan.Domain, fc.CanarySampleN) {
+			if picked, err := r.strategy.Pick(ctx, plan, recovering); err == nil {
+				// A recovering node took this sampled check — meter it via the LOW canary cap downstream.
+				return SMTPRouteResult{Node: picked, PerNode: perNode, IsCanary: recoveringStatus[picked.ID]}
+			}
+			// The canary can't take it right now (e.g. rate-capped) → fall through to active (no starve).
+		}
 		picked, err := r.strategy.Pick(ctx, plan, active)
 		if err != nil {
 			return SMTPRouteResult{Err: err, SkipToken: skipTokenForErr(err, perNode), PerNode: perNode}
 		}
 		return SMTPRouteResult{Node: picked, PerNode: perNode}
 	}
-	if len(recovering) > 0 {
+	if canaryEligible {
 		picked, err := r.strategy.Pick(ctx, plan, recovering)
 		if err != nil {
 			return SMTPRouteResult{Err: err, SkipToken: skipTokenForErr(err, perNode), PerNode: perNode}
@@ -215,6 +251,18 @@ func (r *Registry) SMTPRoute(ctx context.Context, plan Plan, health HealthSource
 		return SMTPRouteResult{Node: picked, PerNode: perNode, IsCanary: recoveringStatus[picked.ID]}
 	}
 	return SMTPRouteResult{Err: ErrNoEligibleNode, SkipToken: skipTokenFor(perNode), PerNode: perNode}
+}
+
+// canarySampled decides, deterministically per-domain, whether a check goes to the canary when active
+// nodes also exist (§5.4). ≈1/n of distinct domains sample true. n<=1 → always true (canary-eligible
+// for every domain — test/degenerate); n>1 → hash(domain) mod n == 0. Deterministic (no clock): the
+// same domain always makes the same choice within a membership set, so the canary sees a stable,
+// bounded slice of domains — a metered trickle, not a flood.
+func canarySampled(domain string, n int) bool {
+	if n <= 1 {
+		return true
+	}
+	return hrwScore(domain, "canary-sample")%uint64(n) == 0
 }
 
 // skipTokenForErr maps a Strategy Pick error to the frozen §8 token. ErrRateSaturated (candidates

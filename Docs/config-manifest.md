@@ -276,9 +276,10 @@ It does not resolve open questions or set UNSET values — those are owner decis
 | **`TM_BLOCK_RECOVER_THRESHOLD_PCT`** (recovery threshold %) | dial | 5 (asymmetric, lower) | too high → premature recovery | pool | P4 §5.4 |
 | **`TM_CANARY_RECOVER_GREENS`** (consecutive clean canary cycles) | dial | 3 | too low → flapping recovery | pool | P4 §5.4 |
 | **`TM_CANARY_MIN_SAMPLES`** (min real canary attempts before promotion) | dial | 10 | zero → promote a recovering node on ZERO evidence (re-warm a still-blocklisted IP); the Phase-4 review finding | pool / reputation | P4 §5.4, GAP-30 |
+| **`TM_CANARY_SAMPLE_N`** (canary domain-sample rate) | dial | 5 (≈1/N of distinct domains reach a recovering node even in a HEALTHY pool) | too high → canary starves (zero samples → stuck-forever, the Finding-B regression); too low → canary over-fed (still bounded by the low canary cap) | pool / reputation | P4 §5.4, GAP-30 |
 | **`TM_LIVENESS_MISSES`** (M consecutive `/health` fails) | dial | 3 | too low → quarantine on a transient blip | single box | P4 §5.4 |
 | **`TM_FLEET_WIDE_PCT`** (cascade-brake trigger, % of active nodes) | dial | 50 (VALIDATED 1..99 — a value ≥100 is REJECTED at startup, as it would make the fraction-brake mathematically unable to fire; finding G) | too high → brake never fires (auto-heal→auto-outage) — now a startup error; too low → over-holds | pool / brain-wide | P4 §5.5, GAP-28 |
-| **`TM_CANARY_WARMUP_CAP`** (low re-warm cap on recovery) | dial | 5 | high → recovered node re-burns at full volume | single box / reputation | P4 §5.4 (PM3) |
+| **`TM_CANARY_WARMUP_CAP`** (low re-warm cap on recovery) | dial | 20 (VALIDATED ≥ `TM_CANARY_MIN_SAMPLES` — a smaller cap makes the canary unable to accrue enough samples to promote → stuck-forever; finding C) | too high → recovered node re-burns at full volume; below min-samples → stuck-forever (rejected at startup) | single box / reputation | P4 §5.4 (PM3), GAP-30 |
 | **`TM_POOL_ELIGIBLE_FLOOR`** (pool-eligible-low alert floor) | dial | 1 | — | observability | P4 §8.2 |
 | **`TM_RATE_SATURATION_COUNT`** (rate-saturation alert threshold) | dial | 50 | — | observability | P4 §8.2 |
 

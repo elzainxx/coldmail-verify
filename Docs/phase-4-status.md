@@ -170,10 +170,17 @@ fixed before commit** (the review earned its keep — these were genuine holes, 
 - **Finding B (medium, zero-sample canary promotion, GAP-30):** a `recovering` node got **no traffic**
   (the gate excluded it; no canary routing was built), so its block-rate was trivially 0 and it
   promoted back to active on audit-green cycles alone — re-warming a possibly-still-blocklisted IP with
-  no evidence. **Fixed** by (1) building the metered canary *routing* (recovering nodes are a
-  fallback-only candidate, metered by the low canary cap) and (2) a `MinCanarySamples` gate requiring
-  real clean canary evidence before promotion. Locked by
+  no evidence. **Fixed** by (1) building the metered canary *routing* and (2) a `MinCanarySamples` gate
+  requiring real clean canary evidence before promotion. Locked by
   `TestEvaluate_Recovering_ZeroSamplesDoesNotPromote_FindingB` + `_RealCleanSamplesPromotes_FindingB`.
+  > **Correction (P4→P5 readiness pass):** Finding-B's *first* routing fix made recovering nodes
+  > **fallback-only** — which reintroduced the stuck-forever bug in a healthy pool (a canary with any
+  > active peer present got zero traffic → zero samples → never met `MinCanarySamples`). The readiness
+  > pass's independent code-review caught this. The **correct** routing (now in place) diverts a
+  > deterministic ≈1/`CanarySampleN` slice of domains to a recovering node **even when active nodes
+  > exist**, so the canary accrues real samples; the rest route active (no domain starves), and the low
+  > canary cap still bounds total volume. Locked by
+  > `TestSMTPRoute_CanaryGetsMeteredTrickleInHealthyPool_FindingB` (fails against fallback-only routing).
 
 A bounded **round-2** review then re-checked the two fixes + the three unfinished dimensions and found
 **three more real findings**, all fixed before commit (this is why the review was worth resuming):

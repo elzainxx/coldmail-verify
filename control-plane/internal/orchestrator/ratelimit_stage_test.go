@@ -221,3 +221,56 @@ func TestSMTPStage_RealLimiter_SecondCheckRateLimited(t *testing.T) {
 		t.Fatalf("second check must be rate_limited (budget spent this window), got %q (status %s/%s)", s, r2.Status, r2.Reason)
 	}
 }
+
+// ── Phase 4 (P4→P5 readiness pass): the residual canary-starvation fix (§5.4/GAP-30) ──
+//
+// A canary-sampled domain whose RECOVERING node is at its low canary cap must NOT degrade to cheap
+// when a healthy ACTIVE peer can serve it — the orchestrator re-routes FORCING active instead. Before
+// the fix, such a domain degraded (warmup_cap) on every check for the rest of the window even though
+// an active node was available. CanarySampleN=1 forces every domain onto the canary path so the
+// fallback is exercised deterministically.
+func TestSMTPStage_CanaryAtCap_FallsBackToActive_NotDegrade(t *testing.T) {
+	h, _ := hash.NewHasher([]byte("p4-pepper"))
+	mem := store.NewMem(nil)
+	// An ACTIVE node (healthy) + a RECOVERING node (canary).
+	mem.SeedNodeHealth(store.NodeHealth{
+		NodeID: "act", Status: "active", AuditStatus: "green", Port25Open: true,
+		LastAuditAt: time.Now(), LastAuditHostIP: "203.0.113.20",
+	})
+	mem.SeedNodeHealth(store.NodeHealth{
+		NodeID: "rec", Status: "recovering", AuditStatus: "green", Port25Open: true,
+		LastAuditAt: time.Now(), LastAuditHostIP: "203.0.113.21",
+	})
+	def, _ := policy.ColdEmailDefinition()
+	nodes := []router.Node{
+		{ID: "act", BaseURL: "http://mock", TokenRef: "act", Enabled: true, PublicEgressIP: "203.0.113.20"},
+		{ID: "rec", BaseURL: "http://mock", TokenRef: "rec", Enabled: true, PublicEgressIP: "203.0.113.21"},
+	}
+	o := New(Deps{
+		Hasher: h, Store: mem, Resolver: corpResolver(), CacheTTL: time.Hour, ConfigFingerprint: "cfg",
+		SMTP: &SMTPDeps{
+			Client: fakeNode{body: validBody}, Registry: router.New(nodes, router.NewSticky(nil, nil)),
+			TokenFor: func(string) string { return "t" }, Health: mem,
+			WarmupCap: 100, CanaryCap: 2, CanarySampleN: 1, // N=1 → every domain canary-sampled
+		},
+	})
+	// Pre-fill the recovering node's canary window to its cap (2) so any canary reservation is denied.
+	mem.SeedWarmup("rec", o.warmupWindow(), 2, 2)
+
+	resp, err := o.Verify(context.Background(), "jane@acmecorp.com", def)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	// The canary is capped, but the ACTIVE peer can serve → a REAL valid verdict, NOT a warmup_cap degrade.
+	if resp.Status != vocab.StatusValid {
+		t.Fatalf("a canary-capped domain must fall back to the active node → valid, got %s/%s (skip=%v)",
+			resp.Status, resp.Reason, resp.Signals["smtp_skipped_reason"])
+	}
+	if s, _ := resp.Signals["smtp_skipped_reason"].(string); s != "" {
+		t.Fatalf("no skip reason expected when the active fallback served, got %q", s)
+	}
+	// The verdict must have been produced by the ACTIVE node (its egress IP), not the recovering one.
+	if resp.Meta.VerifierIP == nil || *resp.Meta.VerifierIP != "203.0.113.20" {
+		t.Fatalf("the fallback verdict must come from the active node 203.0.113.20, got %v", resp.Meta.VerifierIP)
+	}
+}

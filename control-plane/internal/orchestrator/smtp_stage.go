@@ -34,10 +34,11 @@ type SMTPDeps struct {
 	// Phase 3 (§4.4/§4.5/§5.2). Health drives the eligibility gate; MaxAuditAge is the §4.5
 	// staleness window; WarmupCap is the §5.2 per-window ascending cap (<=0 => NOT enforced — a
 	// mature node past warmup). Health is usually the store itself; injected so tests use a fake.
-	Health      router.HealthSource
-	MaxAuditAge time.Duration // §4.5 staleness window (DIAL); <=0 disables the freshness conjunct
-	WarmupCap   int           // §5.2 per-node/per-day :smtp cap; <=0 => warmup not enforced
-	CanaryCap   int           // §5.4 the LOW cap a `recovering` (canary) node is metered by; <=0 => fall back to WarmupCap
+	Health        router.HealthSource
+	MaxAuditAge   time.Duration // §4.5 staleness window (DIAL); <=0 disables the freshness conjunct
+	WarmupCap     int           // §5.2 per-node/per-day :smtp cap; <=0 => warmup not enforced
+	CanaryCap     int           // §5.4 the LOW cap a `recovering` (canary) node is metered by; <=0 => fall back to WarmupCap
+	CanarySampleN int           // §5.4/GAP-30 canary domain-sample rate (≈1/N domains reach a recovering node in a healthy pool, so it accrues real samples)
 
 	// Phase 4 (§4) — the per-provider rate limiter. nil => no rate limiting (the P2/P3 posture; the
 	// limiter is inert). When set, runSMTP jitters + admits before the node call and releases the
@@ -102,10 +103,10 @@ func (o *Orchestrator) runSMTP(ctx context.Context, normalized, domain, requestI
 	rr := o.smtp.Registry.SMTPRoute(ctx,
 		router.Plan{Domain: domain, Provider: mxProviderOf(cheap.Signals)},
 		o.smtp.Health,
-		// AllowRecovering lets a `recovering` node serve the METERED canary (§5.4/GAP-30): it's a
-		// fallback candidate only (active nodes are preferred), reserved against the LOW canary cap
-		// below so it accrues just "a few checks/window" — the real samples it needs to prove recovery.
-		router.SMTPFilterConfig{MaxAuditAge: o.smtp.MaxAuditAge, Now: o.now, AllowRecovering: true},
+		// AllowRecovering lets a `recovering` node serve the METERED canary (§5.4/GAP-30): a
+		// deterministic ≈1/CanarySampleN slice of domains reaches it even in a healthy pool (so it
+		// accrues real samples), reserved against the LOW canary cap below.
+		router.SMTPFilterConfig{MaxAuditAge: o.smtp.MaxAuditAge, Now: o.now, AllowRecovering: true, CanarySampleN: o.smtp.CanarySampleN},
 	)
 	if rr.Err != nil {
 		return smtpStageOutcome{SkipReason: rr.SkipToken, Provisional: true}
@@ -118,19 +119,26 @@ func (o *Orchestrator) runSMTP(ctx context.Context, normalized, domain, requestI
 	// A CANARY (recovering) node is metered by the LOW canary cap (§5.4) — a recovered IP re-warms
 	// gently; this is what keeps the canary a "trickle, well under warmup start". Cap<=0 means warmup
 	// is not enforced (a mature node) — but a canary ALWAYS uses its cap (its whole point is metering).
-	warmupCap := o.smtp.WarmupCap
-	if rr.IsCanary && o.smtp.CanaryCap > 0 {
-		warmupCap = o.smtp.CanaryCap
-	}
-	if warmupCap > 0 {
-		dec, werr := o.store.ReserveWarmupSlot(ctx, n.ID, o.warmupWindow(), warmupCap)
-		if werr != nil {
-			// A warmup-store error must NOT silently send over-cap (reputation hazard) — fail closed
-			// to the cheap verdict, marked provisional. The verdict is still honest (cheap), just no SMTP.
-			return smtpStageOutcome{SkipReason: reasonWarmupCap, Provisional: true}
-		}
-		if !dec.Allowed {
-			return smtpStageOutcome{SkipReason: reasonWarmupCap, Provisional: true}
+	if ok, skip := o.reserveWarmup(ctx, n, rr.IsCanary); !ok {
+		// A CANARY node at its low cap must NOT drag its sampled domain down to cheap when a healthy
+		// ACTIVE peer could serve it (the residual starvation the P4→P5 review caught). Re-route once
+		// FORCING active (recovering excluded); only degrade if active also can't serve. A non-canary
+		// warmup-cap denial has no better peer to divert to → degrade as before.
+		if rr.IsCanary {
+			rr2 := o.smtp.Registry.SMTPRoute(ctx,
+				router.Plan{Domain: domain, Provider: mxProviderOf(cheap.Signals)},
+				o.smtp.Health,
+				router.SMTPFilterConfig{MaxAuditAge: o.smtp.MaxAuditAge, Now: o.now, AllowRecovering: true, ForceActiveOnly: true},
+			)
+			if rr2.Err != nil {
+				return smtpStageOutcome{SkipReason: rr2.SkipToken, Provisional: true}
+			}
+			n = rr2.Node
+			if ok2, skip2 := o.reserveWarmup(ctx, n, false /* now a normal active route */); !ok2 {
+				return smtpStageOutcome{SkipReason: skip2, Provisional: true}
+			}
+		} else {
+			return smtpStageOutcome{SkipReason: skip, Provisional: true}
 		}
 	}
 
@@ -219,6 +227,26 @@ func (o *Orchestrator) runSMTP(ctx context.Context, normalized, domain, requestI
 func (o *Orchestrator) warmupWindow() time.Time {
 	n := o.now().UTC()
 	return time.Date(n.Year(), n.Month(), n.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+// reserveWarmup reserves one :smtp slot against node n's per-window ascending cap (§5.2). A canary
+// (recovering) node uses the LOW canary cap (§5.4); an active node uses the normal warmup cap. It
+// returns ok=true when the slot was granted (or no cap is enforced), else ok=false with the frozen
+// §8 skip token the caller degrades on. A store error fails CLOSED (no over-cap send — reputation
+// hazard). Extracted so the canary-cap-denial re-route (force-active fallback) can reuse it.
+func (o *Orchestrator) reserveWarmup(ctx context.Context, n router.Node, isCanary bool) (ok bool, skip string) {
+	cap := o.smtp.WarmupCap
+	if isCanary && o.smtp.CanaryCap > 0 {
+		cap = o.smtp.CanaryCap
+	}
+	if cap <= 0 {
+		return true, "" // warmup not enforced (a mature node); a canary always has CanaryCap>0 wired
+	}
+	dec, err := o.store.ReserveWarmupSlot(ctx, n.ID, o.warmupWindow(), cap)
+	if err != nil || !dec.Allowed {
+		return false, reasonWarmupCap
+	}
+	return true, ""
 }
 
 // sleep is the jitter sleeper (§4.2), injected via SMTPDeps.Sleep so tests don't block on real time.

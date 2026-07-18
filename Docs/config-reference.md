@@ -15,9 +15,9 @@ Regenerate on any manifest change; CI verifies this file is up to date
 |---|---|
 | secrets | 8 |
 | feature-flags | 145 |
-| dials | 96 |
+| dials | 97 |
 | other/uncategorized | 2 |
-| **total knobs** | **251** |
+| **total knobs** | **252** |
 
 > One-way doors are **not** dials: the frozen contracts (response shape, LOG, hashing,
 > vocabulary, never-fork) live in code (`control-plane/internal/{vocab,hash,verdict,store,router}`),
@@ -187,7 +187,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | `unknown` not pressured to `valid` | LOCKED — first-class unknown survives flywheel | P7 §8.4 |
 | platform "your sends train our accuracy" disclosure | surface it (OQ-P7-8), disclose-don't-hide | P7 §14, OQ-P7-8 |
 
-## Dials (96)
+## Dials (97)
 
 | knob | default / state | source |
 |---|---|---|
@@ -248,9 +248,10 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | `TM_BLOCK_RECOVER_THRESHOLD_PCT` (recovery threshold %) | 5 (asymmetric, lower) | P4 §5.4 |
 | `TM_CANARY_RECOVER_GREENS` (consecutive clean canary cycles) | 3 | P4 §5.4 |
 | `TM_CANARY_MIN_SAMPLES` (min real canary attempts before promotion) | 10 | P4 §5.4, GAP-30 |
+| `TM_CANARY_SAMPLE_N` (canary domain-sample rate) | 5 (≈1/N of distinct domains reach a recovering node even in a HEALTHY pool) | P4 §5.4, GAP-30 |
 | `TM_LIVENESS_MISSES` (M consecutive `/health` fails) | 3 | P4 §5.4 |
 | `TM_FLEET_WIDE_PCT` (cascade-brake trigger, % of active nodes) | 50 (VALIDATED 1..99 — a value ≥100 is REJECTED at startup, as it would make the fraction-brake mathematically unable to fire; finding G) | P4 §5.5, GAP-28 |
-| `TM_CANARY_WARMUP_CAP` (low re-warm cap on recovery) | 5 | P4 §5.4 (PM3) |
+| `TM_CANARY_WARMUP_CAP` (low re-warm cap on recovery) | 20 (VALIDATED ≥ `TM_CANARY_MIN_SAMPLES` — a smaller cap makes the canary unable to accrue enough samples to promote → stuck-forever; finding C) | P4 §5.4 (PM3), GAP-30 |
 | `TM_POOL_ELIGIBLE_FLOOR` (pool-eligible-low alert floor) | 1 | P4 §8.2 |
 | `TM_RATE_SATURATION_COUNT` (rate-saturation alert threshold) | 50 | P4 §8.2 |
 | lease TTL | LOCKED: must exceed brain's max SMTP client deadline (GAP-37) | P5 §5.2, GAP-37 |

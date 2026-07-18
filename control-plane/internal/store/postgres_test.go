@@ -539,6 +539,80 @@ func TestPGReserveRate_ConcurrentColdStartNoUniqueViolation(t *testing.T) {
 	}
 }
 
+// MetricRowsSince is the observability read (§8) — declared + interface-wired but previously
+// untested at the store layer (named as the one coverage gap in the P4→P5 readiness pass). This
+// exercises the real SQL: the window filter, newest-first ordering, the signals JSON round-trip, and
+// the +1 truncation detection. Read-only, off the control path (control uses BlockRateByVerifierIP).
+func TestPGMetricRowsSince_WindowOrderingAndTruncation(t *testing.T) {
+	pg := testPG(t)
+	ctx := context.Background()
+	// A unique verifier_ip per run so the window read sees only this run's rows (the DB persists).
+	ns := time.Now().UnixNano()
+	ip := fmt.Sprintf("10.%d.%d.%d", (ns>>16)&0xff, (ns>>8)&0xff, ns&0xff)
+	base := time.Now().UTC()
+	mk := func(reason string, ago time.Duration, sig map[string]any) VerificationRow {
+		return VerificationRow{
+			ID: must(idgen.NewV7String(base)), RequestID: must(idgen.NewV7String(base)),
+			CheckedAt: base.Add(-ago), CreatedAt: base.Add(-ago), Status: "unknown", Reason: reason,
+			Confidence: 10, Recommendation: "review", Flags: map[string]bool{}, Signals: sig,
+			PolicyKey: "cold-email", PolicyVersion: 1, APIVersion: "v1",
+			ConfigFingerprint: "cfg_sha256:test", VerifierIP: ip, LatencyMS: 12,
+		}
+	}
+	// 1 old (2h ago, outside a 1h window), 2 fresh — one carrying a signals value.
+	for _, r := range []VerificationRow{
+		mk("smtp_timeout", 2*time.Hour, nil),
+		mk("smtp_blocked", 5*time.Minute, map[string]any{"smtp_skipped_reason": "rate_limited"}),
+		mk("accepted", 1*time.Minute, nil),
+	} {
+		if err := pg.AppendVerification(ctx, r, nil); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	// Window = last hour → excludes the 2h-old row.
+	rows, truncated, err := pg.MetricRowsSince(ctx, base.Add(-time.Hour), 100)
+	if err != nil {
+		t.Fatalf("MetricRowsSince: %v", err)
+	}
+	mine := 0
+	var signalsSeen bool
+	var lastTS time.Time
+	for _, r := range rows {
+		if r.VerifierIP != ip {
+			continue // other runs' rows share the table
+		}
+		mine++
+		if mine > 1 && r.CheckedAt.After(lastTS) {
+			t.Fatalf("rows must be newest-first (DESC); got %v after %v", r.CheckedAt, lastTS)
+		}
+		lastTS = r.CheckedAt
+		if sr, _ := r.Signals["smtp_skipped_reason"].(string); sr == "rate_limited" {
+			signalsSeen = true
+		}
+	}
+	if mine != 2 {
+		t.Fatalf("window (last hour) must exclude the 2h-old row → 2 of my rows, got %d", mine)
+	}
+	if !signalsSeen {
+		t.Fatalf("the signals JSON (smtp_skipped_reason=rate_limited) must round-trip through MetricRowsSince")
+	}
+	// Truncation detection (POSITIVE, shared-table-safe): a limit of 1 over ≥2 in-window rows MUST
+	// flag truncated=true. NOTE: `verifications` is shared across test runs, so MetricRowsSince (a
+	// WHOLE-TABLE window read, not IP-scoped) sees prior runs' recent rows too — the earlier
+	// `truncated` value under a 100-limit is therefore NOT deterministically false and is not asserted
+	// (that trap is why the block-rate test uses a unique IP; MetricRowsSince can't be IP-scoped). The
+	// positive check below is deterministic: with my 2 fresh rows alone the window already has ≥2, so a
+	// limit of 1 is always a truncation.
+	_ = truncated
+	_, trunc2, err := pg.MetricRowsSince(ctx, base.Add(-time.Hour), 1)
+	if err != nil {
+		t.Fatalf("MetricRowsSince(limit=1): %v", err)
+	}
+	if !trunc2 {
+		t.Fatalf("a limit below the in-window count must report truncated=true (no silent cap)")
+	}
+}
+
 func must(s string, err error) string {
 	if err != nil {
 		panic(err)

@@ -17,6 +17,35 @@ func rateParams(cap, refill float64) RateParams {
 	return RateParams{Capacity: cap, RefillPerSec: refill}
 }
 
+// applyRefill is the SHARED token-bucket math (used by both Mem and PG). Clock skew — a `now` that is
+// EARLIER than the stored last_refill_at (a backwards system clock, NTP step, or a clock difference on
+// a restart) — must contribute ZERO refill, never NEGATIVE (which would silently DRAIN the bucket) and
+// never grant free tokens. This is a Task-3-named durability property; the guard is `elapsed < 0 → 0`.
+func TestApplyRefill_ClockSkewNeverDrainsOrGrants(t *testing.T) {
+	p := RateParams{Capacity: 5, RefillPerSec: 1}
+	last := rt0
+	// (1) now BEFORE last (skew backwards) with a partial bucket: tokens must be UNCHANGED, not reduced.
+	got, ok := applyRefill(2.0, last, p, last.Add(-10*time.Minute))
+	if got != 2.0 {
+		t.Fatalf("backwards clock must not change the token count: want 2.0, got %v", got)
+	}
+	if !ok {
+		t.Fatalf("2 tokens ≥ 1 must still be grantable under skew")
+	}
+	// (2) skew backwards on an EMPTY bucket must not manufacture a token.
+	if _, ok := applyRefill(0.0, last, p, last.Add(-time.Hour)); ok {
+		t.Fatalf("a backwards clock must NOT grant a token on an empty bucket (no free tokens)")
+	}
+	// (3) exactly-equal now (zero elapsed) is also zero refill.
+	if got, _ := applyRefill(3.0, last, p, last); got != 3.0 {
+		t.Fatalf("zero elapsed must be zero refill: want 3.0, got %v", got)
+	}
+	// (4) sanity: forward time DOES refill (the guard doesn't over-clamp positive elapsed).
+	if got, _ := applyRefill(0.0, last, p, last.Add(3*time.Second)); got != 3.0 {
+		t.Fatalf("3s forward at 1 tok/s must refill to 3.0, got %v", got)
+	}
+}
+
 // A fresh bucket starts FULL: capacity=2 → two grants, then deny (empty). No refill in between.
 func TestMemReserveRateToken_BurstThenDeny(t *testing.T) {
 	m := NewMem(nil)

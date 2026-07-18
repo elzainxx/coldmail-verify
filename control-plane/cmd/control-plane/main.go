@@ -256,10 +256,11 @@ func buildSMTP(ctx, appCtx context.Context, cfg config.Config, sec *secrets.Secr
 		ClientDeadline: cfg.SMTPClientDeadline(),
 		// Phase 3 (§4.4/§4.5/§5.2): the eligibility gate reads health from the store; MaxAuditAge is
 		// the staleness window; WarmupCap is the per-node/per-day ascending :smtp ceiling.
-		Health:      pg,
-		MaxAuditAge: cfg.AuditMaxAge(),
-		WarmupCap:   cfg.Dials.WarmupDailyCap,
-		CanaryCap:   cfg.Dials.CanaryWarmupCap, // §5.4: the LOW cap a recovering canary node is metered by
+		Health:        pg,
+		MaxAuditAge:   cfg.AuditMaxAge(),
+		WarmupCap:     cfg.Dials.WarmupDailyCap,
+		CanaryCap:     cfg.Dials.CanaryWarmupCap, // §5.4: the LOW cap a recovering canary node is metered by
+		CanarySampleN: cfg.Dials.CanarySampleN,   // §5.4/GAP-30: canary domain-sample rate (real samples in a healthy pool)
 		// Phase 4 (§4): the per-provider rate limiter + a real jitter sleeper.
 		Limiter: limiter,
 		Sleep:   time.Sleep,

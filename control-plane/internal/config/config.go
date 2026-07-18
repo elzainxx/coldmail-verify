@@ -145,6 +145,7 @@ type Dials struct {
 	BlockRecoverThreshPct  int // §5.4 — canary block-rate ≤ this % (sustained) → recover (asymmetric, lower)
 	CanaryRecoverGreens    int // §5.4 — consecutive clean canary cycles before recovering→active
 	CanaryMinSamples       int // §5.4/GAP-30 — MIN real canary attempts before a block-rate recovery may promote (no zero-sample promotion — the Phase-4 review finding)
+	CanarySampleN          int // §5.4/GAP-30 — canary domain-sample rate: ≈1/N of distinct domains route to a recovering node even in a healthy pool, so the canary accrues REAL samples (else stuck-forever); the low canary cap bounds total volume
 	LivenessMisses         int // §5.4 — M consecutive liveness failures → quarantine (box down/wedged)
 	FleetWidePct           int // §5.5/GAP-28 — if this % of ACTIVE nodes trip at once → BRAKE (alert, don't quarantine)
 	CanaryWarmupCap        int // §5.4/PM3 — the low warmup cap a recovered node re-warms from
@@ -319,6 +320,7 @@ func Defaults() Config {
 			BlockRecoverThreshPct:  5,    // §5.4 recover at ≤5% (asymmetric, lower)
 			CanaryRecoverGreens:    3,    // §5.4 consecutive clean canary cycles
 			CanaryMinSamples:       10,   // §5.4/GAP-30 real canary attempts before promotion (no zero-sample)
+			CanarySampleN:          5,    // §5.4/GAP-30 ≈1/5 of domains canary-sampled in a healthy pool (so a canary accrues real samples); low canary cap bounds total volume
 			LivenessMisses:         3,    // §5.4 M consecutive liveness misses
 			FleetWidePct:           50,   // §5.5/GAP-28 majority of active nodes = systemic → brake
 			// CanaryWarmupCap is the per-window meter for a recovering node's canary trickle. It MUST be
@@ -455,6 +457,7 @@ func Load(getenv func(string) string) (Config, error) {
 		{"TM_BLOCK_RECOVER_THRESHOLD_PCT", &c.Dials.BlockRecoverThreshPct, false},
 		{"TM_CANARY_RECOVER_GREENS", &c.Dials.CanaryRecoverGreens, false},
 		{"TM_CANARY_MIN_SAMPLES", &c.Dials.CanaryMinSamples, false},
+		{"TM_CANARY_SAMPLE_N", &c.Dials.CanarySampleN, false},
 		{"TM_LIVENESS_MISSES", &c.Dials.LivenessMisses, false},
 		{"TM_FLEET_WIDE_PCT", &c.Dials.FleetWidePct, false},
 		{"TM_CANARY_WARMUP_CAP", &c.Dials.CanaryWarmupCap, false},
