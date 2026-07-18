@@ -44,6 +44,13 @@ func OpenPG(ctx context.Context, dsn string) (*PG, error) {
 func (p *PG) Ping(ctx context.Context) error { return p.pool.Ping(ctx) }
 func (p *PG) Close()                         { p.pool.Close() }
 
+// Pool exposes the underlying pgx pool for INTEGRATION TESTS + break-glass admin tooling ONLY
+// (e.g. an external-package E2E test that seeds/inspects/cleans rows the append-only interface
+// deliberately can't). It is NOT part of the Store interface and MUST NOT be used on the request
+// path — the append-only Door-2 discipline lives in the interface shape + the DB grants, both of
+// which still apply to whatever this pool runs (cp_runtime cannot UPDATE/DELETE the LOG regardless).
+func (p *PG) Pool() *pgxpool.Pool { return p.pool }
+
 // nullBytes / nullStr map Go zero values to SQL NULL (no empty-string sentinels — §3.2.7).
 func nullBytes(b []byte) any {
 	if len(b) == 0 {
@@ -826,6 +833,9 @@ func (p *PG) ListJobResults(ctx context.Context, jobID, cursor string, limit int
 	if limit <= 0 {
 		limit = 100
 	}
+	// The cursor is the last-seen work_item.id ("" on the first page). It's compared against a uuid
+	// column, so an empty cursor must NOT be cast to uuid (Postgres rejects ''::uuid) — the
+	// ($2='' OR w.id > $2::uuid) guard skips the comparison on the first page.
 	const q = `
 SELECT w.id, w.email_hash,
        v.id, v.status, v.reason, v.confidence, v.recommendation, v.flags, v.signals,
@@ -833,7 +843,7 @@ SELECT w.id, w.email_hash,
 FROM work_items w
 JOIN verifications v ON v.id = w.verification_id
 WHERE w.job_id=$1 AND w.status IN ('settled','dead') AND w.verification_id IS NOT NULL
-  AND w.id > $2
+  AND ($2 = '' OR w.id > $2::uuid)
 ORDER BY w.id
 LIMIT $3`
 	rows, err := p.pool.Query(ctx, q, jobID, cursor, limit+1) // +1 to compute nextCursor
