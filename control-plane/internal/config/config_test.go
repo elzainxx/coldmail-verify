@@ -117,6 +117,34 @@ func TestLoad_P4WatcherDialsDefaultAndOverride(t *testing.T) {
 	}
 }
 
+// Round-2 review finding D (GAP-28): TM_FLEET_WIDE_PCT ≥ 100 makes the fraction-brake mathematically
+// unable to fire — it must be rejected at startup, never silently disable the brake.
+func TestLoad_FleetWidePctUpperBound_FindingD(t *testing.T) {
+	for _, v := range []string{"100", "150", "250"} {
+		if _, err := Load(func(k string) string {
+			if k == "TM_FLEET_WIDE_PCT" {
+				return v
+			}
+			return ""
+		}); err == nil {
+			t.Fatalf("TM_FLEET_WIDE_PCT=%s must be rejected (≥100 disables the GAP-28 brake), got nil error", v)
+		}
+	}
+	// A sane majority is accepted.
+	if _, err := Load(func(k string) string {
+		if k == "TM_FLEET_WIDE_PCT" {
+			return "60"
+		}
+		return ""
+	}); err != nil {
+		t.Fatalf("TM_FLEET_WIDE_PCT=60 must be accepted, got %v", err)
+	}
+	// The default (50) validates.
+	if err := Defaults().Validate(); err != nil {
+		t.Fatalf("the default config must validate, got %v", err)
+	}
+}
+
 // A cadence of 0 is a valid override (one-shot, no loop); a negative/invalid dial is rejected.
 func TestLoad_P4DialValidation(t *testing.T) {
 	if _, err := Load(func(k string) string {

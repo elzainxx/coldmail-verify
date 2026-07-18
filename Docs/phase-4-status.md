@@ -195,11 +195,23 @@ A bounded **round-2** review then re-checked the two fixes + the three unfinishe
   PG-gated `TestPGReserveRate_ConcurrentColdStartNoUniqueViolation`.
 - **Finding F (refuted):** a claim that `CanaryCap<=0` could bypass the meter — correctly refuted, the
   config layer rejects a zero/negative cap.
+- **Finding G (high — post-commit, GAP-28):** the fleet-brake fraction is `TM_FLEET_WIDE_PCT/100`, and
+  the loader only rejected 0/negative — a value **≥100** yields a fraction ≥1.0, so the systemic-spike
+  test (`elevated ≥ fraction × active`) can **never** fire, silently disabling "the single most
+  important safety line" with no startup error. (The active-floor backstop still bounds the worst case,
+  but a dead fraction-brake + no `fleet_wide` alert is exactly the auto-heal→auto-outage hole.) **Fixed**:
+  a `Validate()` guard requiring `fleet_wide_pct ∈ 1..99` (rejects the silent-disable at startup). Locked
+  by `TestLoad_FleetWidePctUpperBound_FindingD`. This one was surfaced by the round-1 fleet-brake finder
+  (it also flagged the CRITICAL staggered-cascade = Finding A) but was **not** among the five fixed
+  pre-commit — it is the honest post-commit follow-up (the finder's other high-severity items on
+  correlated-audit-red and the last-node edge are covered by the active-floor backstop, which holds
+  regardless of the fraction dial).
 
 Two dimensions (additivity/doors, and part of sticky routing) returned clean; the remaining surfaces
 are covered by the built-in behavioral + PG-gated tests (durable-budget-survives-restart, PB1
-exclusions, HRW anti-multiplication/minimal-reshuffle). **Net: the review found 5 real defects across
-two rounds — 2 critical, 3 medium — all fixed and locked with named regression tests before commit.**
+exclusions, HRW anti-multiplication/minimal-reshuffle). **Net: the review found 6 real defects (2
+critical, 4 medium/high) — 5 fixed pre-commit, Finding G fixed in the follow-up — all locked with named
+regression tests.**
 
 ## What Phase 4 does NOT build (correct scope — SEAM → later)
 

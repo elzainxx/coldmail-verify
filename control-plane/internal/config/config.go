@@ -516,6 +516,17 @@ func (c Config) Validate() error {
 		return fmt.Errorf("config: canary_warmup_cap (%d) must be >= canary_min_samples (%d) or a recovering node can never accrue enough samples to promote (GAP-30 stuck-forever)",
 			c.Dials.CanaryWarmupCap, c.Dials.CanaryMinSamples)
 	}
+	// §5.5/GAP-28 (round-2 review finding D): the fleet-wide brake fraction is FleetWidePct/100, and
+	// the systemic-spike test is `elevated >= fraction × active`. A percentage ≥ 100 yields a fraction
+	// ≥ 1.0, so the test needs EVERY active node elevated in one cycle — with staggered onset that
+	// essentially never happens, silently DISABLING "the single most important safety line" with no
+	// startup error. The loader already rejects 0/negative; here we bound the top. Require 1..99 so the
+	// brake can always fire on a genuine majority. (The active-floor backstop still bounds the worst
+	// case, but a dead fraction-brake + no fleet_wide alert is exactly the auto-heal→auto-outage hole.)
+	if c.Dials.FleetWidePct < 1 || c.Dials.FleetWidePct > 99 {
+		return fmt.Errorf("config: fleet_wide_pct (%d) must be in 1..99 — a value ≥100 makes the fleet-wide cascade brake (GAP-28) mathematically unable to fire, silently disabling it",
+			c.Dials.FleetWidePct)
+	}
 	return nil
 }
 

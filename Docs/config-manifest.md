@@ -277,7 +277,7 @@ It does not resolve open questions or set UNSET values — those are owner decis
 | **`TM_CANARY_RECOVER_GREENS`** (consecutive clean canary cycles) | dial | 3 | too low → flapping recovery | pool | P4 §5.4 |
 | **`TM_CANARY_MIN_SAMPLES`** (min real canary attempts before promotion) | dial | 10 | zero → promote a recovering node on ZERO evidence (re-warm a still-blocklisted IP); the Phase-4 review finding | pool / reputation | P4 §5.4, GAP-30 |
 | **`TM_LIVENESS_MISSES`** (M consecutive `/health` fails) | dial | 3 | too low → quarantine on a transient blip | single box | P4 §5.4 |
-| **`TM_FLEET_WIDE_PCT`** (cascade-brake trigger, % of active nodes) | dial | 50 (0 ⇒ safe default in code — brake never disabled) | too high → brake never fires (auto-heal→auto-outage); too low → over-holds | pool / brain-wide | P4 §5.5, GAP-28 |
+| **`TM_FLEET_WIDE_PCT`** (cascade-brake trigger, % of active nodes) | dial | 50 (VALIDATED 1..99 — a value ≥100 is REJECTED at startup, as it would make the fraction-brake mathematically unable to fire; finding G) | too high → brake never fires (auto-heal→auto-outage) — now a startup error; too low → over-holds | pool / brain-wide | P4 §5.5, GAP-28 |
 | **`TM_CANARY_WARMUP_CAP`** (low re-warm cap on recovery) | dial | 5 | high → recovered node re-burns at full volume | single box / reputation | P4 §5.4 (PM3) |
 | **`TM_POOL_ELIGIBLE_FLOOR`** (pool-eligible-low alert floor) | dial | 1 | — | observability | P4 §8.2 |
 | **`TM_RATE_SATURATION_COUNT`** (rate-saturation alert threshold) | dial | 50 | — | observability | P4 §8.2 |

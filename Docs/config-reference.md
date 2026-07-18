@@ -249,7 +249,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | `TM_CANARY_RECOVER_GREENS` (consecutive clean canary cycles) | 3 | P4 §5.4 |
 | `TM_CANARY_MIN_SAMPLES` (min real canary attempts before promotion) | 10 | P4 §5.4, GAP-30 |
 | `TM_LIVENESS_MISSES` (M consecutive `/health` fails) | 3 | P4 §5.4 |
-| `TM_FLEET_WIDE_PCT` (cascade-brake trigger, % of active nodes) | 50 (0 ⇒ safe default in code — brake never disabled) | P4 §5.5, GAP-28 |
+| `TM_FLEET_WIDE_PCT` (cascade-brake trigger, % of active nodes) | 50 (VALIDATED 1..99 — a value ≥100 is REJECTED at startup, as it would make the fraction-brake mathematically unable to fire; finding G) | P4 §5.5, GAP-28 |
 | `TM_CANARY_WARMUP_CAP` (low re-warm cap on recovery) | 5 | P4 §5.4 (PM3) |
 | `TM_POOL_ELIGIBLE_FLOOR` (pool-eligible-low alert floor) | 1 | P4 §8.2 |
 | `TM_RATE_SATURATION_COUNT` (rate-saturation alert threshold) | 50 | P4 §8.2 |
