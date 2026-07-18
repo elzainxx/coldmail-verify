@@ -93,6 +93,16 @@ touching a one-way door or elevating/gating a cross-phase decision.
 | [`adr/ADR-0010-phase-4-pool-additive-surface.md`](adr/ADR-0010-phase-4-pool-additive-surface.md) | The Phase-4 additive surface: one `signals` value (`rate_limited`), one table (`rate_budgets`), the `recovering` node-lifecycle value (NOT verdict vocab); block-rate quarantine (A1) defaults recommend-only (DR-2); the fleet-wide cascade brake (GAP-28) + canary recovery (GAP-30) built + fail-verified — additive against all five doors. |
 | [`../control-plane/migrations/0008_rate_budgets_recovering.sql`](../control-plane/migrations/0008_rate_budgets_recovering.sql) | `rate_budgets` (durable per-(node×provider) token-bucket spend, restart-safe, §4.4) + the `recovering` `nodes.status` value (§5.4/GAP-30). `cp_runtime` SELECT+INSERT+UPDATE, DELETE revoked (counter posture, proven live). |
 
+## Phase-5 artifacts (the queue — local build complete)
+
+| Doc | What it is |
+|---|---|
+| [`phase-5-status.md`](phase-5-status.md) | Live scorecard of the Phase-5 local build: the durable `work_items` queue, greylist retry/backoff, the **GAP-37 CAS idempotency heart (fail-verified on Mem AND real Postgres)**, group-by-domain pacing, the bulk job lifecycle, the two gates-first (DR-4 encryption + PN-13 per-caller auth), and the PENDING-REAL-BOX/rollout ledger (the un-mockable greylist round-trip, GAP-35). |
+| [`phase-5-readiness-assessment.md`](phase-5-readiness-assessment.md) | The P4→P5 readiness pass: Phase 4 re-verified closed, the fleet brake re-verified on all four properties, and Phase 5 mapped fully local-buildable (no VPS) with DR-4 + PN-13 as the two gates to line up first. |
+| [`adr/ADR-0011-phase-5-queue-additive-surface.md`](adr/ADR-0011-phase-5-queue-additive-surface.md) | The Phase-5 additive surface + the two door-touching gate resolutions: **DR-4 = separate-key at-rest encryption** of the queue plaintext (key ≠ pepper); **PN-13 = per-caller keys + rotation**; the **GAP-37** lease-TTL + compare-and-set exactly-once settlement — additive against all five doors, zero new verdict vocab. |
+| [`../control-plane/migrations/0009_work_items_jobs.sql`](../control-plane/migrations/0009_work_items_jobs.sql) | `work_items` (durable queue; UNIQUE idempotency_key; `addr_ciphertext` encrypted plaintext; lease `locked_by`/`locked_at`; `verification_id` FK-less) + `jobs` (counts/status/opaque caller_ref) + `work_item_attempts` (append-only transcripts). Partial indexes for the group-by-domain dequeue, the GAP-38 completion query, and the lease-reclaim sweep. cp_runtime SELECT+INSERT+UPDATE, DELETE cp_admin. |
+| [`../control-plane/migrations/0010_api_callers.sql`](../control-plane/migrations/0010_api_callers.sql) | `api_callers` (PN-13): per-caller key stored `key_sha256` HASHED, validity window `[not_before, not_after)` for zero-downtime rotation. cp_runtime SELECT-only (hot auth read); issuance/rotation cp_admin (DR-3 admin-audited). |
+
 ## How the living-docs system stays honest (enforced, not asked)
 
 - **Behavior change ⇒ doc/ADR change**, in the same commit — [`../scripts/check-docs-updated.sh`](../scripts/check-docs-updated.sh) fails CI otherwise.

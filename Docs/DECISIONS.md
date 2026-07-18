@@ -184,6 +184,24 @@ intact, CI-asserted). ADR-0008 is a refuse-to-persist-plaintext tightening that 
 full email is now genuinely never persisted in a durable store. No frozen door is reopened; the §5
 parked sub-decisions remain parked. This is the only re-decision the owner authorized in this pass.
 
+### 6.3 Phase-5 gate resolutions (owner ruling 2026-07-18, Phase-5 build)
+
+The Phase-5 build had to resolve the two P5-blocking phase-gates whose *mechanism* the earlier
+passes deliberately parked ("P5-time"). On **2026-07-18** the owner ruled on both; recorded here so
+the resolution is discoverable in one place. Both are captured door-side in **[ADR-0011](adr/ADR-0011-phase-5-queue-additive-surface.md)**.
+
+| Item | Touches a door? | Ruling (2026-07-18) | Recorded in |
+|---|---|---|---|
+| **DR-4 mechanism** (§5 parked: "backup-protection mechanism — P5-time") | **Door 3** — affirms + makes the bounded exception backup-aware | **SEPARATE-KEY at-rest encryption** of `work_items.addr_ciphertext` (AES-256-GCM, key ≠ pepper, `TM_QUEUE_ADDR_KEY`). Chosen over snapshot-exclusion / short-retention as the only **locally fail-verifiable** option (dump-the-row → ciphertext-only). Bounded two ways now: encrypted at rest AND purged in the settlement tx. | [ADR-0011](adr/ADR-0011-phase-5-queue-additive-surface.md); [ADR-0002](adr/ADR-0002-queue-plaintext-backup-scope.md); pre-takeoff §3.7 (ticked) |
+| **PN-13 / F-20** (per-caller keys + rotation before P5 bulk) | Auth-strength behind the **same** contract — no Door-1/vocab change | **Per-caller keys stored HASHED** (`api_callers`, migration 0010) + rotation via overlapping validity windows; bulk REQUIRES a per-caller key, sync keeps the legacy static token during transition. `caller_id` is key-derived (trusted), distinct from the opaque body-supplied `caller_ref` (GAP-36). | [ADR-0011](adr/ADR-0011-phase-5-queue-additive-surface.md); pre-takeoff §3.8 (ticked) |
+
+**Door standing after these rulings:** unchanged. DR-4 keeps Door 3's "raw email never persisted"
+verbatim — the one bounded exception is now encrypted at rest AND transactionally purged (the raw
+address is never in a durable store in clear). PN-13 changes auth *strength* behind the *same*
+`/v1/verify(/bulk)` contract (Door 1/4 untouched — auth is header-only, `caller_id` key-derived).
+Phase 5 mints **zero** new verdict-vocab values (Door 4; `vocab.go` byte-unchanged) and adds no
+box-side behavior (Door 5). The GAP-37 lease-CAS invariant is now built ([[truemail-lease-cas-exactly-once-settlement]]). The §5 parked sub-decisions unrelated to P5 remain parked.
+
 ---
 
 *This log records acceptances, routes, and (Phase 0) an owner-OQ pointer register; it builds nothing
