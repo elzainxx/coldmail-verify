@@ -9,12 +9,18 @@
 .env
 .env.*
 !*.example.env
-# A secrets STORE directory (real key/pepper material) — anchored so it does NOT match the Go
-# SOURCE package control-plane/internal/secrets/ (which is code, never secret material, and MUST
-# be tracked or a fresh clone won't compile). The unanchored `secrets/` previously swallowed that
-# package silently. Real secrets are still blocked by *.env / *.pem / *.key / *.pepper below.
-/secrets/
-/config/secrets/
+# Secrets STORE directories (real key/pepper material) — a BROAD `**/secrets/` guard (defense in
+# depth: catches extensionless / .json creds at ANY depth, which the *.pem/*.key/… rules below do
+# NOT). The Go SOURCE package control-plane/internal/secrets/ is code (never secret material) and
+# MUST be tracked or a fresh clone won't compile — so we re-include ONLY its *.go files: the dir is
+# un-ignored so git descends into it, its contents are re-ignored, then only *.go is un-ignored.
+# Net: a stray credential (service_account.json, a bare `token`) dropped in that package STAYS
+# blocked; only source compiles into the repo. (The original unanchored `secrets/` swallowed the
+# whole package silently — a fresh clone wouldn't build.)
+**/secrets/
+!/control-plane/internal/secrets/
+/control-plane/internal/secrets/*
+!/control-plane/internal/secrets/*.go
 *.pem
 *.key
 *.pepper
