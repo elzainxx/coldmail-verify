@@ -15,14 +15,18 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/mnfi/codmailling/control-plane/internal/config"
 	"github.com/mnfi/codmailling/control-plane/internal/hash"
 	"github.com/mnfi/codmailling/control-plane/internal/orchestrator"
 	"github.com/mnfi/codmailling/control-plane/internal/policy"
+	"github.com/mnfi/codmailling/control-plane/internal/queue"
 	"github.com/mnfi/codmailling/control-plane/internal/secrets"
+	"github.com/mnfi/codmailling/control-plane/internal/store"
 	"github.com/mnfi/codmailling/control-plane/internal/verdict"
+	"github.com/mnfi/codmailling/control-plane/internal/vocab"
 )
 
 // Verifier is the request-lifecycle dependency the front door delegates to (the orchestrator).
@@ -38,6 +42,21 @@ type CallerAuth interface {
 	LookupCaller(ctx context.Context, keySHA256 []byte, now time.Time) (callerID string, ok bool, err error)
 }
 
+// BulkSubmitter enqueues a bulk submission and returns a job handle + counts (§7.1, satisfied by
+// *queue.Enqueuer). callerRef is the opaque platform correlation string (§7.6). Injected so tests
+// use a fake without a real queue/DB.
+type BulkSubmitter interface {
+	SubmitBulk(ctx context.Context, addresses []string, policyKey string, policyVersion int, callerRef string) (queue.BulkResult, error)
+}
+
+// JobReader reads job progress + paginated results (§7.1, satisfied by store.Store). The results
+// are byte-identical /v1/verify verdict objects (Door 1).
+type JobReader interface {
+	GetJob(ctx context.Context, jobID string) (store.JobRow, bool, error)
+	JobCompletion(ctx context.Context, jobID string) (complete bool, total, settled int, err error)
+	ListJobResults(ctx context.Context, jobID, cursor string, limit int) ([]store.WorkItemResult, string, error)
+}
+
 // callerIDKey is the context key under which an authenticated caller_id is stashed (never PII —
 // GAP-36; the platform holds the user↔caller_id map). Distinct type so it can't collide.
 type callerIDKey struct{}
@@ -46,9 +65,11 @@ type callerIDKey struct{}
 type Server struct {
 	cfg        config.Config
 	secrets    *secrets.Secrets
-	hasher     *hash.Hasher // may be nil if no pepper loaded (readiness reports it)
-	verifier   Verifier     // nil until the store+orchestrator are wired (readiness reports it)
-	callerAuth CallerAuth   // nil => per-caller auth not wired (legacy static token governs)
+	hasher     *hash.Hasher  // may be nil if no pepper loaded (readiness reports it)
+	verifier   Verifier      // nil until the store+orchestrator are wired (readiness reports it)
+	callerAuth CallerAuth    // nil => per-caller auth not wired (legacy static token governs)
+	bulk       BulkSubmitter // nil => bulk endpoint unavailable (returns 503)
+	jobs       JobReader     // nil => job endpoints unavailable
 	defPolicy  *policy.Definition
 	now        func() time.Time
 }
@@ -74,10 +95,24 @@ func (s *Server) WithCallerAuth(c CallerAuth) *Server {
 	return s
 }
 
-// Handler builds the mux. Kept explicit (stdlib) — no framework dependency at Phase 0.
+// WithBulk attaches the P5 bulk submitter + job reader (§7). The bulk routes are served only when
+// both are wired AND per-caller auth is present (PN-13 gates the bulk-PII surface). A nil pair
+// leaves the bulk endpoints returning 503 (honest not-ready), never a fabricated handle.
+func (s *Server) WithBulk(b BulkSubmitter, j JobReader) *Server {
+	s.bulk = b
+	s.jobs = j
+	return s
+}
+
+// Handler builds the mux. Kept explicit (stdlib) — no framework dependency.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/verify", s.handleVerify)
+	// P5 bulk (§7): the async submission → handle → progress → results lifecycle. These are the
+	// bulk-PII surface — auth REQUIRES a per-caller key (PN-13); the legacy static token is rejected.
+	mux.HandleFunc("POST /v1/verify/bulk", s.handleBulkSubmit)
+	mux.HandleFunc("GET /v1/jobs/{id}", s.handleJobStatus)
+	mux.HandleFunc("GET /v1/jobs/{id}/results", s.handleJobResults)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	return mux
@@ -142,6 +177,164 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// bulkRequest is the /v1/verify/bulk body. addresses is the work list; policy names the governing
+// policy (default when empty); caller_ref is an OPAQUE correlation string the brain echoes but
+// never interprets (§7.6/GAP-36 — NOT a user id; the platform maps its users↔caller_ref). There is
+// deliberately NO CSV, filename, credits, or per-row field here (the two-job boundary).
+type bulkRequest struct {
+	Addresses []string `json:"addresses"`
+	Policy    string   `json:"policy,omitempty"`
+	CallerRef string   `json:"caller_ref,omitempty"`
+}
+
+// maxBulkAddresses bounds one submission (§7.5 submission backpressure) so an unbounded upload
+// can't exhaust the brain/DB. Over-limit → 413 with a clear message, never a silent truncation.
+const maxBulkAddresses = 100_000
+
+// handleBulkSubmit is POST /v1/verify/bulk (§7.1): authenticate with a PER-CALLER key (PN-13 —
+// this is the bulk-PII surface; the legacy static token is rejected here), enqueue the work, and
+// return 202 + a job handle IMMEDIATELY (no inline verdicts, no SMTP — the drainer runs it later
+// through the identical P4 gates). The verdict shape is unchanged (Door 1); this is a NEW sibling
+// endpoint, not a change to /v1/verify.
+func (s *Server) handleBulkSubmit(w http.ResponseWriter, r *http.Request) {
+	// PN-13: the bulk surface REQUIRES a per-caller key (requirePerCaller=true).
+	callerID, ok := s.authenticate(r, true)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	if s.cfg.KillSwitch.FrontDoor == config.FrontDoorReject {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "service paused"})
+		return
+	}
+	if s.bulk == nil || s.defPolicy == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "not ready"})
+		return
+	}
+	// Bound the body (a 100k-address list of ~small strings; generous cap, still bounded).
+	var req bulkRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	if len(req.Addresses) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "addresses is required and must be non-empty"})
+		return
+	}
+	if len(req.Addresses) > maxBulkAddresses {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
+			"error": "too many addresses", "max": maxBulkAddresses, "got": len(req.Addresses),
+		})
+		return
+	}
+	if req.Policy != "" && req.Policy != s.defPolicy.Key {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown policy"})
+		return
+	}
+	_ = callerID // authenticated principal; rate-limiting/attribution by caller_id is a later dial
+
+	res, err := s.bulk.SubmitBulk(r.Context(), req.Addresses, s.defPolicy.Key, s.defPolicy.Version, req.CallerRef)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "bulk submit failed"})
+		return
+	}
+	// 202 Accepted + the handle. counts.total is the accepted (normalizable) set; malformed inputs
+	// are reported, not silently dropped (§7.6 boundary — the platform decides how to present them).
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"job_id": res.JobID,
+		"status": "accepted",
+		"counts": map[string]int{
+			"total": res.Total, "enqueued": res.Enqueued, "duplicate": res.Duplicate, "malformed": res.Malformed,
+		},
+	})
+}
+
+// handleJobStatus is GET /v1/jobs/{id} (§7.1): coarse brain-side progress (counts + status),
+// NOT a live per-row feed (that's the platform's job, §7.6). Completion is judged AUTHORITATIVELY
+// (NOT EXISTS a non-terminal item, GAP-38), never the denormalized counter.
+func (s *Server) handleJobStatus(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authenticate(r, true); !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	if s.jobs == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "not ready"})
+		return
+	}
+	jobID := r.PathValue("id")
+	job, known, err := s.jobs.GetJob(r.Context(), jobID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "job read failed"})
+		return
+	}
+	if !known {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
+		return
+	}
+	complete, total, settled, err := s.jobs.JobCompletion(r.Context(), jobID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "job status failed"})
+		return
+	}
+	status := job.Status
+	if complete && status != "complete" && status != "complete_with_unknowns" {
+		status = "complete" // authoritative completion overrides a stale stored 'running'
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"job_id":    jobID,
+		"status":    status,
+		"complete":  complete,
+		"caller_ref": job.CallerRef, // echoed opaque (§7.6)
+		"counts":    map[string]int{"total": total, "settled": settled, "pending": total - settled},
+	})
+}
+
+// handleJobResults is GET /v1/jobs/{id}/results?cursor=…&limit=… (§7.1): the settled verdicts,
+// cursor-paginated, each the BYTE-IDENTICAL /v1/verify verdict object (Door 1 — a consumer that
+// parses a sync verdict parses a bulk result unchanged, §7.4).
+func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authenticate(r, true); !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	if s.jobs == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "not ready"})
+		return
+	}
+	jobID := r.PathValue("id")
+	if _, known, err := s.jobs.GetJob(r.Context(), jobID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "job read failed"})
+		return
+	} else if !known {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
+		return
+	}
+	cursor := r.URL.Query().Get("cursor")
+	limit := 100
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 1000 {
+			limit = n
+		}
+	}
+	rows, next, err := s.jobs.ListJobResults(r.Context(), jobID, cursor, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "job results failed"})
+		return
+	}
+	// Rebuild each result as the Door-1 verdict object. The stored VerificationRow → verdict.Response
+	// mapping is the same shape /v1/verify returns (status/reason/confidence/recommendation/flags/
+	// signals). We do NOT expose work-item internals (lease, attempt, plaintext) — §7.4/§7.6.
+	results := make([]verdict.Response, 0, len(rows))
+	for _, row := range rows {
+		results = append(results, verdictFromRow(row.Verdict))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"job_id":      jobID,
+		"results":     results,
+		"next_cursor": next,
+	})
+}
+
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -204,6 +397,47 @@ func (s *Server) authenticate(r *http.Request, requirePerCaller bool) (callerID 
 		}
 	}
 	return "", false
+}
+
+// verdictFromRow rebuilds the Door-1 verdict object from a stored LOG row for a bulk result (§7.4).
+// It is the SAME shape /v1/verify returns. TWO deliberate differences, both Door-honoring:
+//   - Email is EMPTY: the sync path echoes the RAW input (OQ-4), but a bulk result is served AFTER
+//     the plaintext was purged on settle (§5.3/DR-4 — Door 3). We cannot (and must not) echo it.
+//     The caller correlates via domain + the envelope's email_hash (a hash, not PII), or its own
+//     submission bookkeeping — the full input↔result correlation is a platform seam (§7.6).
+//   - Meta is minimal (policy/version + from_cache): the per-request provenance (request_id,
+//     latency, node) belongs to each attempt, not the job-level result envelope.
+// Flags/Signals/Status/Reason/Confidence/Recommendation are the settled verdict verbatim.
+func verdictFromRow(row store.VerificationRow) verdict.Response {
+	flags := row.Flags
+	if flags == nil {
+		flags = map[string]bool{}
+	}
+	signals := row.Signals
+	if signals == nil {
+		signals = map[string]any{}
+	}
+	policy := row.PolicyKey
+	return verdict.Response{
+		APIVersion:     firstNonEmpty(row.APIVersion, "v1"),
+		Status:         vocab.Status(row.Status),
+		Reason:         vocab.Reason(row.Reason),
+		Confidence:     row.Confidence,
+		Recommendation: vocab.Recommendation(row.Recommendation),
+		Email:          "", // purged on settle (Door 3) — a bulk result never echoes the raw address
+		Domain:         row.Domain,
+		Flags:          flags,
+		Signals:        signals,
+		Meta:           verdict.Meta{Policy: policy, PolicyVersion: row.PolicyVersion, FromCache: row.FromCache},
+		Raw:            nil,
+	}
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

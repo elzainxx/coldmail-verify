@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -23,6 +24,7 @@ import (
 	"github.com/mnfi/codmailling/control-plane/internal/orchestrator"
 	"github.com/mnfi/codmailling/control-plane/internal/policy"
 	"github.com/mnfi/codmailling/control-plane/internal/provrouting"
+	"github.com/mnfi/codmailling/control-plane/internal/queue"
 	"github.com/mnfi/codmailling/control-plane/internal/ratelimit"
 	"github.com/mnfi/codmailling/control-plane/internal/router"
 	"github.com/mnfi/codmailling/control-plane/internal/secrets"
@@ -144,7 +146,69 @@ func buildAPI(appCtx context.Context, cfg config.Config, sec *secrets.Secrets, h
 	// per-caller key authenticates any endpoint and the P5 bulk surface requires one; the legacy
 	// static token still authenticates the sync /v1/verify during transition (backward-compat).
 	srv = srv.WithVerifier(orch, def).WithCallerAuth(pg)
+
+	// P5 queue (§3/§7): wire the bulk endpoint + start the drainer, IFF the DR-4 key is present.
+	// The queue holds plaintext at rest (the one bounded Door-3 exception), so it MUST NOT start
+	// without its at-rest encryption key — a queue-enabled brain with no key is honestly not-ready
+	// (the bulk endpoints return 503), never silently storing plaintext. The drainer reuses the
+	// SAME orch (its ComputeForQueue runs the identical P4 gates — §8 master invariant).
+	buildQueue(appCtx, cfg, sec, pg, orch, hasher, def, srv, cfgFingerprint)
 	return srv
+}
+
+// buildQueue wires the P5 bulk submitter + starts the drainer on appCtx, but ONLY when the DR-4
+// at-rest key (TM_QUEUE_ADDR_KEY) is loaded. Without it the queue subsystem refuses to start
+// (harden-toward-safety: never store the queue's plaintext exception unencrypted) — the bulk
+// endpoints stay 503. The lease TTL must exceed the brain's max SMTP deadline (GAP-37); NewDrainer
+// fails fast otherwise and we log + skip the queue rather than run with a race-prone lease.
+func buildQueue(appCtx context.Context, cfg config.Config, sec *secrets.Secrets, pg *store.PG, orch *orchestrator.Orchestrator, hasher *hash.Hasher, def *policy.Definition, srv *api.Server, cfgFingerprint string) {
+	key, prev, ok := sec.QueueAddrKey()
+	if !ok {
+		log.Printf("queue: %s not set — bulk endpoint disabled (won't store plaintext without the DR-4 key)", secrets.EnvQueueAddrKey)
+		return
+	}
+	cipher, err := queue.NewAddrCipher(key, prev)
+	if err != nil {
+		log.Printf("queue: DR-4 cipher init failed (%v) — bulk endpoint disabled", err)
+		return
+	}
+	enq := &queue.Enqueuer{Store: pg, Hasher: hasher, Cipher: cipher, ConfigFingerprint: cfgFingerprint}
+	srv.WithBulk(enq, pg)
+
+	// Backoff dials (§4.2) — conservative defaults; greylist windows are minutes, capacity waits seconds.
+	bo := queue.Backoff{
+		Base: 5 * time.Minute, Factor: 2, Cap: time.Hour, JitterFrac: 0.15, RateWait: 30 * time.Second,
+	}
+	// GAP-37: the lease TTL must EXCEED the brain's max SMTP client deadline so a live attempt never
+	// loses its lease. Derive the TTL as a margin over the configured deadline (fallback: 60s deadline).
+	maxSMTP := cfg.SMTPClientDeadline()
+	if maxSMTP <= 0 {
+		maxSMTP = 60 * time.Second
+	}
+	leaseTTL := maxSMTP + 2*time.Minute
+	drainer, err := queue.NewDrainer(queue.Deps{
+		Store: pg, Compute: orch, Policy: policyResolver{def: def}, Cipher: cipher, Backoff: bo,
+		WorkerID: "drainer-1", LeaseTTL: leaseTTL, MaxSMTPDeadline: maxSMTP,
+		MaxAttempts: 4, MaxRetryAge: 6 * time.Hour, BatchSize: 10, IdlePoll: 2 * time.Second,
+	})
+	if err != nil {
+		log.Printf("queue: drainer init failed (%v) — bulk submissions will enqueue but NOT drain until fixed", err)
+		return
+	}
+	log.Printf("queue: bulk endpoint wired; drainer starting (lease_ttl=%s max_smtp=%s)", leaseTTL, maxSMTP)
+	go drainer.Run(appCtx)
+}
+
+// policyResolver adapts the single default policy to queue.PolicyResolver. P5 ships one policy (as
+// P1 did); a request for a different (key,version) is not-found. When multi-policy lands, this
+// resolves from the policy store instead.
+type policyResolver struct{ def *policy.Definition }
+
+func (p policyResolver) Resolve(_ context.Context, key string, version int) (*policy.Definition, error) {
+	if p.def != nil && key == p.def.Key && version == p.def.Version {
+		return p.def, nil
+	}
+	return nil, fmt.Errorf("queue: unknown policy %s v%d", key, version)
 }
 
 // buildSMTP wires the Phase-2 SMTP stage when SMTP is enabled and a node list exists. It fetches
