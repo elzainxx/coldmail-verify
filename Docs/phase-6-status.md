@@ -120,7 +120,7 @@ it against real bounces. Don't let "we have fallback coverage now" harden into "
 
 | Dial | Default | Note |
 |---|---|---|
-| `TM_EXTERNAL_CONFIDENCE_CAP` | 60 | §3.4 anti-laundering ceiling — a rented verdict is never SMTP-grade |
+| `external.confidence_cap` (per-policy JSON, **not** an env var) | 60 | §3.4 anti-laundering ceiling — a rented verdict is never SMTP-grade. Read from the policy (`external.Resolve`), per-policy by design. A global `TM_EXTERNAL_CONFIDENCE_CAP` was removed in the P6→P7 pass as settable-but-ignored. |
 | `TM_EXTERNAL_DAILY_CAP` / `_MONTHLY_CAP` / `_PER_JOB_CAP` / `_RATE_CEILING` | **UNSET** (owner-OQ) | §5.2 — 0/unset ⇒ not enforced; start conservative, raise from observed volume |
 | `TM_EXTERNAL_ERROR_RATE_PCT` | 0 (off) | §5.3 cond-2 — budget ceilings apply until an owner tunes the error-rate |
 | `TM_EXTERNAL_ERROR_MIN_SAMPLES` | 20 | §5.3/GAP-27 sample gate (mirrors block-rate) |

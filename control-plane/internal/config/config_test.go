@@ -225,9 +225,9 @@ func TestLoad_P5QueueDialsDefaultAndOverride(t *testing.T) {
 // and the breaker dials carry their defaults. Env overrides apply; a set spend cap reads Set.
 func TestLoad_P6ExternalDefaultsAndDials(t *testing.T) {
 	def := Defaults()
-	if def.Dials.ExternalConfidenceCap != 60 {
-		t.Fatalf("external confidence cap default want 60 (§3.4 anti-laundering), got %d", def.Dials.ExternalConfidenceCap)
-	}
+	// NOTE: the §3.4 anti-laundering confidence cap is the PER-POLICY external.confidence_cap (policy
+	// JSON), NOT a config dial — a global TM_EXTERNAL_CONFIDENCE_CAP was removed as settable-but-ignored
+	// (the runtime reads pe.ConfidenceCap). So there is no ExternalConfidenceCap dial to assert here.
 	if def.Dials.ExternalBreakerCooldownSeconds != 300 || def.Dials.ExternalErrorMinSamples != 20 {
 		t.Fatalf("external breaker defaults not set: %+v", def.Dials)
 	}
@@ -245,14 +245,14 @@ func TestLoad_P6ExternalDefaultsAndDials(t *testing.T) {
 	}
 	// Overrides apply.
 	env := map[string]string{
-		"TM_EXTERNAL_CONFIDENCE_CAP": "50", "TM_EXTERNAL_DAILY_CAP": "1000",
+		"TM_EXTERNAL_DAILY_CAP": "1000",
 		"TM_EXTERNAL_PER_JOB_CAP": "100", "TM_EXTERNAL_ERROR_RATE_PCT": "40",
 	}
 	c, err := Load(func(k string) string { return env[k] })
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if c.Dials.ExternalConfidenceCap != 50 || c.Dials.ExternalErrorRatePct != 40 {
+	if c.Dials.ExternalErrorRatePct != 40 {
 		t.Errorf("external int-dial overrides not applied: %+v", c.Dials)
 	}
 	if !c.Dials.ExternalDailyCap.Set || c.Dials.ExternalDailyCap.Value != 1000 {

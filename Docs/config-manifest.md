@@ -375,7 +375,7 @@ These promote the §5.2/§5.3 dials from `buildQueue` code-defaults to readable 
 ### 6.2 Anti-laundering & verdict mapping (data-integrity — protects P7 calibration)
 | name | type | default | mis-setting effect | blast radius | source |
 |---|---|---|---|---|---|
-| **`confidence_cap`** (external valid) | dial | 60 (anti-laundering) | uncapped/SMTP-grade → poisons P7 calibration with vendor errors (GAP-41) | data-integrity / calibration | P6 §3.2, §3.4, OQ-P6-1 |
+| **`confidence_cap`** (external valid) | dial | 60 (anti-laundering) — a **per-policy** key in the policy JSON (`external.confidence_cap`), NOT an env var; the runtime reads it from the policy (external.Resolve). Different policies may cap differently. | uncapped/SMTP-grade → poisons P7 calibration with vendor errors (GAP-41) | data-integrity / calibration | P6 §3.2, §3.4, OQ-P6-1 |
 | **external `valid` → `risky` (never SMTP-grade)** | feature-flag | LOCKED risky (OQ-P6-1) | minting `valid` → launders vendor uncertainty, breaks weaning | data-integrity | P6 §3.4, OQ-P6-1 |
 | **vendor `invalid` acceptance (asymmetric)** | feature-flag | accept as invalid only on retry-exhausted/gave-up-capacity; downgrade to risky on catch-all/`:mx` (OQ-P6-3) | accepting on catch-all → a guess irreversibly discards a real address | data-integrity / suppression | P6 §3.4, §8.2, OQ-P6-3 |
 | **`route_when` residue classes** | feature-flag/dial | all four at launch (catch_all, provider_no_smtp, retry_exhausted_greylisted, gave_up_rate_limited) (OQ-P6-2); may not add a 5th | add non-residue → cost blowout | cost | P6 §3.2, §4.1, OQ-P6-2 |
@@ -415,7 +415,6 @@ Rung-2 dial (see §1 kill-switch); `TM_VENDOR_KEYS` is the pre-existing vendor-k
 | name | type | default | mis-setting effect | blast radius | source |
 |---|---|---|---|---|---|
 | **`TM_EXTERNAL_DPA_CONFIRMED`** (§7.4 legal enablement gate) | feature-flag | **false** — layer stays disabled; only `"true"` enables (after the DPA checklist passes) | true pre-DPA → unlawful sub-processing; the AND-gate + global-kill still guard | privacy / legal | P6 §7.4 |
-| **`TM_EXTERNAL_CONFIDENCE_CAP`** (anti-laundering ceiling) | dial | 60 | too high → a rented verdict nears SMTP-grade (still never `valid`); poisons P7 if uncapped (GAP-41) | data-integrity / calibration | P6 §3.4, OQ-P6-1 |
 | **`TM_EXTERNAL_DAILY_CAP`** (cost-units/day) | dial | **UNSET — owner OQ** (0/unset ⇒ not enforced) | unbounded day spend when unset + enabled; too low → early keep_residue | cost | P6 §5.2, OQ-P6-5 |
 | **`TM_EXTERNAL_MONTHLY_CAP`** (cost-units/month) | dial | **UNSET — owner OQ** | — | cost | P6 §5.2, OQ-P6-5 |
 | **`TM_EXTERNAL_PER_JOB_CAP`** (cost-units per bulk job) | dial | **UNSET — owner OQ** | none → a 90%-catch-all list drains the global budget (§4.4) | cost | P6 §5.2, §4.4, OQ-P6-5 |

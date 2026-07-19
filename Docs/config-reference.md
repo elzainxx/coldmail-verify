@@ -15,9 +15,9 @@ Regenerate on any manifest change; CI verifies this file is up to date
 |---|---|
 | secrets | 9 |
 | feature-flags | 146 |
-| dials | 116 |
+| dials | 115 |
 | other/uncategorized | 2 |
-| **total knobs** | **273** |
+| **total knobs** | **272** |
 
 > One-way doors are **not** dials: the frozen contracts (response shape, LOG, hashing,
 > vocabulary, never-fork) live in code (`control-plane/internal/{vocab,hash,verdict,store,router}`),
@@ -189,7 +189,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | `unknown` not pressured to `valid` | LOCKED — first-class unknown survives flywheel | P7 §8.4 |
 | platform "your sends train our accuracy" disclosure | surface it (OQ-P7-8), disclose-don't-hide | P7 §14, OQ-P7-8 |
 
-## Dials (116)
+## Dials (115)
 
 | knob | default / state | source |
 |---|---|---|
@@ -281,14 +281,13 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | `TM_QUEUE_DRAIN_BATCH_SIZE` (items per drain tick) | 10 | P5 §6 |
 | `TM_QUEUE_DRAIN_IDLE_POLL_SECONDS` (idle sleep) | 2 | P5 §3 |
 | `TM_QUEUE_BULK_MAX_ADDRESSES` (submission cap, §7.5) | **UNSET — owner OQ** (built-in hard cap 100k applies until set) | P5 §7.5 |
-| `confidence_cap` (external valid) | 60 (anti-laundering) | P6 §3.2, §3.4, OQ-P6-1 |
+| `confidence_cap` (external valid) | 60 (anti-laundering) — a **per-policy** key in the policy JSON (`external.confidence_cap`), NOT an env var; the runtime reads it from the policy (external.Resolve). Different policies may cap differently. | P6 §3.2, §3.4, OQ-P6-1 |
 | vendor normalization table (raw status → system vocab) | per §8.2; unrecognized → `unknown` (never guess) | P6 §8.2 |
 | `daily_cap` (external spend) | UNSET — start conservative (OQ-P6-5) | P6 §5.2, OQ-P6-5 |
 | `monthly_cap` | UNSET conservative | P6 §5.2, OQ-P6-5 |
 | `per_job_cap` | UNSET — low enough one list can't drain global (OQ-P6-5) | P6 §5.2, §4.4, OQ-P6-5 |
 | `rate_ceiling` (vendor calls/min) | UNSET | P6 §5.2, OQ-P6-5 |
 | vendor error-rate trip threshold + cooldown | UNSET | P6 §5.3 |
-| `TM_EXTERNAL_CONFIDENCE_CAP` (anti-laundering ceiling) | 60 | P6 §3.4, OQ-P6-1 |
 | `TM_EXTERNAL_DAILY_CAP` (cost-units/day) | **UNSET — owner OQ** (0/unset ⇒ not enforced) | P6 §5.2, OQ-P6-5 |
 | `TM_EXTERNAL_MONTHLY_CAP` (cost-units/month) | **UNSET — owner OQ** | P6 §5.2, OQ-P6-5 |
 | `TM_EXTERNAL_PER_JOB_CAP` (cost-units per bulk job) | **UNSET — owner OQ** | P6 §5.2, §4.4, OQ-P6-5 |

@@ -177,14 +177,19 @@ type Dials struct {
 	// footgun (the P5→P6 review finding). They land in the phase that actually enforces them.
 	QueueBulkMaxAddresses Dial // §7.5 max addresses per /v1/verify/bulk submission (backpressure)
 
-	// Phase 6 (§5.2/§5.3/§3.4) — the external-fallback spend/breaker/anti-laundering DIALs (existence
-	// locked; the budget ceilings are owner-OQ → UNSET, "start conservative and raise from observed
-	// residue-tail volume", never loosen blind). ExternalConfidenceCap carries the §3.4 recommend-60
-	// anti-laundering ceiling (a rented verdict is never SMTP-grade). The caps are Dials so an UNSET
-	// ceiling reads UNSET (owner-OQ), never a guessed number — a 0-cap means "not enforced", NOT "no
-	// spend"; the layer only egresses at all when deliberately enabled (Fallback==enabled + a vendor
-	// key + DPA). ExternalErrorRatePct/CooldownSeconds gate the circuit-breaker (§5.3 cond 2).
-	ExternalConfidenceCap     int  // §3.4 anti-laundering cap on external valid; 60 (recommend). LOCKED risky, never valid.
+	// Phase 6 (§5.2/§5.3) — the external-fallback spend/breaker DIALs (existence locked; the budget
+	// ceilings are owner-OQ → UNSET, "start conservative and raise from observed residue-tail volume",
+	// never loosen blind). The caps are Dials so an UNSET ceiling reads UNSET (owner-OQ), never a
+	// guessed number — a 0-cap means "not enforced", NOT "no spend"; the layer only egresses at all
+	// when deliberately enabled (Fallback==enabled + a vendor key + DPA). ExternalErrorRatePct/
+	// CooldownSeconds gate the circuit-breaker (§5.3 cond 2).
+	//
+	// NOTE (P6→P7 review): the §3.4 anti-laundering confidence cap is NOT a config dial — it lives in
+	// the PER-POLICY `external.confidence_cap` (policy JSON, spec §3.2), which is where runExternal
+	// reads it (external_stage.go → external.Resolve). A global TM_EXTERNAL_CONFIDENCE_CAP was removed
+	// as a settable-but-ignored footgun (the rate_ceiling-class finding): the runtime never read it,
+	// so it stayed here only to mislead. The cap is per-policy by design (different policies may cap
+	// differently), so the policy key is the single correct home.
 	ExternalDailyCap          Dial // §5.2 cost-units/day; UNSET (owner-OQ) — 0/unset => not enforced
 	ExternalMonthlyCap        Dial // §5.2 cost-units/month; UNSET
 	ExternalPerJobCap         Dial // §5.2/§4.4 cost-units per bulk job (bounds a pathological list); UNSET
@@ -436,12 +441,11 @@ func Defaults() Config {
 			QueueDrainBatchSize:       10,    // §6 items per drain tick
 			QueueDrainIdlePollSeconds: 2,     // idle sleep when the queue is empty
 			QueueBulkMaxAddresses:     Dial{Set: false}, // §7.5 owner OQ — UNSET (safe hard cap applies)
-			// Phase-6 external-fallback dials (§5.2/§5.3/§3.4). The anti-laundering cap carries the
-			// §3.4 recommend-60. The spend ceilings are owner-OQ → UNSET (start conservative, raise
-			// from observed volume — never loosen blind). The breaker error-rate is off-by-default
-			// (0%) with a sample gate + a 5m cooldown, so a first deployment relies on the budget
-			// ceilings until an owner tunes the error-rate condition.
-			ExternalConfidenceCap:          60,               // §3.4 anti-laundering ceiling (never SMTP-grade)
+			// Phase-6 external-fallback dials (§5.2/§5.3). The spend ceilings are owner-OQ → UNSET
+			// (start conservative, raise from observed volume — never loosen blind). The breaker
+			// error-rate is off-by-default (0%) with a sample gate + a 5m cooldown, so a first
+			// deployment relies on the budget ceilings until an owner tunes the error-rate condition.
+			// (The §3.4 anti-laundering cap is the per-policy external.confidence_cap, not a dial here.)
 			ExternalDailyCap:               Dial{Set: false}, // §5.2 owner OQ — UNSET (not enforced until set)
 			ExternalMonthlyCap:             Dial{Set: false}, // §5.2 owner OQ — UNSET
 			ExternalPerJobCap:              Dial{Set: false}, // §5.2/§4.4 owner OQ — UNSET
@@ -594,11 +598,9 @@ func Load(getenv func(string) string) (Config, error) {
 		{"TM_QUEUE_LEASE_MARGIN_SECONDS", &c.Dials.QueueLeaseMarginSeconds, false},
 		{"TM_QUEUE_DRAIN_BATCH_SIZE", &c.Dials.QueueDrainBatchSize, false},
 		{"TM_QUEUE_DRAIN_IDLE_POLL_SECONDS", &c.Dials.QueueDrainIdlePollSeconds, false},
-		// Phase-6 external-fallback int dials (§3.4/§5.3). ConfidenceCap 0 is legal (would make every
-		// rented verdict confidence 0 — extreme but not unsafe: it can only LOWER, never launder to
-		// valid). ErrorRatePct 0 disables the error-rate breaker condition (budget ceilings still
-		// apply). Cooldown/samples 0 legal (degenerate; tests). All non-negative.
-		{"TM_EXTERNAL_CONFIDENCE_CAP", &c.Dials.ExternalConfidenceCap, true},
+		// Phase-6 external-fallback int dials (§5.3). ErrorRatePct 0 disables the error-rate breaker
+		// condition (budget ceilings still apply). Cooldown/samples 0 legal (degenerate; tests). All
+		// non-negative. (The §3.4 confidence cap is NOT here — it is the per-policy external.confidence_cap.)
 		{"TM_EXTERNAL_ERROR_RATE_PCT", &c.Dials.ExternalErrorRatePct, true},
 		{"TM_EXTERNAL_ERROR_MIN_SAMPLES", &c.Dials.ExternalErrorMinSamples, true},
 		{"TM_EXTERNAL_BREAKER_COOLDOWN_SECONDS", &c.Dials.ExternalBreakerCooldownSeconds, true},
