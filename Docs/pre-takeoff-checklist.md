@@ -79,11 +79,11 @@ The prompt named four as outstanding. Each is surfaced with its blocking phase; 
 
 ### Phase-gates (design conditions accepted 2026-07-17 — [`DECISIONS.md`](DECISIONS.md))
 
-### 3.4 Outcome-feed AUTHENTICATION — **gates P7** (hard pre-P7 door) [DR-1 / PN-2 / F-15 / ADR-0001]
-- [ ] **Before any P7 code:** the outcome feed (TB-7) is an **authenticated channel** with the **sender as an identified principal**, and **TB-7 is threat-modelled for a *malicious* sender** (forged-outcome poisoning of recalibration / promotion / weaning / historical-bounce gate). Elevated from a dial to a door — see [ADR-0001](adr/ADR-0001-outcome-feed-authentication.md).
-- [ ] Ingestion is **rate-limited per-provider**; the P7 §10 classifier-distribution monitor is treated as a **security** signal.
-- [ ] **Do NOT build feed-auth now** — P7 is not being implemented; this records the gate only.
-- [ ] *Flagged open (owner/P7-time, [`DECISIONS.md`](DECISIONS.md) §5):* signed-webhooks vs. mutually-authenticated pull; the ≥N value (PN-11). Recommend-only (DR-2) mitigates but does **not** authenticate — both required.
+### 3.4 Outcome-feed AUTHENTICATION — **gates P7** (hard pre-P7 door) [DR-1 / PN-2 / F-15 / ADR-0001 / ADR-0013] ✅ DESIGN DISCHARGED (P7, 2026-07-19); LIVE still gated on the sender
+- [x] **Before any P7 code:** the outcome feed (TB-7) is an **authenticated channel** with the **sender as an identified principal**, and **TB-7 is threat-modelled for a *malicious* sender** (forged-outcome poisoning of recalibration / promotion / weaning / historical-bounce gate). Elevated from a dial to a door — see [ADR-0001](adr/ADR-0001-outcome-feed-authentication.md). **Discharged in [ADR-0013](adr/ADR-0013-outcome-feed-auth-mechanism-and-tb7-threat-model.md): the TB-7 threat model (Part A) + the mechanism decision (Part B).**
+- [x] Ingestion is **rate-limited per-provider**; the P7 §10 classifier-distribution monitor is treated as a **security** signal. (Recorded in ADR-0013 §A.3 layer 8; the per-provider rate-limit *values* are DIALs.)
+- [x] **Mechanism DECIDED (was flagged open):** **mutually-authenticated pull (mTLS)** — P7 is the authenticated client (no new inbound surface on the pepper-holding brain), native backpressure, cursor+watermark replay-safety. Built behind a swappable `OutcomeSource` interface (reversible to signed-webhooks by one adapter); `SimulatedSource` for local build, fail-closed (no credential ⇒ cold-start). The ≥N value (PN-11) remains a DIAL. Recommend-only (DR-2) mitigates but does **not** authenticate — both required (ADR-0013 §A.3 layer 6).
+- [ ] **LIVE gate (still open, cross-project):** the sender ("Feature 2") does not exist yet (GAP-48) — no *live* ingestion until it implements its half of the mTLS feed + the trust anchor/client credential are provisioned. Honestly **PENDING-REAL-SENDER**; local build proceeds against `SimulatedSource`.
 
 ### 3.5 Shadow-mode fresh-system REGRESSION — **gates the first phase to ship each mutator** [DR-2 / PN-4]
 - [ ] On a **fresh system**, assert every in-scope mutator sits at its **default mode** and performs **zero live mutation**: zero confidence buckets applied (A6), zero providers promoted (A8), zero buckets weaned (A9), block-rate quarantine emitting **recommendations only** (A1). Behavior identical to end-of-P6 until a human promotes a mechanism to `auto`. (See [`shadow-mode.md`](shadow-mode.md) §5.)
@@ -145,7 +145,7 @@ SPIKES (before the phase they gate):
   ☐ Vendor DPA / due-diligence checklist      → gates P6
 
 PHASE-GATES (accepted 2026-07-17, DECISIONS.md — record only, not built):
-  ☐ Outcome-feed AUTHENTICATION (TB-7 threat-modelled) → before P7    §3.4 (DR-1/ADR-0001)
+  ◐ Outcome-feed AUTHENTICATION (TB-7 threat-modelled) → DESIGN DISCHARGED P7 2026-07-19 §3.4 (DR-1/ADR-0001/ADR-0013: mTLS pull); LIVE still gated on the sender (PENDING-REAL-SENDER)
   ☐ Shadow-mode fresh-system regression (zero live mutation) → A1→P4, A6/8/9→P7  §3.5 (DR-2)
   ☐ Admin identity + control-plane audit log   → before P3 go-live    §3.6 (DR-3, PN-1/F-11)
   ✅ Backup-plaintext protection for work_items → RESOLVED P5 2026-07-18 §3.7 (separate-key encryption, DR-4/ADR-0002)

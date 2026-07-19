@@ -52,6 +52,16 @@ type MemStore struct {
 	// Phase 6 (§5/§6) — the append-only external-verifier call log (spend + provenance). Tests read
 	// it to assert spend-once (exactly one row per settled escalation, even under a reclaim).
 	ExternalCalls []ExternalCallRow
+
+	// Phase 7 (§3/§5/§8) — the flywheel. SendOutcomes is the append-only outcome log (tests read it to
+	// assert a blocked bounce never lands in a numerator, replay dedup, etc.); outcomeDedup maps
+	// message_id+"\x00"+event -> struct{} for the §3.4 idempotency; Calibration is the versioned store;
+	// RecalRuns is the recalibration lease/CAS log; cursors is the pull watermark per source.
+	SendOutcomes []SendOutcomeRow
+	outcomeDedup map[string]struct{}
+	Calibration  []CalibrationRow
+	RecalRuns    []RecalRun
+	cursors      map[string]string
 }
 
 // callerRow mirrors one api_callers row (per-caller key + validity window).
@@ -94,6 +104,8 @@ func NewMem(now func() time.Time) *MemStore {
 		workItems:  map[string]WorkItemRow{},
 		idemKeys:   map[string]string{},
 		jobs:       map[string]JobRow{},
+		outcomeDedup: map[string]struct{}{},
+		cursors:      map[string]string{},
 	}
 }
 

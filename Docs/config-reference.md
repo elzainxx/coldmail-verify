@@ -14,10 +14,10 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | bucket | count |
 |---|---|
 | secrets | 9 |
-| feature-flags | 146 |
-| dials | 115 |
+| feature-flags | 148 |
+| dials | 125 |
 | other/uncategorized | 2 |
-| **total knobs** | **272** |
+| **total knobs** | **284** |
 
 > One-way doors are **not** dials: the frozen contracts (response shape, LOG, hashing,
 > vocabulary, never-fork) live in code (`control-plane/internal/{vocab,hash,verdict,store,router}`),
@@ -38,7 +38,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | vendor API key (P6) | no rotation story; leak = budget-DoS + billed enumeration oracle (security F-6) | no rotation story; leak = budget-DoS + billed enumeration oracle (security F-6) |
 | front-door bearer token | no per-caller scoping/rotation brain-side; guards bulk-PII endpoint by P5 (security F-20) | no per-caller scoping/rotation brain-side; guards bulk-PII endpoint by P5 (security F-20) |
 
-## Feature-flags (146)
+## Feature-flags (148)
 
 | knob | default / state | source |
 |---|---|---|
@@ -188,8 +188,10 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | weaning rule (drop fallback per residue×provider) | when own measured accuracy beats vendor's, both sample-gated; reversible | P7 §9.2 |
 | `unknown` not pressured to `valid` | LOCKED — first-class unknown survives flywheel | P7 §8.4 |
 | platform "your sends train our accuracy" disclosure | surface it (OQ-P7-8), disclose-don't-hide | P7 §14, OQ-P7-8 |
+| TM_FLYWHEEL_GATE_ENABLED | `false` (OFF — fresh-system invariant) | P7 §4.6, DR-2 |
+| TM_FLYWHEEL_CALIBRATION_ENABLED | `false` (OFF — P1 baseline stands) | P7 §5.4, DR-2 |
 
-## Dials (115)
+## Dials (125)
 
 | knob | default / state | source |
 |---|---|---|
@@ -308,6 +310,16 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | `demote_threshold` (hysteretic) | higher than promote (quick-demote/slow-promote) (OQ-P7-4) | P7 §7.2, OQ-P7-4 |
 | accuracy metric target (#5) | UNSET — owner-set per provider, publish with coverage (OQ-P7-5) | P7 §8.1, §8.2, OQ-P7-5 |
 | weaning safety margin | margin not parity (OQ-P7-6) | P7 §9.2, OQ-P7-6 |
+| TM_HISTORICAL_BOUNCE_TTL_DAYS | 270 (9mo, within OQ-P7-2's 6–12mo) | P7 §4.6, OQ-P7-2 |
+| TM_HISTORICAL_BOUNCE_MIN_N | 2 (F-17/PN-11 — one forged outcome can't blacklist) | P7 §4.6, F-17, PN-11 |
+| TM_HISTORICAL_BOUNCE_PENALTY | 30 (post-TTL confidence penalty, recoverable) | P7 §4.6 |
+| TM_RECAL_MIN_BUCKET_SAMPLES | 500 (OQ-P7-3 build-plan upper) | P7 §6.2, OQ-P7-3 |
+| TM_RECAL_MAX_STEP | 10 (points/cycle) | P7 §6.3 |
+| TM_RECAL_UP_STEP_PCT | 50 (up moves at half rate — down-fast/up-slow) | P7 §6.3 |
+| TM_RECAL_BRAKE_WINDOW_CYCLES | 3 (>1 catches STAGGERED drift — P4 lesson-a) | P7 §6.4 |
+| TM_RECAL_BRAKE_BUCKET_PCT | 50 (must be 1..99) | P7 §6.4 |
+| TM_RECAL_BRAKE_MIN_BUCKETS | 20 (denominator floor) | P7 §6.4 |
+| TM_RECAL_CADENCE_SECONDS | 86400 (daily rollup, OQ-P7-7) | P7 §5, OQ-P7-7 |
 
 ## Other / uncategorized (2)
 

@@ -197,6 +197,29 @@ type Dials struct {
 	ExternalErrorRatePct      int  // §5.3 cond-2 error-rate trip threshold %; 0 => error-rate condition disabled
 	ExternalErrorMinSamples   int  // §5.3/GAP-27 min calls in the window before error-rate can trip; 20
 	ExternalBreakerCooldownSeconds int // §5.3 breaker open-duration before a half-open probe; 300 (5m)
+
+	// Phase 7 (§4.6/§5/§6) — the flywheel DIALs (existence locked; values tunable). The feedback-loop
+	// guards (§6) carry the spec's recommended defaults; the historical-bounce gate (§4.6) and the
+	// recalibration cadence are owner/P7-time DIALs. The GATE dials (TTL/MinN/Penalty) are CONSUMED NOW
+	// by buildFlywheel → the orchestrator's FlywheelDeps (§4.6 gate + §5.4 read). The RECALIBRATION-PASS
+	// guard dials (MinBucketSamples/MaxStep/UpStepPct/Brake*/Cadence) are VALIDATED at startup here
+	// (the brake range-guards below — the P4 lesson-b) and are consumed when the recalibration PASS is
+	// wired as a scheduled job (flywheel.RecalibrateDeps.GuardParams); that wiring maps the integer
+	// percents to the float GuardParams (UpStepPct/100 → UpStepFactor, BrakeBucketPct/100 →
+	// BrakeBucketFraction) so config.Validate and flywheel.ValidateGuardParams agree. The two LIVE-PATH
+	// touches (gate + calibrated read) default OFF (FlywheelGateEnabled/CalibrationEnabled false) so a
+	// fresh P7 system reads the P1 baseline + never gates until an owner opts in — the DR-2 fresh-system
+	// invariant expressed as config, mirroring the P6 DPA/kill-switch "enabling is hard".
+	HistoricalBounceTTLDays  int // §4.6/OQ-P7-2 TTL window on a confirmed mailbox_not_found (6–12mo); 270 (9mo)
+	HistoricalBounceMinN     int // §4.6/F-17/PN-11 ≥N independent invalid-signal outcomes before the gate fires; 2
+	HistoricalBouncePenalty  int // §4.6 the post-TTL confidence penalty (a strong nudge, recoverable); 30
+	RecalMinBucketSamples    int // §6.2/OQ-P7-3 sample-size gate; 500 (build-plan upper ~200–500)
+	RecalMaxStep             int // §6.3 bounded step per cycle (points); 10
+	RecalUpStepPct           int // §6.3 hysteresis: UP moves scaled to this % of max_step (down-fast/up-slow); 50
+	RecalBrakeWindowCycles   int // §6.4 rolling window (>1 catches STAGGERED drift — the P4 lesson a); 3
+	RecalBrakeBucketPct      int // §6.4 fraction of touched buckets at max-step across the window → hold; 50 (must be 1..99)
+	RecalBrakeMinBuckets     int // §6.4 denominator floor before the brake may trip (systemic-layer GAP-27); 20
+	RecalCadenceSeconds      int // §5/OQ-P7-7 recalibration cadence (batch, not per-outcome); 86400 (daily)
 }
 
 // ── Policy / structural feature-flags (shape frozen, contents dial) ─────────────────
@@ -215,6 +238,21 @@ type Config struct {
 	ShadowModes ShadowModes
 	Dials       Dials
 	Policy      Policy
+
+	// FlywheelGateEnabled turns ON the P7 §4.6 historical-bounce gate (the live-path short-circuit to
+	// invalid/historical_bounce on a confirmed ≥N in-TTL bounce history). Default FALSE — a fresh P7
+	// system does NOT gate until an owner opts in (the reserved layer stays dormant), so the fresh-
+	// system invariant (DR-2) holds: behavior identical to end-of-P6.
+	FlywheelGateEnabled bool
+	// FlywheelCalibrationEnabled turns ON the P7 §5.4 calibrated-confidence read on the verdict path.
+	// Default FALSE — the verdict path uses the P1 baseline (cold-start) until an owner opts in. Even
+	// when true, only an APPROVED (effective) calibration version overrides the baseline (recommend-
+	// only proposals are inert), so day-one behavior is unchanged until a human approves a version.
+	FlywheelCalibrationEnabled bool
+	// FlywheelRecalibrateMode is the A6 recalibration-pass mode when the (future) recalibration job runs
+	// (mirrors ShadowModes.A6ConfidenceRecalib; kept as the pass's own mode for clarity). Default
+	// recommend-only (DR-2). This does NOT gate the live read above — it governs whether a recalibration
+	// PASS writes proposals (recommend-only), approves them (auto), or only observes (shadow).
 
 	// ExternalDPAConfirmed is the P6 §7.4 legal enablement gate: the external fallback layer ships
 	// DISABLED and MUST NOT egress a single real address until the vendor DPA / due-diligence
@@ -294,6 +332,14 @@ func (c Config) QueueDrainIdlePoll() time.Duration {
 // duration; it also anchors the error-rate measurement window (external_stage.externalErrWindow).
 func (c Config) ExternalBreakerCooldown() time.Duration {
 	return time.Duration(c.Dials.ExternalBreakerCooldownSeconds) * time.Second
+}
+
+// HistoricalBounceTTL / RecalCadence are the P7 §4.6/§5 DIALs as typed durations.
+func (c Config) HistoricalBounceTTL() time.Duration {
+	return time.Duration(c.Dials.HistoricalBounceTTLDays) * 24 * time.Hour
+}
+func (c Config) RecalCadence() time.Duration {
+	return time.Duration(c.Dials.RecalCadenceSeconds) * time.Second
 }
 
 // QueueLeaseTTL derives the GAP-37 lease TTL from the brain's max SMTP deadline PLUS the configured
@@ -453,6 +499,18 @@ func Defaults() Config {
 			ExternalErrorRatePct:           0,                // §5.3 cond-2 disabled until tuned (0 => off)
 			ExternalErrorMinSamples:        20,               // §5.3/GAP-27 sample gate (mirrors block-rate)
 			ExternalBreakerCooldownSeconds: 300,              // §5.3 5m open before a half-open probe
+			// Phase-7 flywheel dials (§4.6/§5/§6). Feedback-loop guards carry the spec's conservative
+			// defaults; the historical-bounce gate + recalibration cadence are owner/P7-time DIALs.
+			HistoricalBounceTTLDays: 270, // §4.6/OQ-P7-2 9-month TTL (within the 6–12mo band)
+			HistoricalBounceMinN:    2,   // §4.6/F-17/PN-11 ≥2 independent — one forged outcome can't blacklist
+			HistoricalBouncePenalty: 30,  // §4.6 post-TTL confidence penalty (recoverable)
+			RecalMinBucketSamples:   500, // §6.2/OQ-P7-3 start at the build-plan upper bound
+			RecalMaxStep:            10,  // §6.3 ≤10 points/cycle
+			RecalUpStepPct:          50,  // §6.3 up moves at half rate (down-fast/up-slow hysteresis)
+			RecalBrakeWindowCycles:  3,   // §6.4 rolling 3-cycle window (>1 → catches staggered drift)
+			RecalBrakeBucketPct:     50,  // §6.4 ≥50% of touched buckets at max-step across the window → hold
+			RecalBrakeMinBuckets:    20,  // §6.4 denominator floor (systemic-layer GAP-27)
+			RecalCadenceSeconds:     86400, // §5/OQ-P7-7 daily rollup (batch, not per-outcome)
 		},
 		Policy: Policy{DefaultPolicyKey: "cold-email"},
 		Nodes:  nil, // node LIST, empty at P0. Door 5: a list even when length 0/1.
@@ -604,6 +662,18 @@ func Load(getenv func(string) string) (Config, error) {
 		{"TM_EXTERNAL_ERROR_RATE_PCT", &c.Dials.ExternalErrorRatePct, true},
 		{"TM_EXTERNAL_ERROR_MIN_SAMPLES", &c.Dials.ExternalErrorMinSamples, true},
 		{"TM_EXTERNAL_BREAKER_COOLDOWN_SECONDS", &c.Dials.ExternalBreakerCooldownSeconds, true},
+		// Phase-7 flywheel int dials (§4.6/§5/§6). All non-negative; the brake fraction/window/up-step
+		// are additionally range-guarded in Validate (a silently-disabled brake is the P4 lesson-b hole).
+		{"TM_HISTORICAL_BOUNCE_TTL_DAYS", &c.Dials.HistoricalBounceTTLDays, true},
+		{"TM_HISTORICAL_BOUNCE_MIN_N", &c.Dials.HistoricalBounceMinN, true},
+		{"TM_HISTORICAL_BOUNCE_PENALTY", &c.Dials.HistoricalBouncePenalty, true},
+		{"TM_RECAL_MIN_BUCKET_SAMPLES", &c.Dials.RecalMinBucketSamples, false},
+		{"TM_RECAL_MAX_STEP", &c.Dials.RecalMaxStep, false},
+		{"TM_RECAL_UP_STEP_PCT", &c.Dials.RecalUpStepPct, false},
+		{"TM_RECAL_BRAKE_WINDOW_CYCLES", &c.Dials.RecalBrakeWindowCycles, false},
+		{"TM_RECAL_BRAKE_BUCKET_PCT", &c.Dials.RecalBrakeBucketPct, false},
+		{"TM_RECAL_BRAKE_MIN_BUCKETS", &c.Dials.RecalBrakeMinBuckets, false},
+		{"TM_RECAL_CADENCE_SECONDS", &c.Dials.RecalCadenceSeconds, true},
 	} {
 		if v := getenv(d.env); v != "" {
 			n, err := strconv.Atoi(v)
@@ -653,6 +723,16 @@ func Load(getenv func(string) string) (Config, error) {
 	// rung or the vendor key. Only the exact string "true" turns it on.
 	if getenv("TM_EXTERNAL_DPA_CONFIRMED") == "true" {
 		c.ExternalDPAConfirmed = true
+	}
+
+	// Phase-7 flywheel live-path opt-ins (default FALSE — the fresh-system invariant / "enabling is
+	// explicit"). Only the exact string "true" turns each on. The gate short-circuits verdicts to
+	// invalid/historical_bounce; the calibrated read overrides the P1 baseline with an APPROVED version.
+	if getenv("TM_FLYWHEEL_GATE_ENABLED") == "true" {
+		c.FlywheelGateEnabled = true
+	}
+	if getenv("TM_FLYWHEEL_CALIBRATION_ENABLED") == "true" {
+		c.FlywheelCalibrationEnabled = true
 	}
 
 	return c, c.Validate()
@@ -724,6 +804,22 @@ func (c Config) Validate() error {
 	// OR age). The drainer enforces the same, but a startup guard is clearer than a runtime surprise.
 	if c.Dials.QueueMaxAttempts <= 0 && c.Dials.QueueMaxRetryAgeSeconds <= 0 {
 		return fmt.Errorf("config: at least one of queue_max_attempts / queue_max_retry_age_seconds must be > 0 (§4.5 — an item must have a retry ceiling)")
+	}
+	// §6.4 (P7, the P4 fleet-brake lesson-b, applied to the recalibration cascade brake): a brake
+	// bucket-fraction outside 1..99 makes the systemic-swing brake mathematically unable to fire (>=100%
+	// needs EVERY touched bucket to swing at once — staggered poisoning never does), SILENTLY disabling
+	// the safety valve. The window must be >=1 (0 disables the brake). The up-step % must be 1..100
+	// (>100 would invert the down-fast/up-slow hysteresis). All fail at STARTUP, never a silent no-op.
+	// (flywheel.ValidateGuardParams re-checks these when the recalibration pass runs; this is the
+	// earliest, config-level backstop so a nonsensical brake can't even start.)
+	if c.Dials.RecalBrakeBucketPct < 1 || c.Dials.RecalBrakeBucketPct > 99 {
+		return fmt.Errorf("config: recal_brake_bucket_pct (%d) must be in 1..99 — a value outside makes the P7 cascade brake (§6.4) unable to fire, silently disabling the systemic-swing safety valve (the P4 fleet-brake lesson-b)", c.Dials.RecalBrakeBucketPct)
+	}
+	if c.Dials.RecalBrakeWindowCycles < 1 {
+		return fmt.Errorf("config: recal_brake_window_cycles (%d) must be >= 1 — 0 disables the cascade brake; >1 is what catches STAGGERED drift the P4 single-snapshot brake missed (§6.4 lesson-a)", c.Dials.RecalBrakeWindowCycles)
+	}
+	if c.Dials.RecalUpStepPct < 1 || c.Dials.RecalUpStepPct > 100 {
+		return fmt.Errorf("config: recal_up_step_pct (%d) must be in 1..100 — >100 inverts the down-fast/up-slow hysteresis asymmetry (§6.3)", c.Dials.RecalUpStepPct)
 	}
 	return nil
 }

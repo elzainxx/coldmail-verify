@@ -145,6 +145,46 @@ func TestLoad_FleetWidePctUpperBound_FindingD(t *testing.T) {
 	}
 }
 
+// TestLoad_P7BrakeRangeGuard mirrors the FleetWidePct guard for the P7 cascade brake (§6.4, the P4
+// lesson-b): a brake bucket-fraction outside 1..99, a window < 1, or an up-step outside 1..100 must be
+// REJECTED at startup — never a silent no-op that disables the safety valve. (The flywheel package's
+// ValidateGuardParams re-checks at pass time; this is the config-level backstop.)
+func TestLoad_P7BrakeRangeGuard(t *testing.T) {
+	bad := map[string][]string{
+		"TM_RECAL_BRAKE_BUCKET_PCT":    {"0", "100", "150"},
+		"TM_RECAL_BRAKE_WINDOW_CYCLES": {"0"},
+		"TM_RECAL_UP_STEP_PCT":         {"0", "150"},
+	}
+	for env, vals := range bad {
+		for _, v := range vals {
+			if _, err := Load(func(k string) string {
+				if k == env {
+					return v
+				}
+				return ""
+			}); err == nil {
+				t.Fatalf("%s=%s must be rejected (would silently disable the P7 cascade brake / invert hysteresis, §6.4)", env, v)
+			}
+		}
+	}
+	// The P7 flywheel live-path touches default OFF (fresh-system invariant).
+	def := Defaults()
+	if def.FlywheelGateEnabled || def.FlywheelCalibrationEnabled {
+		t.Fatal("P7 flywheel live-path touches must default OFF (DR-2 fresh-system invariant)")
+	}
+	// Opt-ins flip only on the exact string "true".
+	c, err := Load(func(k string) string {
+		switch k {
+		case "TM_FLYWHEEL_GATE_ENABLED", "TM_FLYWHEEL_CALIBRATION_ENABLED":
+			return "true"
+		}
+		return ""
+	})
+	if err != nil || !c.FlywheelGateEnabled || !c.FlywheelCalibrationEnabled {
+		t.Fatalf("flywheel opt-in flags did not flip on 'true' (err=%v gate=%v cal=%v)", err, c.FlywheelGateEnabled, c.FlywheelCalibrationEnabled)
+	}
+}
+
 // A cadence of 0 is a valid override (one-shot, no loop); a negative/invalid dial is rejected.
 func TestLoad_P4DialValidation(t *testing.T) {
 	if _, err := Load(func(k string) string {

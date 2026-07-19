@@ -56,6 +56,13 @@ type Orchestrator struct {
 	// residue class AND the policy opts in AND the budget/breaker is open, it rents a verdict at
 	// CAPPED confidence (never SMTP-grade — anti-laundering §3.4). See external_stage.go.
 	external *ExternalDeps
+
+	// flywheel is the OPTIONAL Phase-7 live-path touches (§4.6 historical-bounce gate + §5.4 calibrated-
+	// confidence read). nil => the flywheel is fully OFF (the P1–P6 posture and the default). Even when
+	// wired it is inert on a fresh system (no historical bounces, no effective calibration versions) —
+	// behavior IDENTICAL to end-of-P6 until real outcomes accrue (the DR-2 fresh-system invariant). It
+	// NEVER mutates the LOG or mints vocab (uses the reserved historical_bounce). See flywheel_stage.go.
+	flywheel *FlywheelDeps
 }
 
 // Deps carries the orchestrator's dependencies.
@@ -72,6 +79,9 @@ type Deps struct {
 	// External is the OPTIONAL Phase-6 fallback stage. nil => fallback OFF (default). Wire it only
 	// when an owner enabled it (Fallback==enabled) AND a vendor key + DPA are configured (§7.4).
 	External *ExternalDeps
+	// Flywheel is the OPTIONAL Phase-7 live-path touches (§4.6 gate + §5.4 calibrated read). nil =>
+	// flywheel OFF (default). Wire it in P7; both touches are inert on a fresh system regardless.
+	Flywheel *FlywheelDeps
 }
 
 // New wires an orchestrator. Resolver defaults to the real net resolver; Now to time.Now.
@@ -95,6 +105,7 @@ func New(d Deps) *Orchestrator {
 		cfgFingerprint: d.ConfigFingerprint,
 		smtp:           d.SMTP,
 		external:       d.External,
+		flywheel:       d.Flywheel,
 	}
 }
 
@@ -278,6 +289,16 @@ func (o *Orchestrator) compute(ctx context.Context, rawEmail string, def *policy
 	emailHash := o.hasher.EmailHash(normalized)
 	localPart := normalized[:indexAt(normalized)]
 
+	// 1b. Phase-7 HISTORICAL-BOUNCE GATE (§4.6), the ONE new P7 gate. If this address has ≥N confirmed
+	//     invalid-signal (mailbox_not_found) bounces on record within the TTL, short-circuit to
+	//     invalid/historical_bounce — GROUND-TRUTH proof it doesn't exist, stronger than any probe or
+	//     cache hit. Nil-safe + inert by default (no history / gate disabled => does not fire). Uses the
+	//     RESERVED reason (Door 4, zero new vocab). Reads the address-level email_hash rollup (§3.1).
+	//     A post-TTL history degrades to a confidence penalty applied at assembly, not a short-circuit.
+	if gv, fired := o.historicalGate(ctx, emailHash, def); fired {
+		return o.computeHistoricalBounce(rawEmail, domain, emailHash, localPart, gv, start, def), nil
+	}
+
 	// 2. Cache lookup on the COMPOSITE key (email_hash, config_fingerprint) — §4.2. A hit is
 	//    still LOGged with from_cache=true (§4.2/OQ-9). A miss/expiry falls through to compute.
 	if cv, cerr := o.store.GetCachedVerdict(ctx, emailHash, o.cfgFingerprint); cerr == nil {
@@ -372,6 +393,13 @@ func (o *Orchestrator) compute(ctx context.Context, rawEmail string, def *policy
 		}
 	}
 
+	// 3d. Phase-7 CALIBRATION READ (§5.4): replace the P1 baseline confidence for this (reason ×
+	//     provider) bucket with the CURRENT EFFECTIVE calibrated confidence, if one exists (external_
+	//     verified reads the SEPARATE bucket space, GAP-54). Cold-start / disabled / recommend-only-not-
+	//     yet-approved => the baseline stands (§5.6 — zero live mutation on a fresh system). Also applies
+	//     the §4.6 TTL-EXPIRED historical-bounce penalty (a recoverable confidence nudge). Nil-safe.
+	v = o.calibrationConfidence(ctx, v, emailHash, def)
+
 	resp, row := verdict.Assemble(toCore(v), prov)
 	// Cache only SETTLED verdicts (§6.5/OQ-P2-6 + PB1): a transient/your-fault unknown from SMTP is
 	// non-cacheable, AND a capacity-gap fallback (SMTP was eligible but no node served it —
@@ -455,6 +483,30 @@ func (o *Orchestrator) computeReject(rawEmail string, start time.Time, def *poli
 	resp, row := verdict.Assemble(core, prov)
 	// A reject is terminal (settles, never retries) and NOT cached (its key would be NULL).
 	return computed{resp: resp, row: row, kind: logReject, class: QSettled, lastReason: string(vocab.ReasonInvalidSyntax)}
+}
+
+// computeHistoricalBounce assembles the §4.6 historical-bounce gate verdict (invalid/historical_bounce)
+// WITHOUT logging — the settler logs it (logFull → logAndCacheRaw), exactly like a normal terminal
+// verdict. The gate fired on ground-truth (≥N confirmed invalid-signal bounces within the TTL), so it
+// is a SETTLED verdict; it is NOT cached (cacheable=false) — a historical-bounce is a per-address rollup
+// conclusion that must be RE-EVALUATED against the rollup each time (so a TTL expiry / a re-created
+// mailbox is seen promptly, not frozen in the cache). It carries full provenance (email_hash/domain) so
+// the LOG row joins normally. Zero new vocab (reason=historical_bounce is P1-reserved, Door 4).
+func (o *Orchestrator) computeHistoricalBounce(rawEmail, domain string, emailHash []byte, localPart string, gv policy.Verdict, start time.Time, def *policy.Definition) computed {
+	prov := verdict.Provenance{
+		RequestID: mustID(o.now()), CheckedAt: start, LatencyMS: sinceMS(o.now(), start),
+		PolicyKey: def.Key, PolicyVersion: def.Version, ConfigFingerprint: o.cfgFingerprint,
+		FromCache: false,
+		RawEmail:  rawEmail, NormalizedDomain: domain, EmailHash: emailHash,
+		HashScheme: hash.SchemeTag, LocalPartLen: len(localPart), MXProvider: mxProviderOf(gv.Signals),
+	}
+	resp, row := verdict.Assemble(toCore(gv), prov)
+	// Terminal (settles, never retries); NOT cached (re-evaluate the rollup each time — TTL/recovery).
+	return computed{
+		resp: resp, row: row, kind: logFull,
+		emailHash: emailHash, domain: domain, prov: prov, cacheable: false, rawBlob: nil,
+		class: QSettled, lastReason: string(vocab.ReasonHistoricalBounce),
+	}
 }
 
 // computeFromCache assembles a cache hit (from_cache=true) WITHOUT logging — the settler logs it

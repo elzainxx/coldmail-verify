@@ -251,6 +251,15 @@ func (e *Engine) confidence(def *Definition, reason vocab.Reason, flags map[stri
 	return clamp(c, 0, 100)
 }
 
+// Recommend is the package-level recommendation derivation (§7.2) — the SAME logic the engine uses,
+// exposed so a later-phase stage that CHANGES a verdict's confidence (P7 §5.4 recalibration read, or
+// the §4.6 historical-bounce TTL-expired penalty) can RE-DERIVE the recommendation honoring the LOCKED
+// composability invariant. It never up-grades toward send illegally: a lowered confidence can only move
+// the recommendation toward the safer value (send→review→skip). Pure; no state.
+func Recommend(def *Definition, status vocab.Status, reason vocab.Reason, conf int) vocab.Recommendation {
+	return (&Engine{}).recommend(def, status, reason, conf)
+}
+
 // recommend maps (status × confidence) → recommendation, then REPAIRS toward the LOCKED
 // composability invariant (vocab.ComposabilityOK) so an illegal pair can never be emitted:
 //

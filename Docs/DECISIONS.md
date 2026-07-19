@@ -94,6 +94,7 @@ Recorded in [`pre-takeoff-checklist.md`](pre-takeoff-checklist.md); **none imple
 |---|---|---|---|
 | [ADR-0001](adr/ADR-0001-outcome-feed-authentication.md) | OQ-P7-1 elevated to a hard pre-P7 authentication door | *new* TB-7 trust gate (P7 input) | No — new gate, five frozen doors untouched |
 | [ADR-0002](adr/ADR-0002-queue-plaintext-backup-scope.md) | Queue-plaintext backup-awareness gate at P5 | **Door 3** (email hashing / no-plaintext) | **No** — affirms Door 3 + the P5 bounded exception; adds a gate |
+| [ADR-0013](adr/ADR-0013-outcome-feed-auth-mechanism-and-tb7-threat-model.md) | Resolves OQ-P7-1 **mechanism** (mutually-authenticated pull / mTLS) + the TB-7 malicious-sender threat model — discharges the pre-P7 gate (extends ADR-0001) | *new* TB-7 trust gate (P7 input) | **No** — extends ADR-0001; five frozen doors untouched |
 
 ---
 
@@ -113,7 +114,7 @@ No ruling in this log reopens any frozen door. Restated for record (full evidenc
 
 Applying the accepted items surfaced these sub-decisions the docs never pinned. **They are flagged, not resolved:**
 
-- **[OQ-P7-1 mechanism]** signed webhooks **vs.** mutually-authenticated pull — DR-1 fixes *that* the feed is authenticated, not *how*. Owner / P7-time.
+- **[OQ-P7-1 mechanism]** signed webhooks **vs.** mutually-authenticated pull — DR-1 fixes *that* the feed is authenticated, not *how*. Owner / P7-time. **✅ RESOLVED (2026-07-19, P7 build): mutually-authenticated pull (mTLS)** — P7 is the authenticated client, opening no new inbound surface on the pepper-holding brain, with native backpressure + cursor/watermark replay-safety; built behind a swappable `OutcomeSource` interface so it is reversible to signed-webhooks by one adapter. The **TB-7 malicious-sender threat model** DR-1 required is produced in the same record. See **[ADR-0013](adr/ADR-0013-outcome-feed-auth-mechanism-and-tb7-threat-model.md)**. Live ingestion still gated on the sender ("Feature 2") existing (GAP-48, PENDING-REAL-SENDER).
 - **[PN-11 / F-17]** the value of **N** (independent invalid-signal outcomes before the historical-bounce gate fires) — a DIAL, owner-set; and whether the ≥N guard is *always on* or *only when the feed is unauthenticated* (DR-1 makes authentication mandatory, so ≥N becomes defense-in-depth rather than the sole guard). Owner/P7-time.
 - **[PN-14a]** the **home of the `(message_id, event)` dedup guard** — P7 §3.4 locks the dedup *key*; it does not pin whether the guard is a DB `UNIQUE` on `send_outcomes`, an app-level append-guard, or a staging table. Recorded as a note; **not** decided (deciding it would be a new schema commitment).
 - **[PN-14b]** **`residue_class` typed column vs. staying in `signals.external.residue_class` jsonb** — a calibration group-by dimension; report §5 note 3 raised it as open. Not decided.
@@ -135,7 +136,8 @@ the §5 parked sub-decisions above remain parked (they are the genuinely-open on
 |---|---|---|---|
 | **OQ-P6-3** | Vendor `invalid` acceptance asymmetry | **DECIDED** (asymmetric): accept as `invalid` only on retry-exhausted / gave-up-capacity; downgrade to `risky` on catch-all/`:mx`. | P6 §3.4 + Appendix D.2; [`config-manifest.md`](config-manifest.md) §6.2; pre-takeoff-checklist §2 |
 | **OQ-P6-6** | Platform disclosure for vendor egress | **DECIDED**: disclose + opt-out (per-policy `external` block = the opt-out lever); PN-6 asserts platform-opt-out ↔ policy-without-`external` maps 1:1 at integration. Positioning call flagged. | P6 §7.5 + Appendix D.3; [[truemail-platform-privacy-egress-contradiction]] |
-| **OQ-P7-2** | Historical-bounce gate TTL + reversibility | **DECIDED**: TTL-windowed hard gate (6–12 mo, DIAL) on confirmed `mailbox_not_found` only, degrading to a confidence penalty after. PN-11 adds a ≥N defense-in-depth DIAL behind DR-1. | P7 §4.6 + Appendix D.3 |
+| **OQ-P7-1** | Outcome-feed authentication **mechanism** (signed webhooks vs mutually-authenticated pull) | **DECIDED (2026-07-19, P7 build): mutually-authenticated pull (mTLS)** — discharges the ADR-0001 pre-P7 gate together with the TB-7 malicious-sender threat model; built behind a swappable `OutcomeSource` interface (reversible to signed-webhooks). Live still gated on the sender (PENDING-REAL-SENDER, GAP-48). | **[ADR-0013](adr/ADR-0013-outcome-feed-auth-mechanism-and-tb7-threat-model.md)**; §5 (parked line resolved) |
+| **OQ-P7-2** | Historical-bounce gate TTL + reversibility | **DECIDED**: TTL-windowed hard gate (6–12 mo, DIAL) on confirmed `mailbox_not_found` only, degrading to a confidence penalty after. PN-11 adds a ≥N defense-in-depth DIAL behind DR-1. **Built (P7): `TM_HISTORICAL_BOUNCE_TTL_DAYS`=270, `_MIN_N`=2 — [ADR-0014](adr/ADR-0014-phase-7-flywheel-additive-surface.md).** | P7 §4.6 + Appendix D.3 |
 | **OQ-P7-8** | "Your sends train our accuracy" disclosure | **DECIDED**: surface it (disclose-don't-hide); brain exposes the seam, platform decides terms. | P7 §14 + Appendix D.6 |
 | **P1 cheap-layers mock-vs-live** | Do the cheap layers call a mocked engine, or run brain-native? | **DECIDED**: brain-native for syntax + MX/DNS/null-MX (the cheap path); the engine is used only for the SMTP path (P2). → the Go brain takes **no** truemail dependency. Recorded as **ADR-0004** (a structural, hard-to-reverse choice). | P1 §6 / OQ-6; **[ADR-0004](adr/ADR-0004-cheap-layers-brain-native.md)** |
 

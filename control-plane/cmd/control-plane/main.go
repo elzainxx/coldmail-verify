@@ -19,6 +19,7 @@ import (
 	"github.com/mnfi/codmailling/control-plane/internal/audit"
 	"github.com/mnfi/codmailling/control-plane/internal/config"
 	"github.com/mnfi/codmailling/control-plane/internal/external"
+	"github.com/mnfi/codmailling/control-plane/internal/flywheel"
 	"github.com/mnfi/codmailling/control-plane/internal/hash"
 	"github.com/mnfi/codmailling/control-plane/internal/health"
 	"github.com/mnfi/codmailling/control-plane/internal/node"
@@ -136,6 +137,14 @@ func buildAPI(appCtx context.Context, cfg config.Config, sec *secrets.Secrets, h
 	// (Fallback==off) forces it off regardless (ExternalFallbackEnabled returns false).
 	externalDeps := buildExternal(cfg, sec)
 
+	// P7 (§4.6/§5.4): wire the flywheel's two LIVE-PATH touches (the historical-bounce gate + the
+	// calibrated-confidence read). Both default OFF (opt-in flags) so a fresh P7 system behaves
+	// identically to end-of-P6 (the DR-2 fresh-system invariant); even when enabled, the read only
+	// overrides on an APPROVED calibration version, and the gate only fires on a confirmed ≥N in-TTL
+	// history. The recalibration PASS (the writer) is a separate scheduled job (recommend-only by
+	// default) — not started here; the live touches read what an approved pass produced.
+	flywheelDeps := buildFlywheel(cfg)
+
 	orch := orchestrator.New(orchestrator.Deps{
 		Hasher:            hasher,
 		Store:             pg,
@@ -143,6 +152,7 @@ func buildAPI(appCtx context.Context, cfg config.Config, sec *secrets.Secrets, h
 		ConfigFingerprint: cfgFingerprint,
 		SMTP:              smtpDeps,
 		External:          externalDeps,
+		Flywheel:          flywheelDeps,
 	})
 	mode := "cheap-layers-only"
 	if smtpDeps != nil {
@@ -268,6 +278,35 @@ func buildExternal(cfg config.Config, sec *secrets.Secrets) *orchestrator.Extern
 	log.Printf("external: PENDING-REAL-VENDOR — fallback is enabled + DPA confirmed + key present, but no real vendor adapter ships this phase (GAP-47). The layer is built + fail-verified locally against the mock; set deps.Vendor to a real external.Vendor adapter (budget=%d/day breaker_cooldown=%s) to go live.",
 		cfg.Dials.ExternalDailyCap.Value, cfg.ExternalBreakerCooldown())
 	return nil
+}
+
+// buildFlywheel wires the P7 live-path touches (§4.6 historical-bounce gate + §5.4 calibrated read).
+// It is ALWAYS returned non-nil once a store is up (so the gate params + mode are readable), but BOTH
+// touches default OFF via the opt-in flags — a fresh P7 system reads the P1 baseline + never gates
+// (the DR-2 fresh-system invariant). The dials are CONSUMED here (never settable-but-ignored). This is
+// the P7 analogue of buildExternal's config mapping — the mechanism is wired; enabling it is explicit.
+func buildFlywheel(cfg config.Config) *orchestrator.FlywheelDeps {
+	deps := &orchestrator.FlywheelDeps{
+		GateEnabled:        cfg.FlywheelGateEnabled,
+		CalibrationEnabled: cfg.FlywheelCalibrationEnabled,
+		GateParams: flywheel.HistoricalGateParams{
+			TTL:            cfg.HistoricalBounceTTL(),
+			MinIndependent: cfg.Dials.HistoricalBounceMinN,
+			PenaltyPoints:  cfg.Dials.HistoricalBouncePenalty,
+		},
+	}
+	switch {
+	case deps.GateEnabled && deps.CalibrationEnabled:
+		log.Printf("flywheel: historical-bounce gate ON (ttl=%s minN=%d) + calibrated-read ON — verdicts read approved calibration; the gate short-circuits on confirmed ≥N in-TTL history",
+			cfg.HistoricalBounceTTL(), cfg.Dials.HistoricalBounceMinN)
+	case deps.CalibrationEnabled:
+		log.Printf("flywheel: calibrated-read ON (gate OFF) — verdicts read an APPROVED calibration version; cold-start falls back to the P1 baseline")
+	case deps.GateEnabled:
+		log.Printf("flywheel: historical-bounce gate ON (ttl=%s minN=%d); calibrated-read OFF (P1 baseline confidence)", cfg.HistoricalBounceTTL(), cfg.Dials.HistoricalBounceMinN)
+	default:
+		log.Printf("flywheel: live-path touches OFF (fresh-system default) — behavior identical to end-of-P6; recalibration runs recommend-only and an owner approves + enables the reads to go live")
+	}
+	return deps
 }
 
 // configToBudget maps the §5.2 spend-ceiling dials to external.Budget. An UNSET dial (owner-OQ) →

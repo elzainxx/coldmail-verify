@@ -132,3 +132,11 @@ Answer, from the audit: **yes — four do (A1, A6, A8, A9), and this doc sets al
 - **Precondition unchanged:** shadow-mode mitigates but does **not** authenticate the outcome feed — §4's requirement is now the hard door **DR-1 / [ADR-0001](adr/ADR-0001-outcome-feed-authentication.md)**.
 
 *This pass records acceptance and wires the regression gate; it builds no mechanism and reopens no door.*
+
+### 7.1 P7 build (2026-07-19): A6/A8/A9 shipped recommend-only; the fresh-system regression is now proven
+
+The Phase-7 build ships all three P7 mutators **recommend-only by default**, and the §5 behavioral acceptance (**fresh system = every in-scope mutator at default mode, zero live mutation**) is now a passing regression test, not a plan:
+- **A6 recalibration** — a recommend-only pass writes a **proposal** (an unapproved calibration version, `effective_from` NULL) that the verdict path does NOT read; the live §5.4 read (`TM_FLYWHEEL_CALIBRATION_ENABLED`) defaults OFF. Proven by `TestRecalibrate_RecommendOnly_NoEffectiveVersion` (a proposal never becomes effective without a deliberate `ApproveCalibration`) and `TestFreshSystem_FlywheelWiredButInert` (a wired-but-fresh flywheel yields a byte-identical verdict to flywheel-off).
+- **A8 promotion / A9 weaning** — `EvaluatePromotion`/`EvaluateWeaning` are recommend-only decision logic; on a fresh system both return "hold" (sample gates unmet) → **zero** providers promoted, **zero** buckets weaned (`TestPromotion_SampleGatedAndReversible`, `TestWeaning_RequiresMeasuredMarginOnBoth`).
+- **A10 historical-bounce gate** — stays auto (deterministic: TTL + confirmed-only + ≥N), but ships OFF by default (`TM_FLYWHEEL_GATE_ENABLED`=false) so a fresh system does not gate until an owner opts in.
+- **§4 input authentication (the precondition shadow-mode does NOT solve)** — discharged: [ADR-0013](adr/ADR-0013-outcome-feed-auth-mechanism-and-tb7-threat-model.md) decides the mechanism (mutually-authenticated pull / mTLS) + the TB-7 threat model; ingestion is **fail-closed** (an unauthenticated source ingests nothing — `TestIngest_UnauthenticatedIngestNothing`). Recommend-only + authentication are both present, neither substituting for the other. Promotion of any mechanism to `auto` remains a deliberate, admin-audited owner action (DR-3); the build performs none.

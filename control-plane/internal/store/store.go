@@ -294,10 +294,126 @@ type ExternalSpend struct {
 	CallsLastMinute int // total calls in the last rolling minute — the rate_ceiling brake (§5.2)
 }
 
+// ── Phase 7 (§3/§5/§8) — the flywheel: outcomes, the calibration store, the recalibration CAS ──
+
+// SendOutcomeRow is one arriving send outcome (P7 §3.2 shape, filled into the P1 send_outcomes table).
+// The sender supplies VerificationID/MessageID/Event/SentAt/OccurredAt/Raw; P7 backfills the rollup
+// dims + the classifier fields at ingestion. Door 3: it stores email_hash (rollup) + domain, NEVER
+// plaintext. CalibrationClass/IngestError are the P7-owned annotations (migration 0012) — the
+// classifier's decision + the reject-and-flag integrity marker (§3.4/GAP-51).
+type SendOutcomeRow struct {
+	ID             string    // UUIDv7 (time-ordered)
+	VerificationID string    // the authoritative verdict-level join anchor (§3.1); "" => no prior verdict (GAP-51 flag)
+	EmailHash      []byte    // address rollup (§3.1 — NOT the primary join); the historical-bounce rollup key (§4.6)
+	Domain         string    // rollup dimension (captured at outcome time)
+	MXProvider     string    // the P1-promoted provider dimension (§5.2 bucket key)
+	MessageID      string    // sender's message id — idempotency (§3.4, with Event)
+	Event          string    // the RAW provider event → normalized by the classifier (never trusted as-is, §3.2)
+	SentAt         time.Time // temporal attribution (§3.3) — must be >= the verdict's created_at
+	OccurredAt     time.Time // when the bounce/delivery happened
+	Raw            []byte    // untouched provider event (jsonb) — the fidelity copy exclusions re-audit against
+
+	// P7-owned classifier annotations (migration 0012). Set at ingestion, AFTER the join classifies it.
+	CalibrationClass string // "invalid_signal"|"valid_signal"|"zero_information"|"excluded"|"" (unclassified)
+	IngestError      string // "" (clean) | "unknown_verification_id"|"sent_before_verdict"|"malformed"|"unauthenticated"
+	IsExternalVerified bool // the joined verdict was reason=external_verified (bucket SEPARATELY, §5.2/GAP-54)
+	ResidueClass     string // the P6 residue class of the joined rented verdict (external bucket key); "" if SMTP-earned
+	Vendor           string // the vendor of the joined rented verdict (external bucket key); "" if SMTP-earned
+	FromCache        bool   // the joined verdict was from_cache=true (calibration-excluded, §4.4)
+	IngestedAt       time.Time
+}
+
+// VerdictJoin is the projection of a verifications row the ingestion join needs (§3.1/§3.3/§4.4) — the
+// verdict fields that decide how an outcome is classified/excluded, WITHOUT reading the full row. It is
+// read by verification_id (the authoritative anchor). Known=false => no such verdict (GAP-51: reject).
+type VerdictJoin struct {
+	Status       string
+	Reason       string
+	Confidence   int
+	MXProvider   string
+	FromCache    bool      // §4.4: a cache-hit verdict's outcome is calibration-EXCLUDED (not a fresh check)
+	IsOverride   bool      // §4.4: a whitelist/blacklist override verdict is calibration-EXCLUDED
+	CreatedAt    time.Time // §3.3: an outcome whose sent_at precedes this is a temporal contradiction (reject)
+	EmailHash    []byte
+	Domain       string
+	ResidueClass string // from signals.external.residue_class when reason=external_verified (GAP-54 bucket)
+	Vendor       string // from signals.external.vendor when reason=external_verified
+}
+
+// CalibrationRow is one versioned confidence-store row (P7 §5.4 / PN-14 sketch). The bucket is
+// (Reason × MXProvider); Vendor+ResidueClass are set ONLY for the parallel external-verified bucket
+// space (both-null or both-set, §5.2/GAP-54). EffectiveFrom==zero => a PROPOSAL (recommend-only, not
+// read by the verdict path); the verdict path reads the CURRENT effective row (EffectiveFrom set,
+// EffectiveTo zero). Versioned so a bad cycle is revertible (§6.4).
+type CalibrationRow struct {
+	ID            string
+	Reason        string
+	MXProvider    string
+	Vendor        string // "" => SMTP-earned bucket; non-"" => rented (external) bucket (GAP-54)
+	ResidueClass  string // "" => SMTP-earned; non-"" => the P6 residue class (external bucket)
+	Confidence    int
+	SampleN       int
+	Version       int
+	Mode          string // "shadow"|"recommend_only"|"auto" — the mechanism mode at write time
+	Approved      bool
+	EffectiveFrom time.Time // zero => proposal only (not effective)
+	EffectiveTo   time.Time // zero => still effective (when EffectiveFrom set)
+	CreatedAt     time.Time
+}
+
+// BucketAggregate is the recalibration read (§5.2/§5.3): calibratable outcomes grouped by bucket, with
+// the counts the four guards + the accuracy metric need. It EXCLUDES zero-information, from_cache,
+// override, and ingest_error rows at the SQL layer (§4.3/§4.4) — the exclusion discipline enforced at
+// read time. External-verified rows come back with Vendor/ResidueClass set (bucketed separately).
+type BucketAggregate struct {
+	Reason       string
+	MXProvider   string
+	Vendor       string // non-"" => an external-verified bucket (measured separately, GAP-54)
+	ResidueClass string
+	QualifyingN  int     // calibratable outcomes in this bucket (invalid_signal + weighted valid_signal)
+	InvalidN     int     // invalid_signal (mailbox_not_found) outcomes — the numerator (§8.1)
+}
+
+// AccuracyRow is the §8 per-provider accuracy read: of valid-labeled verdicts that got a calibratable
+// outcome, how many were false-valid (invalid-signal). Carries the coverage denominator (ValidLabeled)
+// so the §8.2 "never a bare number" rule is enforceable (see flywheel.Accuracy).
+type AccuracyRow struct {
+	MXProvider        string
+	Vendor            string // "" => SMTP-earned; non-"" => rented population (weaning compares the two)
+	ResidueClass      string
+	ValidLabeled      int // valid-labeled verdicts in scope (coverage denominator)
+	CalibratableValid int // of those, how many got a calibratable outcome (accuracy denominator)
+	FalseValid        int // of those, how many hard-bounced invalid-signal (accuracy numerator)
+}
+
+// RecalRun is the recalibration lease/CAS record (P7 §5.5/GAP-53) — the exactly-once writer's lease.
+// BucketsTouched (denominator) AND BucketsAtMax (numerator) are BOTH persisted so the §6.4 cascade
+// brake's ROLLING window can sum both across prior cycles — without the numerator, prior cycles would
+// contribute 0 to the at-max count and the staggered-drift detector would be defeated (the P4 lesson-a).
+type RecalRun struct {
+	ID             string
+	Status         string // leased | committed | discarded | failed
+	LeasedBy       string
+	LeasedAt       time.Time
+	WindowFrom     time.Time
+	WindowTo       time.Time
+	BucketsTouched int
+	BucketsAtMax   int
+	BrakeHeld      bool
+}
+
 // ErrNotWired marks the no-DB stub. ErrCacheMiss is a normal (non-error) cache absence.
 var (
 	ErrNotWired  = errors.New("store: no database wired")
 	ErrCacheMiss = errors.New("store: cache miss")
+	// ErrOutcomeDuplicate is returned by AppendSendOutcome when the (message_id, event) dedup key
+	// already exists (§3.4): a replayed webhook delivery is a NO-OP, not an error to retry — the
+	// exactly-once INGESTION guarantee firing (the input-side complement of the recalibration CAS).
+	ErrOutcomeDuplicate = errors.New("store: send-outcome duplicate (message_id, event) — no-op")
+	// ErrRecalLeaseLost is the recalibration writer's CAS firing (§5.5/GAP-53): a cycle whose lease was
+	// reclaimed (slow, not dead) matches zero rows on commit and DISCARDS its bucket writes — the
+	// P5/P6 exactly-once invariant transferring a third time (settle-once → spend-once → recalibrate-once).
+	ErrRecalLeaseLost = errors.New("store: recalibration lease lost (CAS matched zero rows)")
 	// ErrLeaseLost is returned by a CAS settle/requeue when the WHERE (id, locked_by=<me>,
 	// status='in_flight') matched ZERO rows (GAP-37): the lease was reclaimed or the item already
 	// transitioned. The caller DISCARDS its result — it neither settled nor requeued. This is not a
@@ -513,6 +629,80 @@ type Store interface {
 	// read-only lookup (cp_runtime has SELECT only on api_callers; issuance/rotation are cp_admin).
 	LookupCaller(ctx context.Context, keySHA256 []byte, now time.Time) (callerID string, ok bool, err error)
 
+	// ── Phase 7 (§3/§5/§8) — the flywheel ──
+
+	// GetVerdictForJoin reads the join projection of a verdict by id (§3.1). known=false => no such
+	// verdict (the ingestion path flags ingest_error=unknown_verification_id and excludes it — GAP-51).
+	GetVerdictForJoin(ctx context.Context, verificationID string) (VerdictJoin, bool, error)
+
+	// AppendSendOutcome inserts one classified send outcome (§3), DEDUPING on (message_id, event) —
+	// a replayed delivery returns ErrOutcomeDuplicate (a no-op, §3.4). The caller has already joined +
+	// classified the outcome (CalibrationClass/IngestError/rollup dims set). INSERT-only append; the
+	// classifier annotations are set at insert (not a later UPDATE) so a duplicate can't reclassify.
+	AppendSendOutcome(ctx context.Context, row SendOutcomeRow) error
+
+	// HistoricalBounceCount returns the address-level rollup for the §4.6 gate: the number of DISTINCT
+	// CONFIRMED invalid-signal (mailbox_not_found) outcomes for an email_hash, and the latest such time
+	// (the TTL anchor). It counts ONLY calibration_class='invalid_signal' rows with no ingest_error —
+	// a zero-information bounce never reaches this rollup (§4.6 anti-poisoning). count=0 => the gate
+	// never fires. This is the ONE place the email_hash rollup (not verification_id) is the right key.
+	HistoricalBounceCount(ctx context.Context, emailHash []byte) (independentCount int, latestAt time.Time, err error)
+
+	// BucketAggregatesSince aggregates calibratable outcomes by bucket over [since, now] for
+	// recalibration (§5.2). It EXCLUDES zero-information / from_cache / override / ingest_error rows in
+	// SQL (§4.3/§4.4 — the exclusion discipline at read time), and returns external-verified rows with
+	// Vendor/ResidueClass set so they bucket SEPARATELY (GAP-54). This is the recalibration read; the
+	// caller runs the four guards over it and stages proposals into the calibration store.
+	BucketAggregatesSince(ctx context.Context, since, now time.Time) ([]BucketAggregate, error)
+
+	// GetEffectiveCalibration reads the CURRENT effective confidence for a bucket (the verdict-path
+	// read, §5.4). vendor/residueClass are "" for a SMTP-earned bucket, non-"" for the external bucket
+	// space. known=false => no effective row (cold-start → the caller uses the P1 baseline, §5.6).
+	GetEffectiveCalibration(ctx context.Context, reason, mxProvider, vendor, residueClass string) (CalibrationRow, bool, error)
+
+	// AppendCalibrationVersion writes a NEW versioned calibration row (§5.4). At recommend-only it is a
+	// PROPOSAL (EffectiveFrom zero) — computed + alertable, NOT read by the verdict path (shadow-mode
+	// §2.1). Version is assigned by the store (max(version)+1 for the bucket). Append-only in spirit;
+	// approval/supersede/rollback are separate operations. Returns the assigned version.
+	AppendCalibrationVersion(ctx context.Context, row CalibrationRow) (version int, err error)
+
+	// ApproveCalibration marks a proposed calibration version effective (§5.4/§6.4) — stamping its
+	// EffectiveFrom=at and closing the prior effective row's EffectiveTo=at, atomically. This is the
+	// deliberate owner action that promotes a recommend-only proposal to live (or the auto path when a
+	// mechanism is owner-promoted). Rolling back is the inverse (RollbackCalibration). Idempotent per id.
+	ApproveCalibration(ctx context.Context, calibrationID string, at time.Time) error
+
+	// AccuracyByProvider reads the §8 per-provider accuracy facts over [since, now]: for valid-labeled
+	// verdicts, the coverage denominator (ValidLabeled), the accuracy denominator (CalibratableValid),
+	// and the numerator (FalseValid = invalid-signal outcomes). SMTP-earned buckets have Vendor="";
+	// external-verified buckets are returned separately (Vendor set) so §9 weaning compares the two.
+	AccuracyByProvider(ctx context.Context, since, now time.Time) ([]AccuracyRow, error)
+
+	// LeaseRecalibration inserts a 'leased' recalibration_runs row (§5.5) and returns its id — the
+	// lease unit for the exactly-once recalibration writer (GAP-53).
+	LeaseRecalibration(ctx context.Context, run RecalRun) (runID string, err error)
+
+	// CommitRecalibration is the recalibration writer's CAS (§5.5/GAP-53): it stages the proposed
+	// calibration versions AND flips the run 'leased'→'committed' UNDER A SINGLE compare-and-set on the
+	// lease-holder (id + status='leased' + leased_by). If the CAS matches ZERO rows (the lease was
+	// reclaimed — a slow, not-dead cycle), the whole tx ROLLS BACK (no calibration rows written) and it
+	// returns ErrRecalLeaseLost — the discarded cycle applies nothing. brakeHeld records a §6.4 cascade
+	// hold. This is settle-once/spend-once transferring a THIRD time to the calibration writer.
+	// bucketsTouched (denominator) + bucketsAtMax (numerator) are BOTH recorded so the §6.4 cascade
+	// brake's rolling window can sum across prior committed cycles (the staggered-drift detector).
+	CommitRecalibration(ctx context.Context, runID, leasedBy string, versions []CalibrationRow, bucketsTouched, bucketsAtMax int, brakeHeld bool, now time.Time) error
+
+	// RecentRecalRuns returns the last `limit` committed recalibration runs (most recent first) — the
+	// rolling window the cascade brake reasons over (§6.4, the staggered-drift detector). It carries
+	// BucketsTouched per run so CascadeBrake can sum across cycles.
+	RecentRecalRuns(ctx context.Context, limit int) ([]RecalRun, error)
+
+	// GetOutcomeCursor / SetOutcomeCursor read/write the durable pull watermark per feed source
+	// (ADR-0013 §B.2, mutually-authenticated pull). known=false => never pulled (start from the source's
+	// beginning). Replay-safe by construction (complements the (message_id,event) dedup).
+	GetOutcomeCursor(ctx context.Context, sourceKey string) (cursor string, known bool, err error)
+	SetOutcomeCursor(ctx context.Context, sourceKey, cursor string, at time.Time) error
+
 	Ping(ctx context.Context) error
 	Close()
 }
@@ -601,6 +791,39 @@ func (StubStore) ListJobResults(context.Context, string, string, int) ([]WorkIte
 }
 func (StubStore) LookupCaller(context.Context, []byte, time.Time) (string, bool, error) {
 	return "", false, ErrNotWired
+}
+func (StubStore) GetVerdictForJoin(context.Context, string) (VerdictJoin, bool, error) {
+	return VerdictJoin{}, false, ErrNotWired
+}
+func (StubStore) AppendSendOutcome(context.Context, SendOutcomeRow) error { return ErrNotWired }
+func (StubStore) HistoricalBounceCount(context.Context, []byte) (int, time.Time, error) {
+	return 0, time.Time{}, ErrNotWired
+}
+func (StubStore) BucketAggregatesSince(context.Context, time.Time, time.Time) ([]BucketAggregate, error) {
+	return nil, ErrNotWired
+}
+func (StubStore) GetEffectiveCalibration(context.Context, string, string, string, string) (CalibrationRow, bool, error) {
+	return CalibrationRow{}, false, ErrNotWired
+}
+func (StubStore) AppendCalibrationVersion(context.Context, CalibrationRow) (int, error) {
+	return 0, ErrNotWired
+}
+func (StubStore) ApproveCalibration(context.Context, string, time.Time) error { return ErrNotWired }
+func (StubStore) AccuracyByProvider(context.Context, time.Time, time.Time) ([]AccuracyRow, error) {
+	return nil, ErrNotWired
+}
+func (StubStore) LeaseRecalibration(context.Context, RecalRun) (string, error) {
+	return "", ErrNotWired
+}
+func (StubStore) CommitRecalibration(context.Context, string, string, []CalibrationRow, int, int, bool, time.Time) error {
+	return ErrNotWired
+}
+func (StubStore) RecentRecalRuns(context.Context, int) ([]RecalRun, error) { return nil, ErrNotWired }
+func (StubStore) GetOutcomeCursor(context.Context, string) (string, bool, error) {
+	return "", false, ErrNotWired
+}
+func (StubStore) SetOutcomeCursor(context.Context, string, string, time.Time) error {
+	return ErrNotWired
 }
 func (StubStore) Ping(context.Context) error { return ErrNotWired }
 func (StubStore) Close()                     {}

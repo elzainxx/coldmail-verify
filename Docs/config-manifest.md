@@ -473,6 +473,25 @@ Rung-2 dial (see §1 kill-switch); `TM_VENDOR_KEYS` is the pre-existing vendor-k
 | **`unknown` not pressured to `valid`** | feature-flag | LOCKED — first-class unknown survives flywheel | eroding → relitigates founding discipline | brain-wide | P7 §8.4 |
 | **platform "your sends train our accuracy" disclosure** | feature-flag | surface it (OQ-P7-8), disclose-don't-hide | silent → cross-project privacy contradiction | cross-project | P7 §14, OQ-P7-8 |
 
+### 7.5 Concrete P7 env vars (as-built, local flywheel — [`internal/config`](../control-plane/internal/config/config.go) + [`cmd/control-plane`](../control-plane/cmd/control-plane/main.go))
+
+> As-built rows for the P7 build. The two LIVE-PATH touches (the §4.6 gate + the §5.4 calibrated read) default **OFF** — a fresh P7 system behaves identically to end-of-P6 (the DR-2 fresh-system invariant); enabling each is an explicit `=true`. The recalibration guards carry the spec's conservative defaults; the brake fraction/window/up-step are **range-validated at startup** (out-of-range → startup error, never a silent disable — the P4 lesson-b, [`config.Validate`](../control-plane/internal/config/config.go)). Live ingestion is **PENDING-REAL-SENDER** (ADR-0013 — the mTLS feed needs the sender; local build uses `SimulatedSource`).
+
+| name | type | default | mis-setting effect | blast radius | source |
+|---|---|---|---|---|---|
+| **TM_FLYWHEEL_GATE_ENABLED** | feature-flag | `false` (OFF — fresh-system invariant) | enabling before an owner opts in → verdicts short-circuit on historical bounces prematurely | per-verdict | P7 §4.6, DR-2 |
+| **TM_FLYWHEEL_CALIBRATION_ENABLED** | feature-flag | `false` (OFF — P1 baseline stands) | enabling → verdicts read APPROVED calibration instead of the baseline (still inert until a version is approved) | brain-wide (confidence) | P7 §5.4, DR-2 |
+| **TM_HISTORICAL_BOUNCE_TTL_DAYS** | dial | 270 (9mo, within OQ-P7-2's 6–12mo) | 0 → gate inert; too long → a reclaimed mailbox stays blacklisted longer | per-verdict / reversibility | P7 §4.6, OQ-P7-2 |
+| **TM_HISTORICAL_BOUNCE_MIN_N** | dial | 2 (F-17/PN-11 — one forged outcome can't blacklist) | 1 → a single forged/mislabeled bounce suppresses a real address for the TTL | per-verdict / security | P7 §4.6, F-17, PN-11 |
+| **TM_HISTORICAL_BOUNCE_PENALTY** | dial | 30 (post-TTL confidence penalty, recoverable) | too high → a re-created mailbox over-penalized | per-verdict | P7 §4.6 |
+| **TM_RECAL_MIN_BUCKET_SAMPLES** | dial | 500 (OQ-P7-3 build-plan upper) | too low → recalibrate on small-N noise (GAP-27 analogue) | calibration | P7 §6.2, OQ-P7-3 |
+| **TM_RECAL_MAX_STEP** | dial | 10 (points/cycle) | too high → one bad window captures a bucket | calibration | P7 §6.3 |
+| **TM_RECAL_UP_STEP_PCT** | dial | 50 (up moves at half rate — down-fast/up-slow) | >100 → inverts the hysteresis asymmetry (rejected at startup) | calibration | P7 §6.3 |
+| **TM_RECAL_BRAKE_WINDOW_CYCLES** | dial | 3 (>1 catches STAGGERED drift — P4 lesson-a) | 0 → disables the brake (rejected at startup) | brain-wide (calibration) | P7 §6.4 |
+| **TM_RECAL_BRAKE_BUCKET_PCT** | dial | 50 (must be 1..99) | outside 1..99 → brake can never fire, silently disabled (rejected at startup — P4 lesson-b) | brain-wide (calibration) | P7 §6.4 |
+| **TM_RECAL_BRAKE_MIN_BUCKETS** | dial | 20 (denominator floor) | 0 → brake trips on one noisy bucket | calibration | P7 §6.4 |
+| **TM_RECAL_CADENCE_SECONDS** | dial | 86400 (daily rollup, OQ-P7-7) | per-outcome → twitch, meaningless per-cycle bound | calibration | P7 §5, OQ-P7-7 |
+
 ---
 
 ## 8. CROSS-PHASE FLAGS
