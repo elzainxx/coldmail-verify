@@ -40,6 +40,14 @@ Plus [`truemail-build-plan.md`](truemail-build-plan.md) (the phased plan) and
 | [`pre-takeoff-checklist.md`](pre-takeoff-checklist.md) | What must be true/decided/spiked before each phase's code. |
 | [`consolidation-application-report.md`](consolidation-application-report.md) | Audit trail of the accepted-recommendation application pass. |
 
+## Arc-closing docs (the seven-phase closeout — register of record)
+
+| Doc | What it is |
+|---|---|
+| [`arc-closing.md`](arc-closing.md) | **The honest close of the seven-phase arc:** what is genuinely done (the machine, fail-verified on real Postgres — all nine irreversible surfaces + the fresh-system invariant), what is pending real-world inputs, what is explicitly Phase-8/future, and the cold-start truth stated plainly (*the machine is the deliverable; the moat is years of running it* — verified no doc/code overclaims). |
+| [`pending-ledger.md`](pending-ledger.md) | **The consolidated PENDING register:** every PENDING-REAL-BOX (P3) / PENDING-REAL-VENDOR (P6) / PENDING-REAL-SENDER (P7) item in one place — what's built, why deferred, the exact verification command, and which real-world thing unblocks it. Confirms none was ever faked green (grep-verified). |
+| [`go-live-runbook.md`](go-live-runbook.md) | **The one ordered go-live path:** real box (V1–V5, PTR, egress-25) → vendor enablement (DPA §7.4 + the three env switches) → outcome feed (mTLS, needs the sender). Plus the non-code owner gates (host procurement, DPA, DR-3 admin-audit log, OQ-P6-6/OQ-P7-8 disclosure, and the LICENSE — resolve before the fork is pushed non-local). Consolidates the per-phase cutover runbooks. |
+
 ## ADR log — one-way-door & owner-OQ rulings
 
 See [`adr/README.md`](adr/README.md) for the index and format. ADRs are the record for anything
