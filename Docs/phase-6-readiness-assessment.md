@@ -106,4 +106,4 @@ This is exactly the [[truemail-lease-cas-exactly-once-settlement]] memory doing 
 
 **Bottom line:** Phase 5 is closed, its irreversible surface re-fail-verified, and both security-sensitive surfaces audited clean. Phase 6 is design-complete (APPROVED v1.0) and fully local-buildable **against a mock vendor with the layer disabled** — build it now; **the DPA gates enablement, not implementation.** Line up the vendor pick, the signed DPA, and the platform disclosure/opt-out wiring before flipping `external.enabled` on.
 
-*Also still open (unchanged, non-blocking): LICENSE (DECISIONS §6.1 — pick before external distribution); DR-3 admin-audit log (gates P3 go-live, and the global-fallback-kill / vendor-enablement admin actions ride it).*
+*Also still open (unchanged, non-blocking): LICENSE (**RESOLVED 2026-07-19: proprietary — DECISIONS §6.1 + top-level LICENSE**); DR-3 admin-audit log (gates P3 go-live, and the global-fallback-kill / vendor-enablement admin actions ride it).*

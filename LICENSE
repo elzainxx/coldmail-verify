@@ -1,0 +1,41 @@
+Copyright (c) 2026 The Truemail Verification System owner. All rights reserved.
+
+PROPRIETARY AND CONFIDENTIAL.
+
+This software, its source code, and its accompanying documentation
+(collectively, the "Software", as scoped in the "Scope" section below) are
+the proprietary and confidential property
+of the owner. No license or permission — express or implied — is granted to
+any person to use, copy, reproduce, modify, adapt, publish, distribute,
+sublicense, or create derivative works of the Software, in whole or in part,
+except under a separate written agreement signed by the owner.
+
+Unauthorized use, copying, or distribution is prohibited.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+OWNER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN
+ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+----------------------------------------------------------------------------
+Scope — this license covers the OWNER'S OWN code only
+----------------------------------------------------------------------------
+This proprietary license applies to the project's own code and documentation:
+`control-plane/`, the wrapper additions under `verifier-node/truemail-rack/`,
+`Docs/`, and the repository's own scripts and configuration.
+
+It does NOT apply to, and grants no rights over, the third-party components
+this repository uses or embeds. Those are licensed separately under their own
+(permissive, MIT) terms and are respected and attributed in `NOTICE`:
+
+  - the `truemail` validation engine (MIT, © Vladislav Trotsenko) — consumed
+    as a PINNED, UNMODIFIED dependency (Door 5; CI-asserted byte-identical);
+  - the forked `truemail-rack` HTTP server (MIT, © Vladislav Trotsenko) — the
+    original MIT license is retained verbatim at
+    `verifier-node/truemail-rack/LICENSE.txt`, and fork provenance +
+    modifications are recorded in `verifier-node/truemail-rack/FORK.md`.
+
+Nothing in this file alters, supersedes, or relicenses those third-party
+terms. See `NOTICE` for the full third-party attribution.

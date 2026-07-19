@@ -168,4 +168,4 @@ A1 ships. This is a Phase-4 build obligation, buildable locally, flagged so it i
 parallel (it gates real go-live and unblocks the one non-executable cutover step). The host remains
 the procurement wall for *acceptance*, not for the build.
 
-*Also still open (unchanged, non-blocking): LICENSE (DECISIONS §6.1 — pick before external distribution).*
+*Also still open (unchanged, non-blocking): LICENSE (DECISIONS §6.1 — pick before external distribution). **[RESOLVED 2026-07-19 at the arc closeout: proprietary — see DECISIONS §6.1 + top-level LICENSE.]***

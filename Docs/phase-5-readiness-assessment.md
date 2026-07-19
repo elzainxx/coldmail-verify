@@ -159,4 +159,4 @@ the system. Phase 5 is design-complete and fully local-buildable — **start it 
 whenever ready**; line up DR-4 and PN-13 first. The host remains a rollout-acceptance concern
 (real greylist behavior), never a build blocker.
 
-*Also still open (unchanged, non-blocking): LICENSE (DECISIONS §6.1 — pick before external distribution).*
+*Also still open (unchanged, non-blocking): LICENSE (DECISIONS §6.1 — pick before external distribution). **[RESOLVED 2026-07-19 at the arc closeout: proprietary — see DECISIONS §6.1 + top-level LICENSE.]***

@@ -12,7 +12,7 @@ Companion: the deferred-proof detail is in [`pending-ledger.md`](pending-ledger.
 
 ## Stage 0 — before anything ships anywhere non-local (owner gates that gate the *repo*, not a phase)
 
-🔴 **LICENSE (deferred since Phase 0, 2026-07-17).** The project's own license is deliberately unasserted; third-party MIT (`truemail` engine, `truemail-rack` fork) is respected in [`NOTICE`](../NOTICE). Ruling: *"pick one before any external distribution … Revisit before any external distribution"* (phase-0-signoff-sheet §C; DECISIONS §6.1). **This must be resolved before the fork is pushed anywhere non-local** — the moment the repo (which contains the `truemail-rack` fork) leaves the local machine, the license posture is live. Proprietary → add a `LICENSE` with "all rights reserved"/proprietary terms; open → MIT/Apache-2.0 are compatible with the MIT third-party components. Owner's call which; it blocks nothing local, but it blocks the first push.
+✅ **LICENSE — RESOLVED (2026-07-19, arc closeout).** The project's own license is now **proprietary / all-rights-reserved** — top-level [`LICENSE`](../LICENSE), recorded in DECISIONS §6.1 + README "License posture". It covers the owner's own code only and grants no rights over the MIT third-party components (respected in [`NOTICE`](../NOTICE), retained at `verifier-node/truemail-rack/LICENSE.txt`, gem byte-identical — Door 5). This closes the last Phase-0 deferral and clears the gate that blocked pushing the repo (which contains the `truemail-rack` fork) anywhere non-local. *(Deferred since Phase 0; chosen over MIT/Apache-2.0 because the brain's mechanics + data moat are deliberately non-public — reversible toward openness later, publishing is not.)*
 
 🔴 **DR-3 admin-audit log (gates P3 go-live; buildable now, in parallel).** Before any real go-live, every manual control-plane action (node disable, global-fallback-kill, pause, shadow-mode promotion, budget change, breaker/brake confirm, privacy opt-out flip) must write to an **append-only admin-audit log with per-actor identity**, distinct from the verdict LOG (reusing the `node_audits`/`work_item_attempts` pattern). **Its first slice is the `port25_open` egress-test-writer** (see Stage 1 step 1) — the highest-value parallel build, and the thing that resolves the one known wiring gap.
 
@@ -88,7 +88,7 @@ Any switch missing ⇒ the layer stays off. `TM_FALLBACK_MODE=off` (global-fallb
 
 | Gate | Kind | Blocks | Can start now? |
 |---|---|---|---|
-| **LICENSE** | legal/business | any non-local push of the repo/fork | ✅ decide anytime — blocks the first push |
+| **LICENSE** | legal/business | (was: any non-local push) | ✅ **RESOLVED 2026-07-19 — proprietary/all-rights-reserved ([`LICENSE`](../LICENSE)); no longer blocks the push** |
 | **Host procurement (V1–V5)** | procurement | Stage 1 (real box) | ✅ vet on a refundable trial now |
 | **DR-3 admin-audit log** | build (parallel) | P3 go-live; the `port25_open` flip | ✅ **highest-value parallel build** |
 | **Vendor selection + DPA (§7.4)** | legal | Stage 2 (vendor egress) | ✅ due-diligence anytime |

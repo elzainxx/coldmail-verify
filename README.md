@@ -87,9 +87,13 @@ docker compose -f verifier-node/docker-compose.yml up   # stock rack on :3000 (r
 
 - **Third-party components are MIT and are respected/attributed** in [`NOTICE`](NOTICE)
   (the `truemail` engine and the `truemail-rack` fork, both © Vladislav Trotsenko).
-- **This project's own license is an OWNER decision and is deliberately not asserted yet.**
-  Pick one and add a top-level `LICENSE` before any external distribution. Flagged, not chosen
-  — consistent with the "flag, don't decide" discipline of this build.
+- **This project's own license is RESOLVED (2026-07-19): proprietary / all-rights-reserved** —
+  see the top-level [`LICENSE`](LICENSE). It covers the owner's own code (`control-plane/`, the
+  `verifier-node/` wrapper additions, `Docs/`) and explicitly grants no rights over the MIT
+  third-party components (which remain licensed under their own terms, attributed in `NOTICE`).
+  Deferred since Phase 0 (DECISIONS §6.1); chosen at the arc closeout because the verification
+  brain's mechanics + data moat are deliberately non-public. Reversible toward openness later;
+  publishing is not — so proprietary-first is the safe default.
 
 ## Where to go next
 

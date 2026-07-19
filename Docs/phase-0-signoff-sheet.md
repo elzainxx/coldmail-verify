@@ -85,6 +85,7 @@ asserted** — that is an owner/business decision, not something Phase 0 should 
   add a `LICENSE` stating "All rights reserved" / proprietary terms. If it's ever opened, MIT/Apache-2.0
   are compatible with the MIT third-party components. No recommendation on *which* — that's your call.
 - **Your ruling:** ☑ **defer (stays unlicensed for now)** — ruled 2026-07-17. Does not block local Phase 1 (no external distribution this phase). Revisit before any external distribution.
+- **SUPERSEDED 2026-07-19 → RESOLVED: proprietary / all-rights-reserved.** At the arc closeout the owner chose a proprietary license for the project's own code (covers own code only; grants no rights over the MIT third-party components). Added as the top-level [`LICENSE`](../LICENSE); recorded in [`DECISIONS.md`](DECISIONS.md) §6.1 + [`../README.md`](../README.md) "License posture". The 2026-07-17 deferral above is retained as history.
 
 ---
 

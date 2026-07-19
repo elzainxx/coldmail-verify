@@ -100,4 +100,4 @@ parallel with Gate 1's procurement.
 yet, and acquiring it is the real work.** Gate 3 (admin-audit log) can be built in parallel now; Gate 2 is
 a known number to fold into the warmup ramp. Two of the three gates need owner action; one is design-ready.
 
-*Also still open (unchanged, non-blocking): LICENSE (DECISIONS §6.1 — pick before external distribution).*
+*Also still open (unchanged, non-blocking): LICENSE (DECISIONS §6.1 — pick before external distribution). **[RESOLVED 2026-07-19 at the arc closeout: proprietary — see DECISIONS §6.1 + top-level LICENSE.]***
