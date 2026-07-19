@@ -42,29 +42,6 @@ type Meta struct {
 	FromCache         bool    `json:"from_cache"`
 }
 
-// NewCheapUnknown returns the honest Phase-0 verdict: no engine was consulted, no SMTP
-// ran, so the truthful answer is unknown/plausible at low confidence — NEVER a guessed
-// valid/invalid. This is the harden-toward-unknown default the whole system rests on.
-// It also proves the composability invariant holds for the shape we ship.
-func NewCheapUnknown(rawEmail, domain, requestID, checkedAt string) Response {
-	return Response{
-		APIVersion:     APIVersion,
-		Status:         vocab.StatusUnknown,
-		Reason:         vocab.ReasonPlausible,
-		Confidence:     0,
-		Recommendation: vocab.RecReview,
-		Email:          rawEmail,
-		Domain:         domain,
-		Flags:          map[string]bool{"from_cache": false},
-		Signals:        map[string]any{},
-		Meta: Meta{
-			RequestID: requestID, CheckedAt: checkedAt,
-			Policy: "cold-email", PolicyVersion: 1, FromCache: false,
-		},
-		Raw: nil,
-	}
-}
-
 // Valid checks the response against the frozen vocabulary + composability invariants
 // (Door 1/4). The assembler and tests use it to guarantee nothing illegal is ever emitted.
 func (r Response) Valid() bool {

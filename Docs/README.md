@@ -5,14 +5,25 @@ change updates the relevant doc/ADR in the same change, and CI fails a behavior 
 doesn't ([`../PROJECT_RULES.md`](../PROJECT_RULES.md) §8). Start with the constitution, then
 the specs for depth.
 
-## Read-first
+## Start here — the three audience guides
+
+Whoever you are, start with the guide for your role. Each is self-contained.
+
+| If you are… | Read | It covers |
+|---|---|---|
+| **a developer / maintainer** | [`ONBOARDING.md`](ONBOARDING.md) | what the system is, the two-deployable architecture, the five frozen doors, the nine irreversible surfaces + their fail-verify tests, how to run/test everything locally, and the review discipline — enough to be productive without the phase specs. |
+| **an operator** | [`OPERATIONS.md`](OPERATIONS.md) | deploying the system, the deployment prerequisites and how to satisfy each (host + port 25, verification vendor, outcome feed) with verification commands, the kill-switch ladder, promoting a mechanism to auto, and what each alert means. |
+| **an end user** | [`USER_GUIDE.md`](USER_GUIDE.md) | what each verdict `status`/`reason` means in plain language, what `unknown` means and why it's an honest answer, what the confidence number is and isn't, and which addresses are inherently undeterminable. |
+
+## Read-first (reference)
 
 | Doc | What it is |
 |---|---|
 | [`../PROJECT_RULES.md`](../PROJECT_RULES.md) | **The constitution.** Five doors, first-class `unknown`, two vocabularies, shadow-mode, kill-switch — enough to work without reading all seven specs. |
-| [`../README.md`](../README.md) | Repo overview: the two deployables, Door 5, build/run. |
-| [`DECISIONS.md`](DECISIONS.md) | Binding cross-phase rulings (DR-1…DR-5) + owner-OQ register (§6) + parked sub-decisions (§5, still open). |
+| [`../README.md`](../README.md) | Repo front door: what the system does, the architecture in brief, quick start, and where each doc lives. |
+| [`DECISIONS.md`](DECISIONS.md) | Binding cross-phase rulings (DR-1…DR-5) + owner-OQ register (§6) + parked sub-decisions (§5). |
 | [`config-reference.md`](config-reference.md) | **Generated** from the manifest — the always-current list of what's toggleable. |
+| [`go-live-runbook.md`](go-live-runbook.md) | The one ordered bring-up path from local build to fully live, with each owner setup item. |
 
 ## The seven phase specs (design authorities)
 

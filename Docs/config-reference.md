@@ -15,9 +15,9 @@ Regenerate on any manifest change; CI verifies this file is up to date
 |---|---|
 | secrets | 9 |
 | feature-flags | 148 |
-| dials | 125 |
+| dials | 123 |
 | other/uncategorized | 2 |
-| **total knobs** | **284** |
+| **total knobs** | **282** |
 
 > One-way doors are **not** dials: the frozen contracts (response shape, LOG, hashing,
 > vocabulary, never-fork) live in code (`control-plane/internal/{vocab,hash,verdict,store,router}`),
@@ -191,7 +191,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | TM_FLYWHEEL_GATE_ENABLED | `false` (OFF — fresh-system invariant) | P7 §4.6, DR-2 |
 | TM_FLYWHEEL_CALIBRATION_ENABLED | `false` (OFF — P1 baseline stands) | P7 §5.4, DR-2 |
 
-## Dials (125)
+## Dials (123)
 
 | knob | default / state | source |
 |---|---|---|
@@ -226,9 +226,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | auto-recovery threshold (N consecutive greens) | N-consecutive-green (asymmetric, OQ-P3-7) | P3 §4.5, OQ-P3-7 |
 | warmup ascending daily cap schedule | UNSET (OQ-P3-10) illustrative D1~50/D2~100/D3~250/D4~500/wk2~1–2k | P3 §5.2, OQ-P3-10, GAP-20 |
 | warmup health-checkpoint gate | step up only on prior-day low smtp_blocked + green audit | P3 §5.2, OQ-P3-10 |
-| `TM_AUDIT_INTERVAL_SECONDS` (re-audit cadence) | 3600 (hourly) | P3 §4.5 |
-| `TM_AUDIT_MAX_AGE_SECONDS` (staleness window) | 7200 (2× interval) | P3 §4.5 |
-| `TM_AUDIT_RECOVER_GREENS` (consecutive greens to recover) | 3 | P3 §4.5, OQ-P3-7 |
+| `TM_AUDIT_MAX_AGE_SECONDS` (staleness window) | 7200 (2× the P4 watcher cadence) | P3 §4.5 |
 | `TM_WARMUP_DAILY_CAP` (per-node/per-day `:smtp` cap) | 50 (conservative day-1; 0 ⇒ warmup off) | P3 §5.2, OQ-P3-10, GAP-20 |
 | `max_inflight` (per node×provider concurrency cap) | small, 1–3 | P4 §4.2 |
 | `max_starts_per_window` (rate cap) | ~N/min conservative | P4 §4.2 |
@@ -256,8 +254,8 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | `TM_LIVENESS_MISSES` (M consecutive `/health` fails) | 3 | P4 §5.4 |
 | `TM_FLEET_WIDE_PCT` (cascade-brake trigger, % of active nodes) | 50 (VALIDATED 1..99 — a value ≥100 is REJECTED at startup, as it would make the fraction-brake mathematically unable to fire; finding G) | P4 §5.5, GAP-28 |
 | `TM_CANARY_WARMUP_CAP` (low re-warm cap on recovery) | 20 (VALIDATED ≥ `TM_CANARY_MIN_SAMPLES` — a smaller cap makes the canary unable to accrue enough samples to promote → stuck-forever; finding C) | P4 §5.4 (PM3), GAP-30 |
-| `TM_POOL_ELIGIBLE_FLOOR` (pool-eligible-low alert floor) | 1 | P4 §8.2 |
-| `TM_RATE_SATURATION_COUNT` (rate-saturation alert threshold) | 50 | P4 §8.2 |
+| `TM_POOL_ELIGIBLE_FLOOR` (pool-eligible-low alert floor) | 1 | P4 §8.2, §5.5 |
+| `TM_RATE_SATURATION_COUNT` (rate-saturation alert threshold) | 50 (**RESERVED — read + validated, consumed once `internal/metrics` is wired**) | P4 §8.2 |
 | lease TTL | LOCKED: must exceed brain's max SMTP client deadline (GAP-37) | P5 §5.2, GAP-37 |
 | in-flight dedup collapse | collapse-on-enqueue when cheap; CAS backstop | P5 §5.5 |
 | backoff base step | 5 min (hint-seeded floor from `retry_after_hint_s`) | P5 §4.2, OQ-P5-2 |

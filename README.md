@@ -1,108 +1,140 @@
 # Truemail Verification System
 
-An email-verification control plane built around the pinned [`truemail`](https://github.com/truemail-rb/truemail) engine.
-This repository is the **project spine** produced by **Phase 0** — scaffolding, contracts,
-and living documentation. It contains **no feature logic yet**; every runtime module is a
-stub that *respects* a frozen contract (see [`PROJECT_RULES.md`](PROJECT_RULES.md)).
+An email-verification system that returns an **honest** verdict for any address — `valid`,
+`invalid`, `risky`, or `unknown` — with a confidence score and a recommended action. It verifies
+through progressively more thorough layers (fast syntax/DNS checks, real SMTP probing, an optional
+paid third-party fallback) and learns from real send outcomes to calibrate its own confidence over
+time. Its founding principle:
 
-> **New here? Read [`PROJECT_RULES.md`](PROJECT_RULES.md) first.** It is the constitution:
-> the five one-way doors, the two vocabularies, first-class `unknown`, shadow-mode defaults,
-> and the kill-switch ladder — enough to understand the system without reading all seven specs.
+> **It reports what it can prove, and says `unknown` when it can't — it never guesses a verdict.**
+
+Everything else — the architecture, the frozen contracts, the safe-degradation ladder — follows
+from that.
+
+> **New here?** Read the guide for your role:
+> **[developer](Docs/ONBOARDING.md)** · **[operator](Docs/OPERATIONS.md)** ·
+> **[end user](Docs/USER_GUIDE.md)**. The full doc map is [`Docs/README.md`](Docs/README.md).
 
 ---
 
-## The two deployables (never merged)
+## What it does
 
-The single most important structural fact about this repo: it holds **two decoupled
-deployables**, and the boundary between them is a **security and correctness boundary**,
-not a packaging convenience.
+- **Verifies an address through layered checks**, stopping at the cheapest layer that can answer:
+  syntax and domain/MX validity, disposable/role/typo detection, real SMTP mailbox probing from a
+  reputation-managed IP, and an optional paid vendor fallback for the residue nothing else can
+  resolve.
+- **Returns a stable, versioned verdict**: a frozen `status`/`reason`/`recommendation` vocabulary
+  and a 0–100 confidence, safe to build automation on.
+- **Keeps an append-only record** of every verdict — the log is the point.
+- **Runs a resilient node pool**: sticky routing, per-provider rate limiting, health-watching with
+  automatic quarantine and slow, canary-gated recovery, and a fleet-wide brake that refuses to turn
+  an automated heal into a self-inflicted outage.
+- **Processes bulk jobs asynchronously** through a durable, exactly-once queue with greylist-aware
+  retry.
+- **Closes the loop**: once connected to a real send-outcome feed, it joins outcomes back to the
+  verdicts that authorized them, classifies what each proves, and calibrates confidence, promotes
+  reliable providers, and weans off the paid fallback — all under human-gated controls by default,
+  starting from a cautious baseline and sharpening only where real volume has been measured.
+- **Degrades safely**: every kill-switch rung returns a real, correctly-labelled verdict from fewer
+  layers. Removing capability lowers a verdict's *confidence*, never its *honesty*; nothing ever
+  fabricates a `valid`/`invalid`.
+
+## Architecture in brief
+
+Two decoupled deployables — the boundary is a security and correctness boundary, not packaging:
 
 ```
 Codmailling/
-├── control-plane/   # Go control plane (the design docs' "brain"). Holds ALL state. Port 25 CLOSED.
-│                 #   front door, policy engine, cheap layers, router (node-LIST),
-│                 #   scoring, the LOG, cache, secrets custody (incl. the pepper).
-│
-├── verifier-node/   # verifier node(s) (the design docs' "box"). Dumb, stateless, DISPOSABLE.
-│   └── truemail-rack/   #   a FORK of truemail-rack embedding the PINNED truemail gem.
-│                        #   Opens outbound port 25. Holds NO state, NO DB creds, NO pepper.
-│                        #   Killed + re-spun freely. Runs STOCK in Phase 0.
-│
-├── Docs/         # Living documentation: 7 phase specs, build plan, revision-pass docs,
-│   ├── adr/      #   ADRs (one-way-door + owner-OQ rulings), DECISIONS.md, the
-│   └── ...       #   generated config reference, ground-truth, test strategy.
-│
-├── test/         # Real-shaped behavioral/integration harness (tied to named GAPs).
-├── .github/      # CI: build + tests + gem-unmodified + docs-updated + code-review gates.
-├── PROJECT_RULES.md   # The constitution (read first).
-├── NOTICE             # Third-party attributions (truemail + rack are MIT — respected).
-└── README.md
+├── control-plane/   # Go — "the brain". Holds ALL state + makes ALL decisions. Port 25 CLOSED.
+│                    #   front door, policy engine, cheap layers, node router, the queue,
+│                    #   the append-only LOG, the calibration flywheel, secrets (incl. the pepper).
+├── verifier-node/   # Ruby — "the box". A dumb, stateless SMTP probe. Port 25 OPEN outbound.
+│   └── truemail-rack/   #   a FORK of truemail-rack embedding the PINNED, UNMODIFIED truemail gem.
+│                        #   Holds NO state, NO DB creds, NO pepper — disposable (kill + re-spin).
+├── Docs/            # The three audience guides, 7 phase specs, ADRs, DECISIONS, runbooks, config.
+└── .github/         # CI: build + vet + tests (real Postgres) + gem-unmodified + docs/config gates.
 ```
 
-### Why the boundary is load-bearing
+The brain holds every secret and all accumulated data; the box does one thing — attempt an SMTP
+conversation from a reputation-bearing IP and report the raw facts, rendering no verdict. Because
+the box is stateless, adding a second one is a config line and a compromised box leaks nothing but
+itself. Full detail: [`Docs/ONBOARDING.md`](Docs/ONBOARDING.md).
 
-| Property | The control-plane | The verifier-node |
-|---|---|---|
-| **State** | holds **all** of it (Supabase) | holds **none** — pure function `email → raw engine JSON` |
-| **Secrets** | pepper, node tokens, vendor keys, Supabase key | only its own node token + verifier identity |
-| **Port 25** | **closed** (never sends) | **open outbound** (the whole reason a verifier-node exists) |
-| **Disposability** | long-lived, protected | cattle: kill + re-spin loses nothing |
-| **Language** | Go | Ruby (forked rack + pinned gem) |
-| **Blast radius if compromised** | the data moat | one verifier-node's config — no history, no pepper |
+### The five frozen contracts ("one-way doors")
 
-Because the verifier-node holds no state, a compromised or IP-burned verifier-node is **disposable** — this is a
-security dividend of the design, not just an architecture note. The control-plane never ships the
-pepper or DB credentials to a verifier-node.
+Decisions that become historical data or a consumer contract are frozen — extensible, never
+mutated: **(1)** the `/verify` response shape, **(2)** the append-only LOG (enforced by revoked
+DB grants), **(3)** the email-hashing scheme (raw email never persisted), **(4)** the
+`status`/`reason`/`recommendation` vocabulary, and **(5)** the pinned, never-forked `truemail`
+engine (only the rack *server* is forked; CI asserts the gem is byte-identical). See
+[`PROJECT_RULES.md`](PROJECT_RULES.md).
 
-## Door 5 — the engine is pinned, never forked
+## Quick start
 
-- **`truemail` (the engine)** is a **pinned dependency at `3.3.1`** ([ADR-0003](Docs/adr/ADR-0003-truemail-engine-pin.md)) — **never patched, never forked.**
-- **`truemail-rack` (the HTTP server)** is the **only** thing we fork (`verifier-node/truemail-rack/`).
-- CI asserts the vendored gem is byte-for-byte upstream (`.github/` + `verifier-node/` check).
-- Any behavioral gap is closed **control-plane-side** or in the **rack wrapper** (Phase 2+), never by editing the gem.
-
-In Phase 0 the fork runs **stock** — no `/verify`, `/audit`, `/catchall`, `/config`, or
-`/stats` wrapper endpoints (those are Phase 2). See [`verifier-node/truemail-rack/FORK.md`](verifier-node/truemail-rack/FORK.md).
-
-## Build & run (Phase 0)
-
-Phase 0 proves both deployables **build empty**. Neither does real verification yet.
+Bring up the brain with a database — it verifies through the cheap layers immediately:
 
 ```bash
-# Control-plane (Go 1.26+): builds clean, serves a stubbed /v1/verify + healthz.
-cd control-plane && go build ./... && go test ./...
+cd control-plane
+go build ./... && go vet ./...
 
-# Verifier-node (Docker; Ruby not required on the host): builds the pinned stock rack.
-docker compose -f verifier-node/docker-compose.yml build
-docker compose -f verifier-node/docker-compose.yml up   # stock rack on :3000 (root=/, /version, /healthcheck)
+# A Postgres for state + the append-only integration tests:
+docker run -d --name cp-pg -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=cptest -p 5432:5432 postgres:16-alpine
+for f in $(ls migrations/[0-9][0-9][0-9][0-9]_*.sql | sort); do
+  docker exec -i cp-pg psql -U postgres -d cptest -v ON_ERROR_STOP=1 -f - < "$f"
+done
+
+# Run the full suite against real Postgres:
+TM_TEST_DATABASE_URL='postgres://postgres:dev@localhost:5432/cptest' go test -shuffle=on ./...
+
+# Run the brain (cheap-verification-ready with a DB + a pepper):
+TM_DATABASE_URL='postgres://postgres:dev@localhost:5432/cptest' TM_PEPPER='<32-bytes-of-entropy>' \
+  go run ./cmd/control-plane
 ```
 
-> **Toolchain note (this environment):** Go, git, and Docker are present; Ruby is **not**
-> installed on the host, so the verifier-node builds and runs **only via Docker** — which matches the
-> build plan's "get the stock container running locally." See
-> [`Docs/truemail-ground-truth.md`](Docs/truemail-ground-truth.md) for what a live run captures
-> and reconciles against the specs.
+Build the box (no Ruby on the host — it's containerized), from the repo root:
 
-## License posture
+```bash
+cd verifier-node/truemail-rack && docker build -t verifier-node .
+bash bin/assert-gem-unmodified.sh    # the Door-5 gem-unmodified assertion
+```
 
-- **Third-party components are MIT and are respected/attributed** in [`NOTICE`](NOTICE)
-  (the `truemail` engine and the `truemail-rack` fork, both © Vladislav Trotsenko).
-- **This project's own license is RESOLVED (2026-07-19): proprietary / all-rights-reserved** —
-  see the top-level [`LICENSE`](LICENSE). It covers the owner's own code (`control-plane/`, the
-  `verifier-node/` wrapper additions, `Docs/`) and explicitly grants no rights over the MIT
-  third-party components (which remain licensed under their own terms, attributed in `NOTICE`).
-  Deferred since Phase 0 (DECISIONS §6.1); chosen at the arc closeout because the verification
-  brain's mechanics + data moat are deliberately non-public. Reversible toward openness later;
-  publishing is not — so proprietary-first is the safe default.
+## Deployment prerequisites
+
+The brain runs cheap-verification-only with just a database and a pepper. Each further capability
+is switched on when its prerequisite is in place — an operator action, config, or (for the vendor
+and outcome-feed tiers) a pluggable adapter dropped into an existing interface seam; the brain's
+decision code is never touched. Satisfy them in order (each is detailed, with verification
+commands, in the [operations guide](Docs/OPERATIONS.md) and the
+[go-live runbook](Docs/go-live-runbook.md)):
+
+| Capability | Prerequisite | Switched on with |
+|---|---|---|
+| **Cheap verification** | a Postgres instance + an email-hash pepper | `TM_DATABASE_URL`, `TM_PEPPER` |
+| **Bulk / async jobs** | an at-rest encryption key for the queue | `TM_QUEUE_ADDR_KEY` (bulk endpoints stay 503 without it — the queue never stores plaintext unencrypted) |
+| **SMTP verification** | a port-25-capable host with a settable PTR on a clean IP (vet V1–V5) | the node descriptor + `TM_SMTP_MODE=enabled` |
+| **Paid fallback** | a verification vendor + a signed DPA | a vendor adapter at the `external.Vendor` seam + `TM_EXTERNAL_DPA_CONFIRMED=true` + `TM_FALLBACK_MODE=enabled` + a vendor key |
+| **Confidence calibration** | an authenticated (mTLS) real send-outcome feed | an mTLS client at the `OutcomeSource` seam + the trust anchor/credential; promote the mutators when ready |
+
+These are setup steps, like provisioning a database — not caveats. Until a tier is configured, the
+system simply returns its honest verdict from the layers it *can* run.
 
 ## Where to go next
 
 | You want to… | Read |
 |---|---|
-| Understand the rules that can never change | [`PROJECT_RULES.md`](PROJECT_RULES.md) |
+| Become productive as a developer | [`Docs/ONBOARDING.md`](Docs/ONBOARDING.md) |
+| Deploy and operate the system | [`Docs/OPERATIONS.md`](Docs/OPERATIONS.md) |
+| Understand what a verdict means | [`Docs/USER_GUIDE.md`](Docs/USER_GUIDE.md) |
+| Know the rules that never change | [`PROJECT_RULES.md`](PROJECT_RULES.md) |
 | See every toggle/flag/secret/dial | [`Docs/config-reference.md`](Docs/config-reference.md) (generated) |
-| See the binding cross-phase rulings | [`Docs/DECISIONS.md`](Docs/DECISIONS.md) |
-| See one-way-door decisions | [`Docs/adr/`](Docs/adr/) |
-| Understand what real truemail emits vs. what the specs assumed | [`Docs/truemail-ground-truth.md`](Docs/truemail-ground-truth.md) |
-| Understand the test discipline | [`Docs/test-strategy.md`](Docs/test-strategy.md) |
-| Know what must be true before Phase 1 code | [`Docs/pre-takeoff-checklist.md`](Docs/pre-takeoff-checklist.md) |
+| See the binding decisions and ADRs | [`Docs/DECISIONS.md`](Docs/DECISIONS.md) · [`Docs/adr/`](Docs/adr/) |
+| Follow the ordered go-live path | [`Docs/go-live-runbook.md`](Docs/go-live-runbook.md) |
+| See the full documentation map | [`Docs/README.md`](Docs/README.md) |
+
+## License
+
+- **This project's own code and documentation** (`control-plane/`, the `verifier-node/` wrapper
+  additions, `Docs/`) are **proprietary / all rights reserved** — see [`LICENSE`](LICENSE).
+- **Third-party components** — the `truemail` engine and the forked `truemail-rack` server, both
+  MIT © Vladislav Trotsenko — are respected and attributed in [`NOTICE`](NOTICE); the top-level
+  license grants no rights over them and does not alter their MIT terms.

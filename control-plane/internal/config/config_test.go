@@ -117,6 +117,42 @@ func TestLoad_P4WatcherDialsDefaultAndOverride(t *testing.T) {
 	}
 }
 
+// TestLoad_RemovedAuditAliasesAreNotSettableFootguns is the Phase-8 dial-sweep regression: the P3
+// re-audit cadence + N-green recover count are NOT their own settable env vars — the P4 health-watcher
+// subsumed the P3 re-audit ticker, so the live cadence is TM_WATCHER_CADENCE_SECONDS and the recover
+// count is TM_CANARY_RECOVER_GREENS. TM_AUDIT_INTERVAL_SECONDS / TM_AUDIT_RECOVER_GREENS were
+// settable-but-ignored aliases (read+validated, never consumed — the rate_ceiling-class footgun) and
+// were removed. This test locks that: setting them changes nothing AND (unlike a validated dial) an
+// out-of-range value is not even rejected, because the loader no longer reads them. A future edit that
+// silently re-adds a read for either var without a consumer re-introduces the footgun and fails here.
+func TestLoad_RemovedAuditAliasesAreNotSettableFootguns(t *testing.T) {
+	base, err := Load(func(string) string { return "" })
+	if err != nil {
+		t.Fatalf("baseline Load: %v", err)
+	}
+	// Setting the removed aliases (even to values a validated dial would reject, like 0 / garbage)
+	// must be a no-op: the loader neither consumes nor validates them. The staleness window
+	// (TM_AUDIT_MAX_AGE_SECONDS) — the one P3 audit dial that IS consumed — still overrides.
+	env := map[string]string{
+		"TM_AUDIT_INTERVAL_SECONDS": "0",       // a validated dial would reject 0; ignored here
+		"TM_AUDIT_RECOVER_GREENS":   "not-a-number",
+		"TM_AUDIT_MAX_AGE_SECONDS":  "9999",
+	}
+	c, err := Load(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatalf("Load must ignore the removed audit aliases (they are no longer read/validated), got: %v", err)
+	}
+	if c.Dials.AuditMaxAgeSeconds != 9999 {
+		t.Fatalf("the consumed staleness window must still override: got %d want 9999", c.Dials.AuditMaxAgeSeconds)
+	}
+	// The re-audit cadence + recover-green count are driven by the P4 watcher dials, unaffected by
+	// the removed aliases above.
+	if c.WatcherCadence() != base.WatcherCadence() || c.Dials.CanaryRecoverGreens != base.Dials.CanaryRecoverGreens {
+		t.Fatalf("removed audit aliases must not affect the live cadence/recover dials: cadence=%v canaryGreens=%d",
+			c.WatcherCadence(), c.Dials.CanaryRecoverGreens)
+	}
+}
+
 // Round-2 review finding D (GAP-28): TM_FLEET_WIDE_PCT ≥ 100 makes the fraction-brake mathematically
 // unable to fire — it must be rejected at startup, never silently disable the brake.
 func TestLoad_FleetWidePctUpperBound_FindingD(t *testing.T) {

@@ -158,6 +158,13 @@ It does not resolve open questions or set UNSET values — those are owner decis
 | **auto-quarantine trigger** (first-red vs N-red) | feature-flag/dial | quarantine on FIRST red (OQ-P3-7) | debounce → risk running on genuinely-red box | single box / reputation | P3 §4.5, OQ-P3-7 |
 | **auto-recovery threshold** (N consecutive greens) | dial | N-consecutive-green (asymmetric, OQ-P3-7) | too few → flapping | single box | P3 §4.5, OQ-P3-7 |
 
+> **P3→P4 subsumption note (Phase-8 sweep):** the P3 *spec* dials above (re-audit cadence, auto-recovery
+> N-green threshold) are recorded here as the P3 design. At build time the **P4 health-watcher subsumed the
+> P3 re-audit ticker**, so their live env vars are the P4 watcher's (`TM_WATCHER_CADENCE_SECONDS`,
+> `TM_CANARY_RECOVER_GREENS` — §4.6), not the P3-named `TM_AUDIT_INTERVAL_SECONDS` / `TM_AUDIT_RECOVER_GREENS`,
+> which were removed as settable-but-ignored (see the §3.5 note). The audit staleness max-age remains its own
+> consumed dial (`TM_AUDIT_MAX_AGE_SECONDS`).
+
 ### 3.2 Warmup & routing
 | name | type | default | mis-setting effect | blast radius | source |
 |---|---|---|---|---|---|
@@ -195,10 +202,19 @@ It does not resolve open questions or set UNSET values — those are owner decis
 | name | type | default | mis-setting effect | blast radius | source |
 |---|---|---|---|---|---|
 | **`TM_NODE_PUBLIC_EGRESS_IP`** (node's public egress IP) | feature-flag | empty ⇒ GAP-24 conjunct fails safe (no `:smtp`) | wrong IP → egress-mismatch excludes node, or (if unset) never eligible | single box / reputation | P3 §5.4, §6.6.1, GAP-24 |
-| **`TM_AUDIT_INTERVAL_SECONDS`** (re-audit cadence) | dial | 3600 (hourly) | too slow → silent breakage undetected; too fast → load | single box | P3 §4.5 |
-| **`TM_AUDIT_MAX_AGE_SECONDS`** (staleness window) | dial | 7200 (2× interval) | too small → green flaps ineligible; too large → stale green trusted | single box | P3 §4.5 |
-| **`TM_AUDIT_RECOVER_GREENS`** (consecutive greens to recover) | dial | 3 | too few → flapping recovers too fast | single box | P3 §4.5, OQ-P3-7 |
+| **`TM_AUDIT_MAX_AGE_SECONDS`** (staleness window) | dial | 7200 (2× the P4 watcher cadence) | too small → green flaps ineligible; too large → stale green trusted | single box | P3 §4.5 |
 | **`TM_WARMUP_DAILY_CAP`** (per-node/per-day `:smtp` cap) | dial | 50 (conservative day-1; 0 ⇒ warmup off) | 0→full → fresh IP looks like spam, blocked | single box / reputation | P3 §5.2, OQ-P3-10, GAP-20 |
+
+> **Superseded P3 audit dials (Phase-8 dial sweep — removed, NOT settable):** the P3 spec listed a
+> **re-audit cadence** (`TM_AUDIT_INTERVAL_SECONDS`) and an **N-green recover count**
+> (`TM_AUDIT_RECOVER_GREENS`) as their own env vars. The **P4 health-watcher subsumed the P3 re-audit
+> ticker** (`main.go` `startHealthWatcher`): the live re-audit cadence is now **`TM_WATCHER_CADENCE_SECONDS`**
+> (§4.6) and the recover-green count is **`TM_CANARY_RECOVER_GREENS`** (§4.6). The two `TM_AUDIT_*` vars had
+> become **settable-but-ignored aliases** (read + validated at load, but their values reached no consumer) —
+> the same footgun class as the removed `TM_EXTERNAL_CONFIDENCE_CAP` (§6.1). They were **removed** in the
+> Phase-8 sweep so an operator cannot set a knob that silently does nothing; the removal is locked by
+> `TestLoad_RemovedAuditAliasesAreNotSettableFootguns`. Only the **consumed** staleness window
+> (`TM_AUDIT_MAX_AGE_SECONDS`, the router freshness filter) remains a P3 audit dial.
 
 ---
 
@@ -280,8 +296,19 @@ It does not resolve open questions or set UNSET values — those are owner decis
 | **`TM_LIVENESS_MISSES`** (M consecutive `/health` fails) | dial | 3 | too low → quarantine on a transient blip | single box | P4 §5.4 |
 | **`TM_FLEET_WIDE_PCT`** (cascade-brake trigger, % of active nodes) | dial | 50 (VALIDATED 1..99 — a value ≥100 is REJECTED at startup, as it would make the fraction-brake mathematically unable to fire; finding G) | too high → brake never fires (auto-heal→auto-outage) — now a startup error; too low → over-holds | pool / brain-wide | P4 §5.5, GAP-28 |
 | **`TM_CANARY_WARMUP_CAP`** (low re-warm cap on recovery) | dial | 20 (VALIDATED ≥ `TM_CANARY_MIN_SAMPLES` — a smaller cap makes the canary unable to accrue enough samples to promote → stuck-forever; finding C) | too high → recovered node re-burns at full volume; below min-samples → stuck-forever (rejected at startup) | single box / reputation | P4 §5.4 (PM3), GAP-30 |
-| **`TM_POOL_ELIGIBLE_FLOOR`** (pool-eligible-low alert floor) | dial | 1 | — | observability | P4 §8.2 |
-| **`TM_RATE_SATURATION_COUNT`** (rate-saturation alert threshold) | dial | 50 | — | observability | P4 §8.2 |
+| **`TM_POOL_ELIGIBLE_FLOOR`** (pool-eligible-low alert floor) | dial | 1 | — (CONSUMED: also the block-rate active-floor backstop `health.MinActiveFloor`, the "pool cannot self-empty" guarantee, main.go) | observability / pool | P4 §8.2, §5.5 |
+| **`TM_RATE_SATURATION_COUNT`** (rate-saturation alert threshold) | dial | 50 (**RESERVED — read + validated, consumed once `internal/metrics` is wired**) | — | observability | P4 §8.2 |
+
+> **`TM_RATE_SATURATION_COUNT` — reserved, not a footgun (Phase-8 dial sweep).** It is read + validated at
+> load, and its sole consumer is the fully-built, unit-tested `internal/metrics` alert deriver
+> (`DeriveAlerts` → `AlertThresholds.RateSaturationCount`). That observability package is **not yet wired into
+> `cmd/`** (metrics backend is an integration-time seam — the LOG is authoritative for control, the TSDB/alert
+> layer is layered on at deployment, P4 §8.1 OQ-P4-11). So the §8.2 rate-saturation *alert* does not fire until
+> metrics is wired — the dial is **documented-reserved**, distinct from the removed `TM_AUDIT_*` aliases: its
+> consumer exists and is correct, only the wiring is deferred. It is retained (not removed) because wiring the
+> metrics package activates it with no further config change. (`TM_POOL_ELIGIBLE_FLOOR` shares that unwired
+> alert path but is **rescued** by a second, live consumer — the block-rate active-floor backstop — so it is
+> read-and-used today.)
 
 > **Shadow-mode note (DR-2):** the block-rate quarantine (A1) reads `ShadowModes.A1BlockRateQuarantine`
 > (default `recommend_only`). At the default the watcher performs **zero live block-rate mutation** —

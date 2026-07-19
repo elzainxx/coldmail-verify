@@ -124,13 +124,16 @@ type Dials struct {
 	RecommendationSend     int  // P1: 70
 	RecommendationReview   int  // P1: 30
 	SMTPClientDeadlineMS   Dial // P2 §6.5: UNSET; P5 lease TTL must EXCEED this (X-7 coupling).
-	BrainMaxSMTPDeadlineMS Dial // mirror used by the P5 lease-TTL invariant (kept explicit).
 
 	// Phase 3 (§4.5/§5.2) — the audit/warmup DIALs (volumes are dials; existence is locked).
-	AuditIntervalSeconds int // §4.5 scheduled re-audit cadence; recommend hourly (3600) for a first box.
-	AuditMaxAgeSeconds   int // §4.5 staleness window; recommend 2× the interval. A green older than this → not fresh → excluded.
-	AuditRecoverGreens   int // §4.5 OQ-P3-7: consecutive greens to auto-recover from quarantine (asymmetric; quarantine on first red).
-	WarmupDailyCap       int // §5.2 per-node/per-day :smtp verification ceiling; 0 => warmup NOT enforced (a mature node). Counts verifications (catch-all ≈ 2 connections — GAP-13/§5.2).
+	// NOTE (Phase-8 dial sweep): the P3 re-audit cadence + N-green recover count are NOT separate
+	// dials here — the P4 health-watcher SUBSUMED the P3 re-audit ticker (main.go startHealthWatcher),
+	// so the live re-audit cadence is TM_WATCHER_CADENCE_SECONDS and the recover-green count is
+	// TM_CANARY_RECOVER_GREENS. The former TM_AUDIT_INTERVAL_SECONDS / TM_AUDIT_RECOVER_GREENS were
+	// settable-but-ignored aliases (read+validated, never consumed) — removed as the rate_ceiling-class
+	// footgun (same as the P6 TM_EXTERNAL_CONFIDENCE_CAP removal). AuditMaxAge (staleness) IS consumed.
+	AuditMaxAgeSeconds int // §4.5 staleness window; recommend 2× the P4 watcher cadence. A green older than this → not fresh → excluded.
+	WarmupDailyCap     int // §5.2 per-node/per-day :smtp verification ceiling; 0 => warmup NOT enforced (a mature node). Counts verifications (catch-all ≈ 2 connections — GAP-13/§5.2).
 
 	// Phase 4 (§5) — the health-watcher control-loop DIALs (volumes are dials; existence is locked).
 	// The watcher REPLACES the P3 minimal re-audit ticker: it owns the audit cadence + adds liveness
@@ -294,11 +297,10 @@ func (c Config) SMTPClientDeadline() time.Duration {
 // verdict (never invents SMTP).
 func (c Config) SMTPEnabled() bool { return c.KillSwitch.SMTP == SMTPEnabled }
 
-// AuditInterval / AuditMaxAge / WarmupDailyCap / AuditRecoverGreens are the Phase-3 §4.5/§5.2 DIALs
-// as typed accessors (the scheduler + the router filter read these).
-func (c Config) AuditInterval() time.Duration {
-	return time.Duration(c.Dials.AuditIntervalSeconds) * time.Second
-}
+// AuditMaxAge is the Phase-3 §4.5 audit-staleness window as a typed accessor (the router
+// eligibility filter reads it: a green older than this is not fresh → not :smtp-eligible).
+// (The re-audit CADENCE accessor was removed in the Phase-8 sweep — the P4 watcher owns the
+// cadence via WatcherCadence(); see the Dials.AuditMaxAgeSeconds comment.)
 func (c Config) AuditMaxAge() time.Duration {
 	return time.Duration(c.Dials.AuditMaxAgeSeconds) * time.Second
 }
@@ -450,11 +452,11 @@ func Defaults() Config {
 			RecommendationSend:   70,               // P1 §7.2
 			RecommendationReview: 30,               // P1 §7.2
 			SMTPClientDeadlineMS: Dial{Set: false}, // P2 §6.5 owner OQ (X-7 coupling)
-			// Phase-3 audit/warmup dials (§4.5/§5.2). Conservative defaults (OQ-P3-7/OQ-P3-10):
-			AuditIntervalSeconds: 3600, // hourly re-audit for a first box (§4.5)
-			AuditMaxAgeSeconds:   7200, // 2× the interval → a stale green is excluded (§4.5)
-			AuditRecoverGreens:   3,    // 3 consecutive greens to auto-recover (§4.5 asymmetric)
-			WarmupDailyCap:       50,   // §5.2 conservative day-1 start (~50/day, OQ-P3-10 dial)
+			// Phase-3 audit/warmup dials (§4.5/§5.2). Conservative defaults (OQ-P3-10). (Re-audit
+			// cadence + recover-greens are the P4 watcher's TM_WATCHER_CADENCE_SECONDS /
+			// TM_CANARY_RECOVER_GREENS — see the Dials.AuditMaxAgeSeconds comment.)
+			AuditMaxAgeSeconds: 7200, // 2× the P4 watcher cadence → a stale green is excluded (§4.5)
+			WarmupDailyCap:     50,   // §5.2 conservative day-1 start (~50/day, OQ-P3-10 dial)
 			// Phase-4 health-watcher dials (§5). Conservative defaults (OQ-P4-13; §5.4 asymmetric):
 			WatcherCadenceSeconds:  45,   // §5.1 T (30–60s recommended)
 			BlockRateWindowSeconds: 1800, // §5.2 30-minute rolling window (start conservative)
@@ -593,26 +595,17 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	// Phase-3 audit/warmup dial overrides (§4.5/§5.2). Each is optional; absent => the safe default.
-	if v := getenv("TM_AUDIT_INTERVAL_SECONDS"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n <= 0 {
-			return c, fmt.Errorf("config: invalid TM_AUDIT_INTERVAL_SECONDS %q", v)
-		}
-		c.Dials.AuditIntervalSeconds = n
-	}
+	// (TM_AUDIT_INTERVAL_SECONDS and TM_AUDIT_RECOVER_GREENS are intentionally NOT read: the P4
+	// health-watcher subsumed the P3 re-audit ticker, so the live re-audit cadence is
+	// TM_WATCHER_CADENCE_SECONDS and the recover-green count is TM_CANARY_RECOVER_GREENS. The two
+	// TM_AUDIT_* vars were settable-but-ignored aliases — removed in the Phase-8 sweep so an operator
+	// can't set a knob that silently does nothing. Only the consumed staleness window remains.)
 	if v := getenv("TM_AUDIT_MAX_AGE_SECONDS"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 {
 			return c, fmt.Errorf("config: invalid TM_AUDIT_MAX_AGE_SECONDS %q", v)
 		}
 		c.Dials.AuditMaxAgeSeconds = n
-	}
-	if v := getenv("TM_AUDIT_RECOVER_GREENS"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 {
-			return c, fmt.Errorf("config: invalid TM_AUDIT_RECOVER_GREENS %q (must be >= 1)", v)
-		}
-		c.Dials.AuditRecoverGreens = n
 	}
 	if v := getenv("TM_WARMUP_DAILY_CAP"); v != "" {
 		n, err := strconv.Atoi(v)

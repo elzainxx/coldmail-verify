@@ -109,8 +109,9 @@ This is the founding discipline, not a Door but the reason the Doors matter.
 - The flywheel never pressures `unknown → valid` to look more accurate (P7 §8.4). First-class `unknown`
   survives all seven phases intact.
 
-The Phase-0 control-plane embodies this: with no engine consulted, `/v1/verify` returns
-`unknown`/`plausible`, never a guessed verdict (`verdict.NewCheapUnknown`).
+The control-plane embodies this: with no engine consulted, `/v1/verify` returns
+`unknown`/`plausible`, never a guessed verdict (`verdict.Assemble` emits `status=unknown` /
+`reason=plausible` on the no-engine path).
 
 ---
 
