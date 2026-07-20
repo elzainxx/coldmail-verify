@@ -47,6 +47,8 @@ Companion: the deferred-proof detail is in [`pending-ledger.md`](pending-ledger.
 
 **Reversible:** `TM_NODE_ENABLED=false` (or `TM_SMTP_MODE=disabled`) → cheap verdicts, no redeploy, no lost history.
 
+⚙️ **Live-HTTP verification (PENDING-LIVE-HTTP, do this FIRST on the Linux host — code/config, no real-world input needed).** The full test plan's endpoint tiers ([`TEST-PLAN.md`](TEST-PLAN.md) §5/§6/§10) were proven **in-process** on the dev host (Go `httptest` + the fork's RSpec request specs — identical handler code) because a long-lived HTTP server could not be run/killed reliably on Windows. That does not exercise port binding, real socket serialization, production middleware ordering, or TLS. On this first Linux host, **run [`TEST-PLAN.md`](TEST-PLAN.md) §5.4** against a live server (start it on a real port; re-run the §5.1 verdict matrix, §5.3 auth, §6 row inspection, and the §10 fork endpoints over a real socket + TLS if terminated at the app) and confirm the results **match** the in-process ones. *Expectation: almost certainly a Windows-only limitation that just works on Linux — but it is verified here, not assumed.* See [`pending-ledger.md`](pending-ledger.md) §3.5.
+
 **PENDING-REAL-BOX after this stage:** the greylist reject-then-accept round-trip (GAP-35) is rollout-observation-only (un-mockable); the DR-4 backup/PITR restore drill runs against go-live infra. See [`pending-ledger.md`](pending-ledger.md) §1.
 
 ---

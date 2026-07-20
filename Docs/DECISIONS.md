@@ -157,7 +157,7 @@ sheet's boxes are checked to match. **Two of these touch door territory** and ar
 |---|---|---|---|
 | **GT-1** engine `3.3.0`→`3.3.1` | No (illustrative spec string; provenance only) | **ACCEPTED** — pin 3.3.1 | [ADR-0003](adr/ADR-0003-truemail-engine-pin.md) |
 | **GT-2** rack `0.10.0`→`0.9.0` | No (no `0.10.0` tag exists; provenance only) | **ACCEPTED** — fork base `v0.9.0` | [FORK.md](../verifier-node/truemail-rack/FORK.md) |
-| **GT-3** `net-smtp` `~>0.4.0`→`~>0.5.0` | **Door 5 territory** — fork-side dep edit, gem byte-for-byte unmodified | **ACCEPTED** — forced by the exact pin; rack-side edit, not a gem patch | [ADR-0003](adr/ADR-0003-truemail-engine-pin.md) §"One forced consequence"; FORK.md #2 |
+| **GT-3** `net-smtp` `~>0.4.0`→`0.5.1` (exact) | **Door 5 territory** — fork-side dep edit, gem byte-for-byte unmodified | **ACCEPTED** — forced by the exact engine pin; rack-side edit, not a gem patch. **Phase-8: tightened from the range `~> 0.5.0` to EXACTLY `0.5.1`** (the resolved version) for rebuild determinism — engine unchanged (Door 5). | [ADR-0003](adr/ADR-0003-truemail-engine-pin.md) §"One forced consequence"; FORK.md #2 |
 | **GT-4** `host_audit` live shape | No (informs P3 gate; gate design frozen) | **ACCEPTED** — gate anchor (`current_host_ip`+`warnings`) confirmed live | [truemail-ground-truth.md](truemail-ground-truth.md) §3.3 |
 | **GT-5** `smtp_mock` accept-all (P2 GAP-14) | No (P2 dev-substrate property) | **ACCEPTED** — scope call: real-MX path proven at P0; seeded-probe fixture is a P2 verification | truemail-ground-truth.md §3.4 |
 | **GT-6** `host_audit` extra `date`/`configuration` keys | No (additive; gate reads only `warnings`) | **ACCEPTED** — additive/ignorable, record only | truemail-ground-truth.md §3.3 |

@@ -5,10 +5,14 @@ source 'https://rubygems.org'
 ruby(::File.read(::File.join(::File.dirname(__FILE__), '.ruby-version')).strip[/-(.+)/, 1])
 
 gem 'dry-struct', '~> 1.6'
-# FORK EDIT (Phase 0): bumped 0.4.0 -> 0.5.0. truemail 3.3.1 requires
+# FORK EDIT (Phase 0): bumped 0.4.0 -> 0.5.x. truemail 3.3.1 requires
 # net-smtp '~> 0.5.0' on Ruby >= 3.1 (we pin Ruby 3.2); the upstream 0.4.0 pin
 # is a hard conflict with the exact engine pin. Rack-side edit only. See FORK.md.
-gem 'net-smtp', '~> 0.5.0'
+# FORK EDIT (Phase 8): EXACT pin '0.5.1' (was the range '~> 0.5.0'). The range let a
+# rebuild drift within 0.5.x (the built image resolved 0.5.1); an exact pin makes
+# rebuilds deterministic. 0.5.1 satisfies truemail's '~> 0.5.0'. Pure-Ruby, scoring-
+# neutral; the ENGINE (truemail 3.3.1) is unchanged (Door 5). See FORK.md #2 / ADR-0003.
+gem 'net-smtp', '0.5.1'
 gem 'rack', '~> 2.2', '>= 2.2.8'
 gem 'thin', '~> 1.8', '>= 1.8.2'
 # FORK EDIT (Phase 0): EXACT pin (was '~> 3.1'). Door 5 — the engine is pinned,

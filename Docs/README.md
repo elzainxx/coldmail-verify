@@ -24,6 +24,7 @@ Whoever you are, start with the guide for your role. Each is self-contained.
 | [`DECISIONS.md`](DECISIONS.md) | Binding cross-phase rulings (DR-1…DR-5) + owner-OQ register (§6) + parked sub-decisions (§5). |
 | [`config-reference.md`](config-reference.md) | **Generated** from the manifest — the always-current list of what's toggleable. |
 | [`go-live-runbook.md`](go-live-runbook.md) | The one ordered bring-up path from local build to fully live, with each owner setup item. |
+| [`TEST-PLAN.md`](TEST-PLAN.md) | The full 16-tier verification plan (what to test, how to verify, what a pass looks like) — build/schema/suites/clone, the API matrix, the nine irreversible surfaces + both brakes, system-state, queue, fork, routing, vendor, flywheel, security. Its closing rule: run the fail-verify tier yourself. |
 
 ## The seven phase specs (design authorities)
 

@@ -57,6 +57,19 @@ The whole flywheel is BUILT and fail-verified against a `SimulatedSource`; the t
 
 ---
 
+## 3.5 PENDING-LIVE-HTTP — the endpoint tiers run in-process locally, verified against a live server at cutover
+
+This is **not** an un-mockable-behavior gap like §1–§3 (those wait on a real counterparty's reputation). It is a **dev-host limitation**: on the Windows dev host a long-lived HTTP server could not be run/killed reliably, so the endpoint tiers of the full test plan (TEST-PLAN.md §5/§6/§10) were proven by the projects' own **in-process handler tests** — `httptest` for the Go API, RSpec request specs for the fork — which exercise the *identical* handler code. That is the correct local substitute, but by construction it does not cover port binding, real socket serialization, production middleware ordering, or TLS. Those are verified against a **live server on the first Linux/production host**.
+
+| # | Item | Built + verified now | Why deferred | Verification command / proof | Unblocked by |
+|---|---|---|---|---|---|
+| H1 | **Live-HTTP endpoint parity (§5/§6/§10)** | every endpoint's behavior is proven in-process — Go `httptest` handler tests (verdict matrix, contract, auth) + the fork's RSpec request specs (71 examples, 0 failures) exercise the same handlers | the dev host cannot run/kill a live server reliably (Windows-specific; the Go binary and Ruby container both boot but don't serve dependably) | on the first Linux host, run TEST-PLAN.md **§5.4** (start the server on a real port; re-run the §5.1 matrix, §5.3 auth, §6 rows, and the §10 fork endpoints over a real socket) and confirm they **match** the in-process results | the first Linux/production host |
+| H2 | **TLS termination at the app (if used)** | TLS is never disabled anywhere (no `InsecureSkipVerify`, vuln-scan confirmed); not exercised locally | no live server ran locally; TLS may also terminate at a proxy (deployment choice) | if TLS terminates at the app, repeat §5.4 over `https://` and confirm the certificate is served + verification succeeds | the production TLS decision |
+
+**Expectation, stated plainly:** this is almost certainly a Windows-only limitation and will **likely just work** on Linux — the handler code is identical and already green in-process. But it is **untested until cutover, so it is verified there, not assumed.** Recorded in [`go-live-runbook.md`](go-live-runbook.md) Stage 1 (a code/config step, not a real-world-input gate).
+
+---
+
 ## 4. Cross-arc: the un-mockable chain (why none of the above could be faked)
 
 Each phase has exactly one behavior that **cannot** be proven locally, and they are the same shape — a real counterparty's reputation/behavior:

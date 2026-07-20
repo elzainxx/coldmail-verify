@@ -45,9 +45,15 @@ P1 OQ-6). So the gem dependency lives **only in `verifier-node/truemail-rack/`**
 Pinning 3.3.1 exactly **forces a second, rack-side edit**: `truemail 3.3.1` declares
 `net-smtp '~> 0.5.0'` (Ruby ≥ 3.1; we pin Ruby 3.2), while upstream rack v0.9.0 pinned
 `net-smtp '~> 0.4.0'` — a **disjoint range, a hard resolver conflict**. Resolution: bump the
-**fork's** `net-smtp` to `~> 0.5.0` (a rack-side dependency edit — legitimate, the rack is what
-we fork; **not** a gem patch). Recorded in `FORK.md` modification #2. The stale `Gemfile.lock`
-(which pinned `truemail 3.1.0`) is deleted and regenerated inside Docker.
+**fork's** `net-smtp` to satisfy `~> 0.5.0` (a rack-side dependency edit — legitimate, the rack
+is what we fork; **not** a gem patch). Recorded in `FORK.md` modification #2. The stale
+`Gemfile.lock` (which pinned `truemail 3.1.0`) is deleted and regenerated inside Docker.
+
+**Phase-8 tightening (rebuild determinism):** the fork's `net-smtp` is now pinned **exactly to
+`0.5.1`** (the version the built image actually resolved), not the range `~> 0.5.0` — a range let
+a rebuild drift within `0.5.x`. `0.5.1` satisfies `~> 0.5.0`, so nothing frozen moved (the engine
+`truemail 3.3.1` is byte-identical — Door 5 intact); this only makes the rack build reproducible.
+Recorded in `FORK.md` #2 and `truemail-ground-truth.md` GT-3.
 
 ## Consequences
 
