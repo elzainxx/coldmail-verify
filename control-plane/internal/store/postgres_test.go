@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/idgen"
+	"github.com/coldmail-verify/control-plane/internal/idgen"
 )
 
 // These tests run against a REAL Postgres with the P1 migrations applied. They are gated on

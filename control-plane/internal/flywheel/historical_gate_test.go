@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/vocab"
+	"github.com/coldmail-verify/control-plane/internal/vocab"
 )
 
 func gateParams() HistoricalGateParams {

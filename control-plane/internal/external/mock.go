@@ -6,7 +6,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/mnfi/codmailling/control-plane/internal/vocab"
+	"github.com/coldmail-verify/control-plane/internal/vocab"
 )
 
 // This file: the CONTROLLABLE MOCK vendor (GAP-47 / §14). The vendor's REAL accuracy on the exact

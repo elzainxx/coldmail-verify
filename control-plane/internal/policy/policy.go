@@ -12,8 +12,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/mnfi/codmailling/control-plane/internal/layers"
-	"github.com/mnfi/codmailling/control-plane/internal/vocab"
+	"github.com/coldmail-verify/control-plane/internal/layers"
+	"github.com/coldmail-verify/control-plane/internal/vocab"
 )
 
 // Definition is the parsed policy (P1 §7.2). It is loaded from the store's open jsonb, so

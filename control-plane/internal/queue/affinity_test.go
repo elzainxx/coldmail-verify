@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/mnfi/codmailling/control-plane/internal/config"
-	"github.com/mnfi/codmailling/control-plane/internal/router"
+	"github.com/coldmail-verify/control-plane/internal/config"
+	"github.com/coldmail-verify/control-plane/internal/router"
 )
 
 // TestRetryAffinity_SameDomainSameNode_GAP32 proves the P5 §14/GAP-32 acceptance criterion:

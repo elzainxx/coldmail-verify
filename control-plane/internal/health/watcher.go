@@ -5,9 +5,9 @@ import (
 	"log"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/audit"
-	"github.com/mnfi/codmailling/control-plane/internal/node"
-	"github.com/mnfi/codmailling/control-plane/internal/store"
+	"github.com/coldmail-verify/control-plane/internal/audit"
+	"github.com/coldmail-verify/control-plane/internal/node"
+	"github.com/coldmail-verify/control-plane/internal/store"
 )
 
 // This file: the Watcher ACTOR (§5.1) — the background control loop that gathers the three health

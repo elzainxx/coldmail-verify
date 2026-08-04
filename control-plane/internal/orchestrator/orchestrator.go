@@ -16,14 +16,14 @@ import (
 	"log"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/hash"
-	"github.com/mnfi/codmailling/control-plane/internal/idgen"
-	"github.com/mnfi/codmailling/control-plane/internal/layers"
-	"github.com/mnfi/codmailling/control-plane/internal/policy"
-	"github.com/mnfi/codmailling/control-plane/internal/smtp"
-	"github.com/mnfi/codmailling/control-plane/internal/store"
-	"github.com/mnfi/codmailling/control-plane/internal/verdict"
-	"github.com/mnfi/codmailling/control-plane/internal/vocab"
+	"github.com/coldmail-verify/control-plane/internal/hash"
+	"github.com/coldmail-verify/control-plane/internal/idgen"
+	"github.com/coldmail-verify/control-plane/internal/layers"
+	"github.com/coldmail-verify/control-plane/internal/policy"
+	"github.com/coldmail-verify/control-plane/internal/smtp"
+	"github.com/coldmail-verify/control-plane/internal/store"
+	"github.com/coldmail-verify/control-plane/internal/verdict"
+	"github.com/coldmail-verify/control-plane/internal/vocab"
 )
 
 // Orchestrator wires the cheap-path dependencies. It holds no per-request state.

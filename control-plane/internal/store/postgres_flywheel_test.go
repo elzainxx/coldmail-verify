@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/idgen"
+	"github.com/coldmail-verify/control-plane/internal/idgen"
 )
 
 // The Phase-7 flywheel PG-parity tests. They prove against REAL Postgres 16 (fresh migrations

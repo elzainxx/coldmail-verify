@@ -6,8 +6,8 @@ package verdict
 import (
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/store"
-	"github.com/mnfi/codmailling/control-plane/internal/vocab"
+	"github.com/coldmail-verify/control-plane/internal/store"
+	"github.com/coldmail-verify/control-plane/internal/vocab"
 )
 
 // Core is the policy's verdict output plus the address identity, decoupled from the policy

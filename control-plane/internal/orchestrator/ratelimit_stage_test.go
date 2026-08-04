@@ -5,13 +5,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/hash"
-	"github.com/mnfi/codmailling/control-plane/internal/node"
-	"github.com/mnfi/codmailling/control-plane/internal/policy"
-	"github.com/mnfi/codmailling/control-plane/internal/ratelimit"
-	"github.com/mnfi/codmailling/control-plane/internal/router"
-	"github.com/mnfi/codmailling/control-plane/internal/store"
-	"github.com/mnfi/codmailling/control-plane/internal/vocab"
+	"github.com/coldmail-verify/control-plane/internal/hash"
+	"github.com/coldmail-verify/control-plane/internal/node"
+	"github.com/coldmail-verify/control-plane/internal/policy"
+	"github.com/coldmail-verify/control-plane/internal/ratelimit"
+	"github.com/coldmail-verify/control-plane/internal/router"
+	"github.com/coldmail-verify/control-plane/internal/store"
+	"github.com/coldmail-verify/control-plane/internal/vocab"
 )
 
 // ── Phase 4: the per-provider rate limiter degrade + jitter + in-flight lifecycle (§4) ─────────

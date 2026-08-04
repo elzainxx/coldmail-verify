@@ -35,7 +35,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 
-	"github.com/mnfi/codmailling/control-plane/internal/vocab"
+	"github.com/coldmail-verify/control-plane/internal/vocab"
 )
 
 // DeriveVendorIdempotencyKey computes the vendor-call idempotency key (§5.4/OQ-P6-4):

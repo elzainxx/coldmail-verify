@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/idgen"
-	"github.com/mnfi/codmailling/control-plane/internal/store"
+	"github.com/coldmail-verify/control-plane/internal/idgen"
+	"github.com/coldmail-verify/control-plane/internal/store"
 )
 
 // This file: the RECALIBRATION pass (§5/§6) — the A6 mechanism that ties the four guards (guards.go) to

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/idgen"
+	"github.com/coldmail-verify/control-plane/internal/idgen"
 )
 
 // These tests exercise the GAP-37 CAS settlement + GAP-33 log-once + GAP-38 authoritative

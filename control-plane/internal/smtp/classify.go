@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/mnfi/codmailling/control-plane/internal/vocab"
+	"github.com/coldmail-verify/control-plane/internal/vocab"
 )
 
 // This file: the 5xx address-fault-vs-your-fault classifier (§6.1) and the SMTP-signal → verdict

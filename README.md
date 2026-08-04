@@ -44,7 +44,7 @@ from that.
 Two decoupled deployables — the boundary is a security and correctness boundary, not packaging:
 
 ```
-Codmailling/
+coldmail-verify/
 ├── control-plane/   # Go — "the brain". Holds ALL state + makes ALL decisions. Port 25 CLOSED.
 │                    #   front door, policy engine, cheap layers, node router, the queue,
 │                    #   the append-only LOG, the calibration flywheel, secrets (incl. the pepper).

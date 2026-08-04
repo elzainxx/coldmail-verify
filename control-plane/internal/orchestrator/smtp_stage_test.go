@@ -8,12 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/hash"
-	"github.com/mnfi/codmailling/control-plane/internal/node"
-	"github.com/mnfi/codmailling/control-plane/internal/policy"
-	"github.com/mnfi/codmailling/control-plane/internal/router"
-	"github.com/mnfi/codmailling/control-plane/internal/store"
-	"github.com/mnfi/codmailling/control-plane/internal/vocab"
+	"github.com/coldmail-verify/control-plane/internal/hash"
+	"github.com/coldmail-verify/control-plane/internal/node"
+	"github.com/coldmail-verify/control-plane/internal/policy"
+	"github.com/coldmail-verify/control-plane/internal/router"
+	"github.com/coldmail-verify/control-plane/internal/store"
+	"github.com/coldmail-verify/control-plane/internal/vocab"
 )
 
 // nxdomainResolver yields a definitive "no such host" (NXDOMAIN) for the test domain → the cheap

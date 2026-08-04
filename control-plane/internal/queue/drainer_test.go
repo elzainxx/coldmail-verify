@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/orchestrator"
-	"github.com/mnfi/codmailling/control-plane/internal/policy"
-	"github.com/mnfi/codmailling/control-plane/internal/store"
-	"github.com/mnfi/codmailling/control-plane/internal/vocab"
+	"github.com/coldmail-verify/control-plane/internal/orchestrator"
+	"github.com/coldmail-verify/control-plane/internal/policy"
+	"github.com/coldmail-verify/control-plane/internal/store"
+	"github.com/coldmail-verify/control-plane/internal/vocab"
 )
 
 // ── Fakes ────────────────────────────────────────────────────────────────────────────────────

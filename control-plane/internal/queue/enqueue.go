@@ -6,9 +6,9 @@ import (
 	"encoding/binary"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/hash"
-	"github.com/mnfi/codmailling/control-plane/internal/idgen"
-	"github.com/mnfi/codmailling/control-plane/internal/store"
+	"github.com/coldmail-verify/control-plane/internal/hash"
+	"github.com/coldmail-verify/control-plane/internal/idgen"
+	"github.com/coldmail-verify/control-plane/internal/store"
 )
 
 // DeriveIdempotencyKey computes the work-item dedup / settle-once key (§5.1):

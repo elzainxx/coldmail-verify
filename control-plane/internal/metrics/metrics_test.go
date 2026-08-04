@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/store"
+	"github.com/coldmail-verify/control-plane/internal/store"
 )
 
 var mt0 = time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)

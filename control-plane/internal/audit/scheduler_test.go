@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/node"
-	"github.com/mnfi/codmailling/control-plane/internal/store"
+	"github.com/coldmail-verify/control-plane/internal/node"
+	"github.com/coldmail-verify/control-plane/internal/store"
 )
 
 // These tests prove the minimal scheduled re-audit + auto-quarantine state machine LOCALLY against

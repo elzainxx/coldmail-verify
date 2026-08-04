@@ -14,9 +14,9 @@ import (
 	"errors"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/audit"
-	"github.com/mnfi/codmailling/control-plane/internal/config"
-	"github.com/mnfi/codmailling/control-plane/internal/store"
+	"github.com/coldmail-verify/control-plane/internal/audit"
+	"github.com/coldmail-verify/control-plane/internal/config"
+	"github.com/coldmail-verify/control-plane/internal/store"
 )
 
 // ErrNoEligibleNode is returned when the candidate list is empty. Callers degrade to a

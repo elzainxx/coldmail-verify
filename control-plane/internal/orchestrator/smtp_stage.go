@@ -8,12 +8,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/node"
-	"github.com/mnfi/codmailling/control-plane/internal/policy"
-	"github.com/mnfi/codmailling/control-plane/internal/ratelimit"
-	"github.com/mnfi/codmailling/control-plane/internal/router"
-	"github.com/mnfi/codmailling/control-plane/internal/smtp"
-	"github.com/mnfi/codmailling/control-plane/internal/vocab"
+	"github.com/coldmail-verify/control-plane/internal/node"
+	"github.com/coldmail-verify/control-plane/internal/policy"
+	"github.com/coldmail-verify/control-plane/internal/ratelimit"
+	"github.com/coldmail-verify/control-plane/internal/router"
+	"github.com/coldmail-verify/control-plane/internal/smtp"
+	"github.com/coldmail-verify/control-plane/internal/vocab"
 )
 
 // This file: the Phase-2 SMTP stage (§7.1). It runs AFTER the cheap layers, ONLY when the cheap

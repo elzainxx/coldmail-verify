@@ -14,7 +14,7 @@ package metrics
 import (
 	"sort"
 
-	"github.com/mnfi/codmailling/control-plane/internal/store"
+	"github.com/coldmail-verify/control-plane/internal/store"
 )
 
 // NodeMetric is the per-node (per verifier_ip) derived view (§8.1). block-rate uses the SAME

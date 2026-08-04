@@ -5,11 +5,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/flywheel"
-	"github.com/mnfi/codmailling/control-plane/internal/hash"
-	"github.com/mnfi/codmailling/control-plane/internal/policy"
-	"github.com/mnfi/codmailling/control-plane/internal/store"
-	"github.com/mnfi/codmailling/control-plane/internal/vocab"
+	"github.com/coldmail-verify/control-plane/internal/flywheel"
+	"github.com/coldmail-verify/control-plane/internal/hash"
+	"github.com/coldmail-verify/control-plane/internal/policy"
+	"github.com/coldmail-verify/control-plane/internal/store"
+	"github.com/coldmail-verify/control-plane/internal/vocab"
 )
 
 func fwFixedNow() time.Time { return time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC) }

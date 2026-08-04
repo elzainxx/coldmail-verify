@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/idgen"
-	"github.com/mnfi/codmailling/control-plane/internal/store"
-	"github.com/mnfi/codmailling/control-plane/internal/vocab"
+	"github.com/coldmail-verify/control-plane/internal/idgen"
+	"github.com/coldmail-verify/control-plane/internal/store"
+	"github.com/coldmail-verify/control-plane/internal/vocab"
 )
 
 // This file: the OUTCOME INGESTION path (§3) — join, integrity reject-and-flag, classify, append.

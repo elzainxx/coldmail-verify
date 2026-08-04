@@ -11,10 +11,10 @@ import (
 	"log"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/idgen"
-	"github.com/mnfi/codmailling/control-plane/internal/orchestrator"
-	"github.com/mnfi/codmailling/control-plane/internal/policy"
-	"github.com/mnfi/codmailling/control-plane/internal/store"
+	"github.com/coldmail-verify/control-plane/internal/idgen"
+	"github.com/coldmail-verify/control-plane/internal/orchestrator"
+	"github.com/coldmail-verify/control-plane/internal/policy"
+	"github.com/coldmail-verify/control-plane/internal/store"
 )
 
 // Computer is the log-FREE compute path the drainer runs each item through — satisfied by

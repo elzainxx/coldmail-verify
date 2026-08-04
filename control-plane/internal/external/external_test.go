@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/vocab"
+	"github.com/coldmail-verify/control-plane/internal/vocab"
 )
 
 // The anti-laundering headline (§3.4, acceptance criterion 2, the phase's correctness heart): a

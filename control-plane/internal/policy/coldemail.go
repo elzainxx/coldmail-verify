@@ -1,6 +1,6 @@
 package policy
 
-import "github.com/mnfi/codmailling/control-plane/internal/layers"
+import "github.com/coldmail-verify/control-plane/internal/layers"
 
 // ColdEmailKey/Version identify the one shipped Phase-1 policy (§7.3).
 const (

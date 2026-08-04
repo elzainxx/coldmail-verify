@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/flywheel"
-	"github.com/mnfi/codmailling/control-plane/internal/policy"
-	"github.com/mnfi/codmailling/control-plane/internal/vocab"
+	"github.com/coldmail-verify/control-plane/internal/flywheel"
+	"github.com/coldmail-verify/control-plane/internal/policy"
+	"github.com/coldmail-verify/control-plane/internal/vocab"
 )
 
 // This file: the Phase-7 flywheel's TWO touches on the LIVE verdict path (§4.6 + §5.4). Both are

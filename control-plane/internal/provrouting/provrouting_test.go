@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/mnfi/codmailling/control-plane/internal/policy"
+	"github.com/coldmail-verify/control-plane/internal/policy"
 )
 
 // The render is generated from the ACTUAL cold-email policy provider_routing (the single source),

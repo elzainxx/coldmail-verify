@@ -7,7 +7,7 @@
 // an honest Phase-0 verdict (unknown/plausible with no engine consulted).
 package verdict
 
-import "github.com/mnfi/codmailling/control-plane/internal/vocab"
+import "github.com/coldmail-verify/control-plane/internal/vocab"
 
 // APIVersion is the frozen contract version. A breaking change means /v2, never in-place.
 const APIVersion = "v1"

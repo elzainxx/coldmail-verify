@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/audit"
-	"github.com/mnfi/codmailling/control-plane/internal/config"
-	"github.com/mnfi/codmailling/control-plane/internal/store"
+	"github.com/coldmail-verify/control-plane/internal/audit"
+	"github.com/coldmail-verify/control-plane/internal/config"
+	"github.com/coldmail-verify/control-plane/internal/store"
 )
 
 // fakeHealth is a HealthSource backed by a map (the simulated audit surface at the store layer).

@@ -5,8 +5,8 @@ import (
 	"net"
 	"testing"
 
-	"github.com/mnfi/codmailling/control-plane/internal/layers"
-	"github.com/mnfi/codmailling/control-plane/internal/vocab"
+	"github.com/coldmail-verify/control-plane/internal/layers"
+	"github.com/coldmail-verify/control-plane/internal/vocab"
 )
 
 // ── test doubles: a resolver + lists we fully control (no network, no DB) ────────────────

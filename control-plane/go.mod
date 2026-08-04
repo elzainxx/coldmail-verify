@@ -4,7 +4,7 @@
 // stdlib-only; Phase 1 adds golang.org/x/text (Unicode NFC) + golang.org/x/net (IDNA/UTS-46)
 // for the frozen Door-3 norm/v1 pipeline (§3.3.2, ADR-0006). A Postgres driver lands with the
 // store. Still NO truemail dependency in the control-plane.
-module github.com/mnfi/codmailling/control-plane
+module github.com/coldmail-verify/control-plane
 
 go 1.26
 

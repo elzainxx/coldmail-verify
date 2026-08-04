@@ -3,7 +3,7 @@ package smtp
 import (
 	"strings"
 
-	"github.com/mnfi/codmailling/control-plane/internal/vocab"
+	"github.com/coldmail-verify/control-plane/internal/vocab"
 )
 
 // This file: Score — the top-level SMTP-signal → verdict map (§7.2). It combines the §6.1

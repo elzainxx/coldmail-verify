@@ -3,7 +3,7 @@ package flywheel
 import (
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/vocab"
+	"github.com/coldmail-verify/control-plane/internal/vocab"
 )
 
 // This file: the HISTORICAL-BOUNCE GATE (§4.6) — the ONE new gate P7 adds, using the P1-RESERVED

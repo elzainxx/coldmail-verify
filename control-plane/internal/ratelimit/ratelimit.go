@@ -28,8 +28,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/policy"
-	"github.com/mnfi/codmailling/control-plane/internal/store"
+	"github.com/coldmail-verify/control-plane/internal/policy"
+	"github.com/coldmail-verify/control-plane/internal/store"
 )
 
 // Budget is the narrow durable-store capability the limiter needs (§4.4). Satisfied by store.Store;

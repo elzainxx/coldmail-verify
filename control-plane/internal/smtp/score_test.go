@@ -3,7 +3,7 @@ package smtp
 import (
 	"testing"
 
-	"github.com/mnfi/codmailling/control-plane/internal/vocab"
+	"github.com/coldmail-verify/control-plane/internal/vocab"
 )
 
 // These tests lock the §7.2 map + the §5.5 catch-all truth table + §6.5 cache-settled predicate.

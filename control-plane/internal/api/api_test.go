@@ -10,14 +10,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/config"
-	"github.com/mnfi/codmailling/control-plane/internal/hash"
-	"github.com/mnfi/codmailling/control-plane/internal/layers"
-	"github.com/mnfi/codmailling/control-plane/internal/orchestrator"
-	"github.com/mnfi/codmailling/control-plane/internal/policy"
-	"github.com/mnfi/codmailling/control-plane/internal/secrets"
-	"github.com/mnfi/codmailling/control-plane/internal/store"
-	"github.com/mnfi/codmailling/control-plane/internal/verdict"
+	"github.com/coldmail-verify/control-plane/internal/config"
+	"github.com/coldmail-verify/control-plane/internal/hash"
+	"github.com/coldmail-verify/control-plane/internal/layers"
+	"github.com/coldmail-verify/control-plane/internal/orchestrator"
+	"github.com/coldmail-verify/control-plane/internal/policy"
+	"github.com/coldmail-verify/control-plane/internal/secrets"
+	"github.com/coldmail-verify/control-plane/internal/store"
+	"github.com/coldmail-verify/control-plane/internal/verdict"
 )
 
 // The front door must (a) emit a VALID Door-1 contract response, (b) never a guessed

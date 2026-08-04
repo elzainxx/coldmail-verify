@@ -18,15 +18,15 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/config"
-	"github.com/mnfi/codmailling/control-plane/internal/hash"
-	"github.com/mnfi/codmailling/control-plane/internal/orchestrator"
-	"github.com/mnfi/codmailling/control-plane/internal/policy"
-	"github.com/mnfi/codmailling/control-plane/internal/queue"
-	"github.com/mnfi/codmailling/control-plane/internal/secrets"
-	"github.com/mnfi/codmailling/control-plane/internal/store"
-	"github.com/mnfi/codmailling/control-plane/internal/verdict"
-	"github.com/mnfi/codmailling/control-plane/internal/vocab"
+	"github.com/coldmail-verify/control-plane/internal/config"
+	"github.com/coldmail-verify/control-plane/internal/hash"
+	"github.com/coldmail-verify/control-plane/internal/orchestrator"
+	"github.com/coldmail-verify/control-plane/internal/policy"
+	"github.com/coldmail-verify/control-plane/internal/queue"
+	"github.com/coldmail-verify/control-plane/internal/secrets"
+	"github.com/coldmail-verify/control-plane/internal/store"
+	"github.com/coldmail-verify/control-plane/internal/verdict"
+	"github.com/coldmail-verify/control-plane/internal/vocab"
 )
 
 // Verifier is the request-lifecycle dependency the front door delegates to (the orchestrator).

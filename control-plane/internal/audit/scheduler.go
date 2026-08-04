@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/idgen"
-	"github.com/mnfi/codmailling/control-plane/internal/node"
-	"github.com/mnfi/codmailling/control-plane/internal/store"
+	"github.com/coldmail-verify/control-plane/internal/idgen"
+	"github.com/coldmail-verify/control-plane/internal/node"
+	"github.com/coldmail-verify/control-plane/internal/store"
 )
 
 // This file: the Phase-3 MINIMAL scheduled re-audit + auto-quarantine actor (§4.5). It is the

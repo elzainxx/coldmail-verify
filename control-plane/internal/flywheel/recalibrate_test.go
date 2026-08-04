@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/store"
+	"github.com/coldmail-verify/control-plane/internal/store"
 )
 
 // recalParams: a low sample gate so tests can drive moves with modest volume.

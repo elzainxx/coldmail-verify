@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/store"
+	"github.com/coldmail-verify/control-plane/internal/store"
 )
 
 func fixedNow() time.Time { return time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC) }

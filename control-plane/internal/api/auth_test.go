@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mnfi/codmailling/control-plane/internal/config"
-	"github.com/mnfi/codmailling/control-plane/internal/secrets"
-	"github.com/mnfi/codmailling/control-plane/internal/store"
+	"github.com/coldmail-verify/control-plane/internal/config"
+	"github.com/coldmail-verify/control-plane/internal/secrets"
+	"github.com/coldmail-verify/control-plane/internal/store"
 )
 
 // authReq builds a request with an optional bearer.
