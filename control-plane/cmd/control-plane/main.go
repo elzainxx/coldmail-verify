@@ -108,8 +108,10 @@ func buildAPI(appCtx context.Context, cfg config.Config, sec *secrets.Secrets, h
 	defer cancel()
 	pg, err := store.OpenPG(ctx, cfg.DatabaseURL)
 	if err != nil {
-		// A configured-but-unreachable DB is a real error, but the control-plane can still
-		// serve health/readiness; verify stays 503 until the DB is reachable. Log loudly.
+		// A configured-but-unreachable DB is a real error, but the control-plane can still SERVE
+		// health and readiness — and since item 10, readiness ANSWERS not_ready here (the pinger is
+		// never attached on this path, so /readyz reports db:false → 503). Verify stays 503 too.
+		// Health stays 200: the process is alive, which is the only thing liveness claims.
 		log.Printf("verify: store unavailable (%v) — /v1/verify will report not-ready (503)", err)
 		return srv
 	}
@@ -164,7 +166,15 @@ func buildAPI(appCtx context.Context, cfg config.Config, sec *secrets.Secrets, h
 	// (SELECT-only for cp_runtime; issuance/rotation are cp_admin/DR-3). Once wired, a valid
 	// per-caller key authenticates any endpoint and the P5 bulk surface requires one; the legacy
 	// static token still authenticates the sync /v1/verify during transition (backward-compat).
-	srv = srv.WithVerifier(orch, def).WithCallerAuth(pg)
+	// WithPinger (fix-plan item 10): the SAME *store.PG, handed to /readyz as its readiness probe.
+	// It is attached HERE, at the end of wiring, rather than next to OpenPG. Four early returns sit
+	// above this line; two of them (policy load, default-policy seed) happen with a perfectly
+	// reachable pg, and on those paths /v1/verify is NOT wired and answers 503. Pinging from OpenPG
+	// would make readiness say `db:true, ready` on exactly those paths — the readiness-vs-serving
+	// drift this item exists to remove, just relocated. Attaching it only once the serving path is
+	// assembled means all four early returns leave the pinger nil, and a nil pinger reports
+	// db:false → not_ready, which is the honest answer in every one of those states.
+	srv = srv.WithVerifier(orch, def).WithCallerAuth(pg).WithPinger(pg)
 
 	// P5 queue (§3/§7): wire the bulk endpoint + start the drainer, IFF the DR-4 key is present.
 	// The queue holds plaintext at rest (the one bounded Door-3 exception), so it MUST NOT start

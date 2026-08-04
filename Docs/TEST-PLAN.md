@@ -61,7 +61,7 @@ Work top to bottom. Each tier assumes the previous one passed.
 | 1.4 | `go vet ./...` | clean |
 | 1.5 | Start Postgres 16 throwaway container | healthy, DSN noted |
 | 1.6 | Start app in production (`TM_ENV=production`) with `TM_PEPPER` **unset** | **refuses to start** (`secrets: TM_PEPPER is required`) — this is a pass |
-| 1.7 | Start app with pepper set | starts, `/healthz` + `/readyz` respond |
+| 1.7 | Start app with pepper set | starts; `/healthz` 200 with `status`+`at`; `/readyz` carries `{"status":…,"checks":{"db":…,"pepper":…},"at":…}` and is **`ready`/200 only when BOTH checks are true** — with the DB down (or `TM_DATABASE_URL` unset) it is `not_ready`/503 even though the pepper is set |
 
 ---
 
@@ -163,8 +163,16 @@ TM_ENV=production \
   TM_LISTEN_ADDR=':8080' ./control-plane &
 
 # 2. Health/readiness bind (proves the socket is really listening):
-curl -fsS http://127.0.0.1:8080/healthz          # 200
-curl -fsS http://127.0.0.1:8080/readyz           # 200 once DB + pepper present
+curl -fsS http://127.0.0.1:8080/healthz          # 200 — liveness; stays 200 with every dependency down
+curl -fsS http://127.0.0.1:8080/readyz           # 200 only with BOTH db:true and pepper:true
+
+# 2b. The readiness check is a LIVE ping, not a boot-time snapshot — prove it by stopping the DB
+#     container and re-probing without restarting the app. `-f` is wrong here (it exits non-zero on
+#     the 503 we are asserting), so capture the code with -w:
+docker stop <pg-container>
+curl -sS -w ' <- %{http_code}\n' http://127.0.0.1:8080/readyz   # not_ready, db:false, 503
+docker start <pg-container>
+curl -sS -w ' <- %{http_code}\n' http://127.0.0.1:8080/readyz   # recovers to ready/200, no restart
 
 # 3. Re-run the §5.1 verdict matrix against the live server, e.g.:
 curl -fsS -H "authorization: Bearer $TM_FRONTDOOR_TOKEN" \

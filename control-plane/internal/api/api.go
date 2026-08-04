@@ -35,6 +35,24 @@ type Verifier interface {
 	Verify(ctx context.Context, rawEmail string, def *policy.Definition) (verdict.Response, error)
 }
 
+// Pinger is the narrow readiness probe the front door needs: can the database be reached RIGHT NOW
+// (fix-plan item 10 / contract §1.9.1, satisfied by *store.PG). One method, so readiness cannot
+// accidentally acquire the ability to read or write anything.
+//
+// WHY IT EXISTS AT ALL. Before item 10, /readyz checked only that the pepper secret had loaded, so
+// the control-plane reported `ready` while every POST /v1/verify answered 503 for a missing store —
+// the contract calls that "worse than no readiness endpoint, because orchestrators act on it". The
+// serving predicate and the readiness predicate had drifted apart; this closes the gap by making
+// readiness ping the same dependency the serving path needs.
+//
+// nil => no DB configured or the open failed (main.go's buildAPI returns early on both), which is
+// itself the honest NOT-ready answer. A nil Pinger reports the `db` check false rather than
+// omitting it: an absent check would let a monitor read "no news is good news" off a body that is
+// actually describing an unserviceable process.
+type Pinger interface {
+	Ping(ctx context.Context) error
+}
+
 // CallerAuth is the narrow per-caller key lookup the front door needs (PN-13, satisfied by
 // store.Store). Injected so api tests use a fake without a DB. nil => per-caller auth not wired
 // (the legacy static-token path governs; the bulk endpoint is then unavailable).
@@ -72,13 +90,14 @@ type callerIDKey struct{}
 
 // Server holds the wired dependencies. Deps are interfaces/values, so tests inject fakes.
 type Server struct {
-	cfg        config.Config
-	secrets    *secrets.Secrets
-	hasher     *hash.Hasher  // may be nil if no pepper loaded (readiness reports it)
-	verifier   Verifier      // nil until the store+orchestrator are wired (readiness reports it)
-	callerAuth CallerAuth    // nil => per-caller auth not wired (legacy static token governs)
+	cfg          config.Config
+	secrets      *secrets.Secrets
+	hasher       *hash.Hasher  // may be nil if no pepper loaded (readiness reports it)
+	verifier     Verifier      // nil until the store+orchestrator are wired (readiness reports it)
+	callerAuth   CallerAuth    // nil => per-caller auth not wired (legacy static token governs)
 	bulk         BulkSubmitter // nil => bulk endpoint unavailable (returns 503)
 	jobs         JobReader     // nil => job endpoints unavailable
+	pinger       Pinger        // nil => no DB reachable; /readyz reports db:false (item 10)
 	bulkMaxAddrs int           // §7.5 submission cap; 0 => the built-in safe hard cap (dial UNSET)
 	defPolicy    *policy.Definition
 	now          func() time.Time
@@ -94,6 +113,16 @@ func New(cfg config.Config, sec *secrets.Secrets, hasher *hash.Hasher) *Server {
 func (s *Server) WithVerifier(v Verifier, def *policy.Definition) *Server {
 	s.verifier = v
 	s.defPolicy = def
+	return s
+}
+
+// WithPinger attaches the readiness DB probe (fix-plan item 10). Separate from WithVerifier even
+// though main.go calls both with the same *store.PG, because the two answer different questions:
+// the verifier is what /v1/verify DELEGATES to, the pinger is what /readyz MEASURES. Wiring them
+// through one setter would make it impossible to test a server that can serve but whose DB has
+// since gone away — which is exactly the state readiness exists to report.
+func (s *Server) WithPinger(p Pinger) *Server {
+	s.pinger = p
 	return s
 }
 
@@ -423,24 +452,83 @@ func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleHealthz is liveness: the process is up. `at` is additive (fix-plan item 10 / contract
+// §1.9) and is what lets a dashboard tell "this module answered just now" from "I am looking at a
+// cached or proxied reply" — the senders already carried it, this surface did not.
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ok",
+		"at":     s.now().UTC().Format(time.RFC3339),
+	})
 }
 
 // handleReadyz reports readiness WITHOUT leaking secret values (presence only) and shows
 // the kill-switch rung — so an operator can see the system is at cheap-layers-only.
-func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
-	ready := s.secrets != nil && s.secrets.HasPepper()
+//
+// FIX-PLAN ITEM 10 (contract §1.9.1-2), two changes, both required together:
+//
+//  1. IT NOW PINGS THE DATABASE. Before this, `ready` was `secrets.HasPepper()` alone, so a
+//     control-plane with a pepper and no reachable store answered `200 ready:true` while every
+//     POST /v1/verify answered 503. The readiness predicate and the serving predicate disagreed,
+//     and readiness is the one an orchestrator acts on. Both dependencies are now required, because
+//     either one missing means the same thing to a caller: no verdict can be produced. The ping is
+//     LIVE per request (not a cached boot-time result) — a DB that has gone away since startup is
+//     the case a cached answer would miss, and it is the common one.
+//
+//  2. IT CARRIES THE CONTRACT'S `status`/`checks{}`/`at` ENVELOPE. The three modules previously
+//     shared not one readiness field name (this one returned {ready, config, pepper, supabaseKey},
+//     the senders {status, db, singleton_lock, at}), so one dashboard needed three parsers. The
+//     uniform part is the envelope; the per-module dependency NAMES live inside checks{}, which is
+//     what makes one shape possible without pretending the modules have the same dependencies.
+//
+// EVERY PRE-EXISTING FIELD IS STILL HERE, unchanged, at the top level. That is PROJECT_RULES'
+// additive-only discipline applied to an operator surface: `config` in particular is grepped by a
+// documented runbook step (OPERATIONS.md's `grep -o 'frontdoor=[^ "]*'`) and by
+// TestFrontDoorDefer_SummaryNamesTheRung, so removing or nesting it would break a procedure an
+// operator runs during an incident. `ready` stays as the boolean it always was, and `status` is its
+// word form — a monitor reading either gets the same answer, which is the property the test pins.
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	pepperOK := s.secrets != nil && s.secrets.HasPepper()
+
+	// A bounded ping: readiness must answer even when the DB is wedged rather than merely down.
+	// Without the timeout an unresponsive-but-connected Postgres would hang /readyz itself, and a
+	// readiness endpoint that hangs reads as "unknown" to some orchestrators and "healthy" to
+	// others. 3s matches the senders' handleReadyz so the three modules degrade alike.
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	dbOK := s.pinger != nil && s.pinger.Ping(ctx) == nil
+
+	ready := pepperOK && dbOK
 	code := http.StatusOK
 	if !ready {
-		code = http.StatusServiceUnavailable // no pepper => cannot hash => not ready for real work
+		// No pepper => cannot hash; no DB => cannot log a verdict, and Door 2 forbids a verdict we
+		// cannot log. Either way this process cannot do its job, so it must not be sent traffic.
+		code = http.StatusServiceUnavailable
 	}
 	writeJSON(w, code, map[string]any{
+		// The contract envelope (item 10).
+		"status": readyWord(ready),
+		"checks": map[string]bool{
+			"pepper": pepperOK,
+			"db":     dbOK,
+		},
+		"at": s.now().UTC().Format(time.RFC3339),
+		// Pre-existing fields, retained verbatim — see the additive-only note above.
 		"ready":       ready,
 		"config":      s.cfg.Summary(),
-		"pepper":      boolPresent(s.secrets != nil && s.secrets.HasPepper()),
+		"pepper":      boolPresent(pepperOK),
 		"supabaseKey": boolPresent(s.secrets != nil && s.secrets.HasSupabaseKey()),
 	})
+}
+
+// readyWord is the contract's §1.9 status word. Deliberately not named statusWord (the senders'
+// name) — this file already has boolPresent returning "set"/"unset" for the same kind of job, and
+// two similarly-named string mappers in one package invite the wrong one being called.
+func readyWord(ok bool) string {
+	if ok {
+		return "ready"
+	}
+	return "not_ready"
 }
 
 // authenticate is the front-door auth (PN-13). It resolves the presented bearer to a caller in
@@ -508,6 +596,7 @@ func (s *Server) authenticate(r *http.Request, requirePerCaller bool) (callerID,
 //     submission bookkeeping — the full input↔result correlation is a platform seam (§7.6).
 //   - Meta is minimal (policy/version + from_cache): the per-request provenance (request_id,
 //     latency, node) belongs to each attempt, not the job-level result envelope.
+//
 // Flags/Signals/Status/Reason/Confidence/Recommendation are the settled verdict verbatim.
 func verdictFromRow(row store.VerificationRow) verdict.Response {
 	flags := row.Flags

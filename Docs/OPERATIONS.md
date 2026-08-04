@@ -42,7 +42,8 @@ Apply the migrations in order (`migrations/0001_*.sql` … `0012_*.sql`), then s
 control-plane. **Verify:**
 
 ```bash
-curl -s localhost:8080/readyz          # reports ready once the pepper is present (verify still 503 until the DB is reachable)
+curl -s localhost:8080/readyz          # {"status":"ready","checks":{"db":true,"pepper":true},...} — 503 if EITHER is down
+curl -s localhost:8080/healthz         # liveness: 200 while the process is up, even with every dependency down
 curl -s -H "authorization: Bearer $TM_FRONTDOOR_TOKEN" \
      -d '{"email":"someone@example.com"}' localhost:8080/v1/verify
 ```
