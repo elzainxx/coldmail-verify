@@ -14,10 +14,10 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | bucket | count |
 |---|---|
 | secrets | 9 |
-| feature-flags | 148 |
+| feature-flags | 149 |
 | dials | 123 |
 | other/uncategorized | 2 |
-| **total knobs** | **282** |
+| **total knobs** | **283** |
 
 > One-way doors are **not** dials: the frozen contracts (response shape, LOG, hashing,
 > vocabulary, never-fork) live in code (`control-plane/internal/{vocab,hash,verdict,store,router}`),
@@ -38,7 +38,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | vendor API key (P6) | no rotation story; leak = budget-DoS + billed enumeration oracle (security F-6) | no rotation story; leak = budget-DoS + billed enumeration oracle (security F-6) |
 | front-door bearer token | no per-caller scoping/rotation brain-side; guards bulk-PII endpoint by P5 (security F-20) | no per-caller scoping/rotation brain-side; guards bulk-PII endpoint by P5 (security F-20) |
 
-## Feature-flags (148)
+## Feature-flags (149)
 
 | knob | default / state | source |
 |---|---|---|
@@ -154,6 +154,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | retry-provenance signals (`signals.attempt`/`retry_settled`) | yes, additive (OQ-P5-10) | P5 §10, OQ-P5-10 |
 | `complete_with_unknowns` job status | informational job-status string (not verdict vocab) | P5 §7.3 |
 | `caller_ref` (opaque platform correlation) | echoed, never interpreted (two-job boundary) | P5 §7.2, §7.6, GAP-36 |
+| `TM_FRONTDOOR_MODE` (kill-switch Rung 4 — the pause) | `serving`; `accept_and_defer` = bulk still accepted, drainer STOPPED; `reject` = nothing accepted. Both pause sub-modes also 503 the sync `/v1/verify` (no deferred form of a synchronous answer) and disclose `processing_paused` on the bulk envelopes ([ADR-0015](adr/ADR-0015-rung4-pause-enforcement.md)) | kill-switch Rung 4, ADR-0015, audit D2 |
 | `external` layer enabled (per policy) | enabled in cold-email (OQ-P6-2); a policy without the block = **the privacy opt-out lever** | P6 §3.2, §7.5, OQ-P6-6 |
 | `external` layer position in `order` | LAST (most expensive, runs only on residue) | P6 §3.1 |
 | `vendor` selector (adapter) | `millionverifier` (OQ-P6-8, one at launch); swappable | P6 §3.2, §8, OQ-P6-8 |

@@ -1,21 +1,15 @@
 package api
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"strings"
-	"time"
 )
 
-// newRequestID generates a server-side request id (P1 OQ-21: server-generated, client
-// override allowed later). Uses crypto/rand; falls back to a time-derived id if rand fails.
-func newRequestID(now time.Time) string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "req-" + now.UTC().Format("20060102T150405.000000000")
-	}
-	return "req-" + hex.EncodeToString(b[:])
-}
+// DELETED: newRequestID (audit D23). It was dead code — zero call sites repo-wide — and it was also
+// WRONG for the job its name claims, which is why deleting it beats wiring it up: it returned
+// `req-<hex>`, and the LOG's `request_id` column is Postgres `uuid` (§3.2.2), so that value could
+// never be persisted. The real minter is orchestrator.mustID (UUIDv7, bare, no prefix). Anything
+// that needs a request id — including the coded-error-envelope work (fix-plan item 18) — must use
+// that one; a second minter here would have been an invitation to produce ids the DB rejects.
 
 // trimBearer accepts both "Bearer <t>" and a raw token (the front door is bearer; the
 // verifier-node token is raw — kept distinct per P1 §3.5.4).

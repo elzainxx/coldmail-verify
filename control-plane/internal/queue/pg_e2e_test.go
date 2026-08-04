@@ -93,7 +93,10 @@ func TestPGE2E_SubmitDrainSettleResults_MasterInvariant(t *testing.T) {
 	// Unique addresses per run so a shared DB doesn't collide on idempotency_key.
 	tag := now.Format("150405.000000000")
 	addrs := []string{"alice-" + tag + "@acmecorp.com", "bob-" + tag + "@acmecorp.com"}
-	res, err := enq.SubmitBulk(ctx, addrs, "cold-email", 1, "platform-ref-e2e")
+	// e2eOwner is the platform user the (notional) authenticated key acts for (0013). Every read
+	// below must pass it; passing "" would make the job unreadable, which is the point of the column.
+	const e2eOwner = "33333333-3333-4333-8333-333333333333"
+	res, err := enq.SubmitBulk(ctx, addrs, "cold-email", 1, "platform-ref-e2e", e2eOwner)
 	if err != nil {
 		t.Fatalf("SubmitBulk: %v", err)
 	}
@@ -125,7 +128,7 @@ func TestPGE2E_SubmitDrainSettleResults_MasterInvariant(t *testing.T) {
 	}
 
 	// Not complete yet (both items ready).
-	if complete, _, _, _ := pg.JobCompletion(ctx, jobID); complete {
+	if complete, _, _, _ := pg.JobCompletion(ctx, jobID, e2eOwner); complete {
 		t.Fatal("job must not be complete before draining")
 	}
 
@@ -143,7 +146,7 @@ func TestPGE2E_SubmitDrainSettleResults_MasterInvariant(t *testing.T) {
 	dr.TickOnce(ctx)
 
 	// Authoritative completion (GAP-38): all items settled → complete.
-	complete, total, settled, err := pg.JobCompletion(ctx, jobID)
+	complete, total, settled, err := pg.JobCompletion(ctx, jobID, e2eOwner)
 	if err != nil {
 		t.Fatalf("JobCompletion: %v", err)
 	}
@@ -152,7 +155,7 @@ func TestPGE2E_SubmitDrainSettleResults_MasterInvariant(t *testing.T) {
 	}
 
 	// Results: 2 settled verdicts joined from the LOG.
-	results, _, err := pg.ListJobResults(ctx, jobID, "", 10)
+	results, _, err := pg.ListJobResults(ctx, jobID, e2eOwner, "", 10)
 	if err != nil {
 		t.Fatalf("ListJobResults: %v", err)
 	}

@@ -385,20 +385,10 @@ func TestPGPeekRateBudget_DoesNotConsume(t *testing.T) {
 	}
 }
 
-// The rate_budgets DELETE grant is revoked from cp_runtime (append-only-ish counter posture). This
-// only runs when the DSN role is cp_runtime (CI uses postgres/superuser); it asserts the grant when
-// it can, otherwise skips honestly (never fakes the enforcement).
-func TestPGRateBudget_DeleteDeniedForRuntime(t *testing.T) {
-	pg := testPG(t)
-	ctx := context.Background()
-	nodeID := "n-" + must(idgen.NewV7String(time.Now().UTC()))
-	_, _ = pg.ReserveRateToken(ctx, nodeID, "b", RateParams{Capacity: 1, RefillPerSec: 0}, time.Now().UTC())
-	_, err := pg.pool.Exec(ctx, `DELETE FROM rate_budgets WHERE node_id=$1`, nodeID)
-	if err == nil {
-		t.Skip("connected as a privileged role (DELETE allowed) — grant enforcement is proven only as cp_runtime")
-	}
-	// As cp_runtime the DELETE must be denied (permission denied), mirroring node_warmup's posture.
-}
+// The rate_budgets DELETE-grant test used to live here as "attempt the DELETE; skip if it succeeds",
+// which meant it ALWAYS SKIPPED under CI's superuser DSN (D13 / fix-plan item 3). Replaced by
+// TestPGGrants_RuntimeCannotDeleteRateBudgets in pg_grants_test.go, which runs as cp_runtime via
+// SET LOCAL ROLE and asserts the UPDATE-allowed / DELETE-denied pair.
 
 // The block-rate SQL excludes cache hits (from_cache=true) and cheap-degrades (verifier_ip NULL) —
 // PB1, proven against real Postgres (the FILTER + WHERE clauses).
@@ -652,7 +642,7 @@ func TestPGLookupCaller_WindowEnforced(t *testing.T) {
 	seed(kRotNew, "caller_rot_"+tag, now, nil)
 
 	check := func(name string, key []byte, wantOK bool, wantID string) {
-		id, ok, err := pg.LookupCaller(ctx, key, now)
+		id, _, ok, err := pg.LookupCaller(ctx, key, now)
 		if err != nil {
 			t.Fatalf("%s: LookupCaller err %v", name, err)
 		}

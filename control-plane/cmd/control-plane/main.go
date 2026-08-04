@@ -219,6 +219,11 @@ func buildQueue(appCtx context.Context, cfg config.Config, sec *secrets.Secrets,
 		WorkerID: "drainer-1", LeaseTTL: leaseTTL, MaxSMTPDeadline: maxSMTP,
 		MaxAttempts: cfg.Dials.QueueMaxAttempts, MaxRetryAge: cfg.QueueMaxRetryAge(),
 		BatchSize: cfg.Dials.QueueDrainBatchSize, IdlePoll: cfg.QueueDrainIdlePoll(),
+		// Kill-switch Rung 4 (fix-plan item 4 / D2): accept-and-defer means the front door keeps
+		// accepting and storing work while THE DRAINER IS STOPPED. This is the line that makes the
+		// rung real — before it, TM_FRONTDOOR_MODE=accept_and_defer validated and did nothing.
+		// A closure over cfg, not a bool, so the decision is made per tick.
+		Paused: func() bool { return cfg.KillSwitch.VerdictProductionPaused() },
 	})
 	if err != nil {
 		log.Printf("queue: drainer init failed (%v) — bulk submissions will enqueue but NOT drain until fixed", err)
@@ -226,6 +231,12 @@ func buildQueue(appCtx context.Context, cfg config.Config, sec *secrets.Secrets,
 	}
 	log.Printf("queue: bulk endpoint wired; drainer starting (lease_ttl=%s max_smtp=%s max_attempts=%d max_age=%s)",
 		leaseTTL, maxSMTP, cfg.Dials.QueueMaxAttempts, cfg.QueueMaxRetryAge())
+	if cfg.KillSwitch.VerdictProductionPaused() {
+		// Loud at boot, not just at the first tick: starting a brain that is ALREADY at Rung 4 is a
+		// deliberate act, and the operator must see the process agree with the config it was handed.
+		log.Printf("queue: drainer starts PAUSED (frontdoor=%s, kill-switch Rung 4) — bulk submissions are accepted and stored durably; NOTHING will be processed until the rung is released",
+			cfg.KillSwitch.FrontDoor)
+	}
 	go drainer.Run(appCtx)
 }
 

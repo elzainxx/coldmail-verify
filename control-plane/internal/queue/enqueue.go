@@ -65,7 +65,19 @@ type BulkResult struct {
 // immediately with the job handle — no SMTP runs here (the drainer does that later through the P4
 // gates). policyKey/policyVersion/configFingerprint govern every item (part of the idempotency
 // key). callerRef is the opaque platform correlation string (§7.6), echoed, never interpreted.
-func (e *Enqueuer) SubmitBulk(ctx context.Context, addresses []string, policyKey string, policyVersion int, callerRef string) (BulkResult, error) {
+//
+// ownerUserID is the PLATFORM user that will own the job (0013 / fix-plan item 1, D1) — the value
+// every subsequent read predicates on. The two trailing string parameters are deliberately NOT
+// interchangeable and the distinction is load-bearing: ownerUserID comes from the AUTHENTICATED
+// KEY (api_callers.user_id, via LookupCaller) and is trusted; callerRef comes from the REQUEST BODY
+// and is not. Swapping them would let a caller name its own owner — i.e. reintroduce D1 through the
+// front door. They sit next to each other here, so this is exactly where that mistake would be made.
+//
+// "" is accepted rather than rejected (a key with no recorded platform user can still submit), and
+// it stores a NULL owner, which makes the resulting job unreadable over the API by anyone. Failing
+// CLOSED on read beats failing closed on submit: the alternative — rejecting the submission — would
+// break the legacy/dev path for no security gain, since an unreadable job leaks nothing.
+func (e *Enqueuer) SubmitBulk(ctx context.Context, addresses []string, policyKey string, policyVersion int, callerRef, ownerUserID string) (BulkResult, error) {
 	now := e.now()
 	jobID, err := idgen.NewV7String(now)
 	if err != nil {
@@ -117,7 +129,7 @@ func (e *Enqueuer) SubmitBulk(ctx context.Context, addresses []string, policyKey
 	// from another job) collapses — counted as Duplicate, not double-verified.
 	if _, err := e.Store.CreateJob(ctx, store.JobRow{
 		ID: jobID, PolicyKey: policyKey, PolicyVersion: policyVersion, Status: "running",
-		TotalCount: res.Total, CallerRef: callerRef,
+		TotalCount: res.Total, CallerRef: callerRef, OwnerUserID: ownerUserID,
 	}); err != nil {
 		return BulkResult{}, err
 	}

@@ -133,17 +133,11 @@ func TestPGCalibration_EffectiveReadAndApprove(t *testing.T) {
 	}
 }
 
-// TestPGSendOutcome_RuntimeCannotDelete proves the append-only-ish grant posture: cp_runtime has no
-// DELETE on send_outcomes (retention is cp_admin/DR-3). Skips when connected as a privileged role.
-func TestPGSendOutcome_RuntimeCannotDelete(t *testing.T) {
-	pg := testPG(t)
-	ctx := context.Background()
-	_, err := pg.pool.Exec(ctx, `DELETE FROM send_outcomes WHERE false`)
-	if err == nil {
-		t.Skip("connected as a privileged role (DELETE allowed) — grant enforcement is proven only as cp_runtime")
-	}
-	// A permission-denied error is the expected, correct outcome for cp_runtime.
-}
+// The send_outcomes grant test used to live here as "attempt the DELETE; skip if it succeeds". CI
+// connects as superuser, so it ALWAYS SKIPPED while ci.yml claimed append-only was proven on every
+// push (D13 / fix-plan item 3). It is replaced by TestPGGrants_RuntimeCannotDeleteSendOutcomes in
+// pg_grants_test.go, which SET LOCAL ROLEs to cp_runtime and therefore actually enforces — plus an
+// anti-vacuity control proving the role switch drops privilege.
 
 // ── helpers ── (mustV7 is defined in postgres_test.go)
 

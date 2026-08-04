@@ -140,12 +140,52 @@ ladder ever returns a fabricated `valid`/`invalid`. Pull a rung by config; no re
 | **1** | SMTP-off | IP reputation emergency, a compromised/blocked box | `TM_SMTP_MODE=disabled`, or `TM_NODE_ENABLED=false` per node, or route a provider to `:mx` |
 | **2** | Fallback-off | vendor bill runaway, vendor outage, a privacy/DPA event | `TM_FALLBACK_MODE=off` (global panic button) |
 | **3** | Cheap-layers-only | total SMTP loss *and* fallback off; or a cost freeze | Rung 1 + Rung 2 together (this is the baseline steady state) |
-| **4** | Paused | data-integrity emergency, DB outage, maintenance | stop the drainer (accept-and-defer), or `TM_FRONTDOOR_MODE=reject` |
+| **4** | Paused | data-integrity emergency, DB outage, maintenance | `TM_FRONTDOOR_MODE=accept_and_defer` (bulk still accepted, drainer stopped) or `=reject` (nothing accepted) |
 
 At **Rung 1**, addresses that *would* have earned `valid` via SMTP settle as `risky` instead —
 **never `invalid`** for lack of a probe. At **Rung 2**, residue stays exactly as the queue left
 it (`unknown`/`risky`) — never worse. At **Rung 4 accept-and-defer**, the front door returns a
 job handle and work sits durably in the queue; restarting resumes with zero loss.
+
+**Pulling Rung 4 in practice.** `TM_FRONTDOOR_MODE` is one dial that moves both halves — the
+front door and the drainer — so you cannot pause one and leave the other running:
+
+```bash
+# Soft pause: keep taking bulk work, process none of it.
+TM_FRONTDOOR_MODE=accept_and_defer   # then restart (config is read at boot; no reload/SIGHUP)
+# Hard pause: take nothing at all.
+TM_FRONTDOOR_MODE=reject
+# Release:
+TM_FRONTDOOR_MODE=serving
+```
+
+What you will see, and what to tell a caller:
+
+- `POST /v1/verify` returns **503 `{"error":"service paused"}` at BOTH sub-modes.** A synchronous
+  call has no deferred form — no handle to return, nowhere to defer to — and answering it would
+  either defeat the pause or fabricate a verdict. **Accept-and-defer only helps bulk callers.**
+- `POST /v1/verify/bulk` at `accept_and_defer` returns **202 with a `job_id` and
+  `"processing_paused": true`**; the addresses are stored encrypted in `work_items` as `ready`.
+  `GET /v1/jobs/{id}` keeps working and repeats `processing_paused: true` with `settled: 0`, so a
+  caller polling the handle learns *why* progress is zero instead of diagnosing a stall.
+- The drainer logs `PAUSED (kill-switch Rung 4 accept-and-defer)` once on entry and
+  `RESUMED (Rung 4 released) — draining the work that accumulated while paused` on release. Only
+  transitions are logged, so the incident's real signal is not buried.
+- **Confirm the rung is actually pulled** before you rely on it — `/readyz` and the boot line show
+  `frontdoor=paused-accept-and-defer(Rung4)` or `paused-reject(Rung4)`:
+
+```bash
+curl -s localhost:3000/readyz | grep -o 'frontdoor=[^ "]*'
+```
+
+While paused the drainer also skips the lease-reclaim sweep. That is deliberate: it takes no new
+lease, so the only `in_flight` rows are ones a pre-pause attempt owns, and re-readying work nothing
+may process would be churn. The sweep catches them on the first tick after release.
+
+Backlog while paused is bounded only by `work_items` growth and the §7.5 per-submission cap — a
+long soft pause under load accumulates rows. Watch the `ready` count and drop to `reject` if the
+queue is growing faster than you intend to drain it. Full per-surface matrix and the reasoning:
+[`kill-switch-ladder.md`](kill-switch-ladder.md) Rung 4 and [`adr/ADR-0015-rung4-pause-enforcement.md`](adr/ADR-0015-rung4-pause-enforcement.md).
 
 Two **brakes** are the ladder's safety interlock — they refuse to let an *automated* action
 cascade into a self-inflicted outage:

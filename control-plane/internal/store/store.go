@@ -233,6 +233,12 @@ type JobRow struct {
 	SubmittedAt   time.Time
 	CompletedAt   time.Time
 	CallerRef     string // opaque (§7.6); the sole platform coupling
+	// OwnerUserID is the PLATFORM user that owns this job (0013 / fix-plan item 1, D1). Stamped at
+	// submit from the AUTHENTICATED key's api_callers.user_id — never from the request body, so a
+	// caller cannot assert ownership. Every read path predicates on it. Empty string models a NULL
+	// owner (a job submitted before ownership was recorded): it matches NO caller, so legacy rows
+	// are read-CLOSED, not read-open. DISTINCT from CallerRef, which is untrusted body text.
+	OwnerUserID string
 }
 
 // WorkItemAttemptRow is one per-attempt transcript (OQ-P5-8) — append-only, distinct from the
@@ -603,21 +609,42 @@ type Store interface {
 	// GetWorkItem reads one work-item by id (progress/debugging). known=false => no such row.
 	GetWorkItem(ctx context.Context, itemID string) (item WorkItemRow, known bool, err error)
 
-	// CreateJob inserts a jobs row (§7.2) and returns its id.
+	// CreateJob inserts a jobs row (§7.2) and returns its id. job.OwnerUserID is the platform user
+	// the submitting key acts for (0013) — the value every read below predicates on.
 	CreateJob(ctx context.Context, job JobRow) (jobID string, err error)
 
-	// GetJob reads one job by id (progress polling). known=false => no such job.
-	GetJob(ctx context.Context, jobID string) (job JobRow, known bool, err error)
+	// ── THE OWNER PREDICATE (0013 / fix-plan item 1, D1; contract §1.4) ──
+	//
+	// All three job reads take ownerUserID and scope on it IN THE QUERY. This signature is the fix:
+	// before 0013 they took jobID alone, so any authenticated caller could read any caller's job
+	// status and verdicts. Passing the owner is therefore not optional plumbing — it is the only
+	// thing standing between two tenants, and the compiler now refuses a call that omits it.
+	//
+	// A job that exists but belongs to someone else, and a job that does not exist, are
+	// INDISTINGUISHABLE: both come back known=false / zero rows, and the handler maps both to the
+	// SAME 404. Never 403 — a 403 would confirm the id exists, which is exactly the
+	// existence-disclosure the senders' tenancy posture forbids.
+	//
+	// An EMPTY ownerUserID matches NOTHING (not "match all", not "match NULL owners"). That keeps
+	// the fail-safe direction: an unauthenticated-or-ownerless caller reads no job at all, and the
+	// pre-0013 rows whose owner was never captured stay closed.
+
+	// GetJob reads one job by id, SCOPED TO ITS OWNER (progress polling). known=false => no such
+	// job FOR THIS OWNER — which deliberately covers both "no such id" and "not yours".
+	GetJob(ctx context.Context, jobID, ownerUserID string) (job JobRow, known bool, err error)
 
 	// JobCompletion judges completion AUTHORITATIVELY (§7.3/GAP-38): complete iff
 	// NOT EXISTS(work_items WHERE job_id=jobID AND status NOT IN ('settled','dead')). It also
 	// returns the (denormalized) total/settled counts for cheap progress display — but completion
-	// is NEVER settled==total (the counter can drift under the reclaim/no-op path).
-	JobCompletion(ctx context.Context, jobID string) (complete bool, total, settled int, err error)
+	// is NEVER settled==total (the counter can drift under the reclaim/no-op path). SCOPED TO ITS
+	// OWNER: a job owned by another caller returns ErrNotWired, exactly as a nonexistent one does.
+	JobCompletion(ctx context.Context, jobID, ownerUserID string) (complete bool, total, settled int, err error)
 
 	// ListJobResults returns settled work-items for a job joined to their verdicts, cursor-paginated
 	// (§7.1). cursor is the last-seen work_item.id ("" => from the start); nextCursor is "" at the end.
-	ListJobResults(ctx context.Context, jobID, cursor string, limit int) (results []WorkItemResult, nextCursor string, err error)
+	// SCOPED TO ITS OWNER via a join back to jobs — a cross-tenant call yields ZERO ROWS, never a
+	// partial page. This is the path that leaked full verification results (PII) under D1.
+	ListJobResults(ctx context.Context, jobID, ownerUserID, cursor string, limit int) (results []WorkItemResult, nextCursor string, err error)
 
 	// ── Phase 5 (§7.5 / PN-13) — per-caller front-door auth ──
 
@@ -627,7 +654,14 @@ type Store interface {
 	// ok=false. keySHA256 is sha256(raw key); the raw key is never stored (§7.5). A miss (unknown
 	// or expired key) is ok=false, NOT an error — the caller maps that to 401. This is a hot,
 	// read-only lookup (cp_runtime has SELECT only on api_callers; issuance/rotation are cp_admin).
-	LookupCaller(ctx context.Context, keySHA256 []byte, now time.Time) (callerID string, ok bool, err error)
+	//
+	// It ALSO returns ownerUserID — the platform user the key acts for (api_callers.user_id, 0013).
+	// This is where the job-owner value comes from, and the reason it is returned HERE rather than
+	// read from the request: the identity is KEY-DERIVED, so a caller cannot assert it (contract
+	// §1.4 clause 6, the credential-based option). "" => the key has no platform user recorded
+	// (pre-0013 key, or the legacy static-token path); such a caller can still submit, but its
+	// jobs are stamped with a NULL owner and are therefore read-closed rather than world-readable.
+	LookupCaller(ctx context.Context, keySHA256 []byte, now time.Time) (callerID, ownerUserID string, ok bool, err error)
 
 	// ── Phase 7 (§3/§5/§8) — the flywheel ──
 
@@ -780,17 +814,17 @@ func (StubStore) GetWorkItem(context.Context, string) (WorkItemRow, bool, error)
 	return WorkItemRow{}, false, ErrNotWired
 }
 func (StubStore) CreateJob(context.Context, JobRow) (string, error) { return "", ErrNotWired }
-func (StubStore) GetJob(context.Context, string) (JobRow, bool, error) {
+func (StubStore) GetJob(context.Context, string, string) (JobRow, bool, error) {
 	return JobRow{}, false, ErrNotWired
 }
-func (StubStore) JobCompletion(context.Context, string) (bool, int, int, error) {
+func (StubStore) JobCompletion(context.Context, string, string) (bool, int, int, error) {
 	return false, 0, 0, ErrNotWired
 }
-func (StubStore) ListJobResults(context.Context, string, string, int) ([]WorkItemResult, string, error) {
+func (StubStore) ListJobResults(context.Context, string, string, string, int) ([]WorkItemResult, string, error) {
 	return nil, "", ErrNotWired
 }
-func (StubStore) LookupCaller(context.Context, []byte, time.Time) (string, bool, error) {
-	return "", false, ErrNotWired
+func (StubStore) LookupCaller(context.Context, []byte, time.Time) (string, string, bool, error) {
+	return "", "", false, ErrNotWired
 }
 func (StubStore) GetVerdictForJoin(context.Context, string) (VerdictJoin, bool, error) {
 	return VerdictJoin{}, false, ErrNotWired

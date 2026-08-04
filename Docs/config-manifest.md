@@ -379,6 +379,7 @@ These promote the §5.2/§5.3 dials from `buildQueue` code-defaults to readable 
 | **`TM_QUEUE_DRAIN_BATCH_SIZE`** (items per drain tick) | dial | 10 | too high → burst; too low → slow drain | pool | P5 §6 |
 | **`TM_QUEUE_DRAIN_IDLE_POLL_SECONDS`** (idle sleep) | dial | 2 | too high → latency; too low → busy-poll | brain-wide | P5 §3 |
 | **`TM_QUEUE_BULK_MAX_ADDRESSES`** (submission cap, §7.5) | dial | **UNSET — owner OQ** (built-in hard cap 100k applies until set) | unbounded upload → brain/DB overload (bounded by the hard cap even when UNSET) | brain-wide | P5 §7.5 |
+| **`TM_FRONTDOOR_MODE`** (kill-switch Rung 4 — the pause) | feature-flag | `serving`; `accept_and_defer` = bulk still accepted, drainer STOPPED; `reject` = nothing accepted. Both pause sub-modes also 503 the sync `/v1/verify` (no deferred form of a synchronous answer) and disclose `processing_paused` on the bulk envelopes ([ADR-0015](adr/ADR-0015-rung4-pause-enforcement.md)) | left at a pause sub-mode → backlog grows in `work_items` with nothing draining; read at boot only, so a stale value survives until restart | brain-wide (availability) | kill-switch Rung 4, ADR-0015, audit D2 |
 
 > **Not-yet-wired backpressure dials (§7.5 max-in-flight-jobs, §6.5 per-job-in-flight-% / WFQ):** these
 > stay in the §8.2 "no default anywhere" UNSET inventory and are **deliberately NOT settable config yet** —

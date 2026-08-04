@@ -54,7 +54,25 @@
   - **reject:** the front door returns a service-unavailable envelope; no new work accepted.
 - **Still returns:** either a job handle + "processing paused" job status (accept-and-defer), or an explicit unavailable response (reject). **It never returns a fabricated verdict to look "up."**
 - **Triggers:** a data-integrity emergency (suspected calibration poisoning, a pepper-custody incident, an append-only-LOG tamper suspicion), a Supabase outage, or a controlled maintenance stop. Accept-and-defer is preferred when the queue and DB are healthy but processing must halt; reject when the DB itself is compromised.
-- **Config:** drainer stop (P5), front-door mode.
+- **Config:** `TM_FRONTDOOR_MODE` = `serving` | `accept_and_defer` | `reject`. One dial: the mode drives both halves (front door **and** drainer), so there is no way to pull the rung on one and not the other.
+
+#### How each sub-mode behaves per surface (ADR-0015)
+Both sub-modes disable verdict production; they differ only in whether *new work is taken in*.
+
+| surface | `accept_and_defer` | `reject` |
+|---|---|---|
+| `POST /v1/verify` (sync) | **503** `{"error":"service paused"}` | **503** — byte-identical |
+| `POST /v1/verify/bulk` | **202** + `job_id` + `processing_paused: true`; addresses stored encrypted in `work_items` (`ready`) | **503** — nothing accepted |
+| `GET /v1/jobs/{id}` | **200**, readable, `processing_paused: true`, `settled: 0` | *(no new jobs; pre-existing handles still read)* |
+| queue drainer | **stopped** — no lease, no check, no LOG row, no lease-reclaim sweep | stopped |
+| `/readyz` + boot log | `frontdoor=paused-accept-and-defer(Rung4)` | `frontdoor=paused-reject(Rung4)` |
+
+Three points that are decisions, not accidents:
+- **The sync endpoint refuses at BOTH sub-modes.** There is no deferred form of a synchronous answer — no handle to return, no queue row to defer into. Serving a verdict would defeat the rung; returning `200` without one would be a fabricated verdict (Doors 1 and 2). So `/v1/verify` is unavailable the moment either sub-mode is pulled. **Accept-and-defer is a *bulk* capability.**
+- **The pause is checked before the lease, not after.** A gate after `DequeueReady` would leave items `in_flight` behind a lease a paused drainer never settles and a paused reclaim never sweeps — a pause that quietly damages the queue instead of freezing it. Nothing is leased while paused, so nothing is stranded, and the sweep is safe to freeze too.
+- **`processing_paused` is an additive boolean, derived per response.** Not a fifth `status` value: the job vocabulary is persisted under a DB CHECK (`0009`), and minting a permanent value for a state that flips back in a minute would spend a one-way door on a config flag. Not stored either — a stored flag would still read "paused" after the rung was released.
+
+**Releasing the rung:** set `TM_FRONTDOOR_MODE=serving` and restart (config is read at boot; there is no reload). The drainer logs `RESUMED (Rung 4 released)` and drains what accumulated, oldest-due first.
 
 ---
 
@@ -117,6 +135,8 @@ Rung 3  CHEAP-ONLY     cheap layers only                  (= Phase-1 steady stat
    │                   provable invalids full-conf; unprobed → risky/unknown; never valid
 Rung 4  PAUSED         accept-and-defer (durable queue) OR reject
                        job handle / unavailable; never a fabricated verdict
+                       both sub-modes stop the drainer AND the sync endpoint;
+                       defer differs only in still accepting BULK (202 + paused flag)
 
 Global A  FALLBACK-KILL   panic button: no PII egress, all policies, one action
 Global B  SHADOW-MODE     self-modification off (recalibration/promotion/weaning/quarantine)

@@ -38,10 +38,17 @@ func bulkServer(t *testing.T, now time.Time) (*Server, *store.MemStore, *queue.A
 
 	srv := New(cfg, sec, h).WithVerifier(stubVerifier{}, def).WithCallerAuth(mem).WithBulk(enq, mem, 0)
 	srv.now = func() time.Time { return now }
-	// Seed a per-caller key (the bulk surface requires one, PN-13).
-	mem.SeedCaller(sha("bulk-key"), "caller_bulk", now.Add(-time.Hour), time.Time{})
+	// Seed a per-caller key (the bulk surface requires one, PN-13) WITH a platform user (0013 / item
+	// 1). The user is not optional fixture detail: a key with no user submits an OWNERLESS job, which
+	// is read-closed by design, so the lifecycle test below would 404 on its own job. Seeding one is
+	// what a real issued key looks like; the userless case has its own test
+	// (TestPGOwnerlessJobIsReadClosed in pg_tenancy_test.go), and cross-tenant refusal has its own too.
+	mem.SeedCallerWithUser(sha("bulk-key"), "caller_bulk", bulkOwner, now.Add(-time.Hour), time.Time{})
 	return srv, mem, cipher
 }
+
+// bulkOwner is the platform user behind "bulk-key" (uuid: that is the column type, per the A6 ruling).
+const bulkOwner = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
 
 func key32(seed byte) []byte {
 	k := make([]byte, 32)

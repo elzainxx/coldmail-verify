@@ -1,8 +1,8 @@
 # CI — the gate every change passes (PROJECT_RULES.md §7).
 # Runs: control-plane build/vet/test, the Door-5 gem-unmodified assertion + the real Docker
-# gem resolution, the docs-updated staleness check, config-reference freshness, and the
-# code-reviewer gate. It MUST NOT fake green: rollout-only truths (greylist retry-then-accept,
-# vendor accuracy) are never asserted here (Docs/test-strategy.md §4).
+# gem resolution, the no-secret-leak boot scan, the docs-updated staleness check, config-reference
+# freshness, and the code-reviewer gate. It MUST NOT fake green: rollout-only truths (greylist
+# retry-then-accept, vendor accuracy) are never asserted here (Docs/test-strategy.md §4).
 name: ci
 
 on:
@@ -23,6 +23,16 @@ jobs:
     # A real Postgres so the store + Door-2 append-only integration tests actually RUN in CI
     # (they SKIP without TM_TEST_DATABASE_URL — proving append-only on every push, not just
     # locally). The migrations are applied below before the tests.
+    #
+    # HOW THE APPEND-ONLY CLAIM IS ACTUALLY KEPT (D13 / fix-plan item 3). This job connects as the
+    # superuser `postgres`, so a test that merely ATTEMPTS a forbidden DELETE and skips when it
+    # succeeds proves nothing here — it always skips. Two tests were written that way and always
+    # skipped while this comment claimed the enforcement was proven. The grant tests now live in
+    # internal/store/pg_grants_test.go and run every forbidden statement inside a transaction that
+    # has `SET LOCAL ROLE cp_runtime`, which drops superuser for the duration. cp_runtime therefore
+    # stays NOLOGIN (0005_grants.sql) and needs no CI password. TestPGGrants_RoleSwitchActuallyBites
+    # is the control: it fails if the role switch ever stops dropping privilege, so the other grant
+    # tests cannot go quietly vacuous the way their predecessors did.
     services:
       postgres:
         image: postgres:16-alpine
@@ -88,6 +98,22 @@ jobs:
           docker build -t truemail-verifier-node:ci verifier-node/truemail-rack
           docker run --rm -e VERIFIER_EMAIL=verifier@example.test -e ACCESS_TOKENS=token -e COVERAGE=0 \
             truemail-verifier-node:ci sh -c 'cd /app && bundle config unset --local without && bundle install --jobs 2 --retry 3 >/dev/null 2>&1 && bundle exec rspec --no-color'
+
+  no-secret-leak:
+    name: no-secret-leak (boot log carries no credential)
+    runs-on: ubuntu-latest
+    # A SEPARATE job, not a step in control-plane: it needs no database, and keeping it independent
+    # means a red here reads unambiguously as "a credential reached a log line" rather than being
+    # buried in a 380-test run. See fix-plan 14.4 / audit D12 — the absence of this gate is what let
+    # the pgx DSN leak sit unnoticed. The precedent is coldmail-send-byo's harness check of the same
+    # name; this one boots the real binary because M1 has no compose stack yet (fix-plan item 15).
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: boot with canary secrets and scan the log
+        run: bash scripts/check-no-secret-leak.sh
 
   docs-discipline:
     name: docs-updated + config-reference freshness

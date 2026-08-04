@@ -255,7 +255,11 @@ func TestJobCompletion_AuthoritativeNotCounter(t *testing.T) {
 	mem := NewMem(func() time.Time { return now })
 
 	jobID := "018f0000-0000-7000-8000-0000000000c3"
-	mem.CreateJob(ctx, JobRow{ID: jobID, PolicyKey: "cold-email", PolicyVersion: 1, TotalCount: 2})
+	// The job needs an OWNER (0013 / item 1): every read below is owner-scoped, and an ownerless job
+	// is read-closed by design. The GAP-38 property under test is unchanged by that; the owner is
+	// fixture, not subject. (Cross-tenant refusal has its own tests — api/pg_tenancy_test.go.)
+	const owner = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+	mem.CreateJob(ctx, JobRow{ID: jobID, PolicyKey: "cold-email", PolicyVersion: 1, TotalCount: 2, OwnerUserID: owner})
 
 	// Two items in the job.
 	i1 := mkWorkItem("018f0000-0000-7000-8000-0000000000c1", "idem-c1", "ex.com")
@@ -276,11 +280,11 @@ func TestJobCompletion_AuthoritativeNotCounter(t *testing.T) {
 
 	// Simulate counter drift (the exact hazard GAP-38 defends): forcibly set settled_count BELOW
 	// total, as a missed increment under a reclaim/no-op would. Completion must STILL be true.
-	j, _, _ := mem.GetJob(ctx, jobID)
+	j, _, _ := mem.GetJob(ctx, jobID, owner)
 	j.SettledCount = 0 // drifted low
 	mem.CreateJob(ctx, j)
 
-	complete, total, settled, err := mem.JobCompletion(ctx, jobID)
+	complete, total, settled, err := mem.JobCompletion(ctx, jobID, owner)
 	if err != nil {
 		t.Fatalf("JobCompletion: %v", err)
 	}

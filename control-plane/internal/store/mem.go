@@ -67,6 +67,7 @@ type MemStore struct {
 // callerRow mirrors one api_callers row (per-caller key + validity window).
 type callerRow struct {
 	callerID  string
+	userID    string // api_callers.user_id (0013) — the PLATFORM user this key acts for; "" => NULL
 	notBefore time.Time
 	notAfter  time.Time // zero => no expiry (NULL)
 }
@@ -699,20 +700,50 @@ func (m *MemStore) CreateJob(_ context.Context, job JobRow) (string, error) {
 	return job.ID, nil
 }
 
-// GetJob reads one job by id.
-func (m *MemStore) GetJob(_ context.Context, jobID string) (JobRow, bool, error) {
+// GetJob reads one job by id, SCOPED TO ITS OWNER (0013 / fix-plan item 1, D1) — mirroring PG's
+// `WHERE id=$1 AND owner_user_id=$2` EXACTLY, including the two NULL cases, because a fake that is
+// laxer than the real store is how D1 stayed invisible to this suite in the first place (§8.3):
+// with an in-memory store there is no SQL for a missing predicate to be absent from, so the mirror
+// has to carry the property by hand.
+//
+//   - ownerUserID == "" matches NOTHING (PG: `owner_user_id = NULL` is NULL, not true).
+//   - a job with OwnerUserID == "" (a NULL owner) is matched by NOBODY, including another "" caller
+//     — NULL = NULL is not true either. Hence the two separate guards below rather than one ==.
+//
+// known=false covers both "no such id" and "not yours"; the handler maps both to the same 404.
+func (m *MemStore) GetJob(_ context.Context, jobID, ownerUserID string) (JobRow, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	j, ok := m.jobs[jobID]
-	return j, ok, nil
+	if !ok {
+		return JobRow{}, false, nil
+	}
+	if ownerUserID == "" || j.OwnerUserID == "" || j.OwnerUserID != ownerUserID {
+		return JobRow{}, false, nil // not yours (or ownerless) — indistinguishable from absent
+	}
+	return j, true, nil
+}
+
+// jobOwnedBy reports whether jobID exists AND is owned by ownerUserID, with PG's NULL semantics
+// (see GetJob). Callers must already hold m.mu. Extracted so the three read paths cannot drift
+// apart — the failure mode item 1 exists to fix was three read paths each deciding for itself.
+func (m *MemStore) jobOwnedBy(jobID, ownerUserID string) (JobRow, bool) {
+	j, ok := m.jobs[jobID]
+	if !ok || ownerUserID == "" || j.OwnerUserID == "" || j.OwnerUserID != ownerUserID {
+		return JobRow{}, false
+	}
+	return j, true
 }
 
 // JobCompletion judges completion AUTHORITATIVELY (mirrors PG NOT EXISTS — GAP-38): iterate items,
 // not the counter. Returns total/settled from the job row for cheap display only.
-func (m *MemStore) JobCompletion(_ context.Context, jobID string) (bool, int, int, error) {
+// SCOPED TO ITS OWNER (0013 / item 1): a job owned by another caller returns ErrNotWired, exactly
+// as a nonexistent one does — mirroring PG, where the owner predicate sits on the counts query so
+// the non-owner never reaches the completion computation.
+func (m *MemStore) JobCompletion(_ context.Context, jobID, ownerUserID string) (bool, int, int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	j, ok := m.jobs[jobID]
+	j, ok := m.jobOwnedBy(jobID, ownerUserID)
 	if !ok {
 		return false, 0, 0, ErrNotWired
 	}
@@ -727,11 +758,17 @@ func (m *MemStore) JobCompletion(_ context.Context, jobID string) (bool, int, in
 }
 
 // ListJobResults returns settled items for a job joined to their verdicts, cursor-paginated by id.
-func (m *MemStore) ListJobResults(_ context.Context, jobID, cursor string, limit int) ([]WorkItemResult, string, error) {
+// SCOPED TO ITS OWNER (0013 / item 1) — the path that leaked the actual verdicts under D1. A
+// non-owner gets ZERO ROWS and an empty cursor, mirroring PG's inner join back to jobs: the owner
+// check happens BEFORE pagination, so no cursor/limit combination walks another tenant's results.
+func (m *MemStore) ListJobResults(_ context.Context, jobID, ownerUserID, cursor string, limit int) ([]WorkItemResult, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if limit <= 0 {
 		limit = 100
+	}
+	if _, ok := m.jobOwnedBy(jobID, ownerUserID); !ok {
+		return nil, "", nil // not yours (or absent) — an empty page, never a partial one
 	}
 	logByID := map[string]VerificationRow{}
 	for _, r := range m.Log {
@@ -758,20 +795,22 @@ func (m *MemStore) ListJobResults(_ context.Context, jobID, cursor string, limit
 // LookupCaller resolves a caller from sha256(bearer key) honoring the validity window (PN-13,
 // §7.5) — mirrors PG EXACTLY: a match requires now ∈ [notBefore, notAfter) (notAfter zero => no
 // expiry), so a rotated-out key yields ok=false. A miss is ok=false, never an error (→ 401).
-func (m *MemStore) LookupCaller(_ context.Context, keySHA256 []byte, now time.Time) (string, bool, error) {
+// It also returns the platform user the key acts for (api_callers.user_id, 0013) — "" when the
+// seeded row has none, mirroring a NULL user_id.
+func (m *MemStore) LookupCaller(_ context.Context, keySHA256 []byte, now time.Time) (string, string, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	c, ok := m.callers[hex.EncodeToString(keySHA256)]
 	if !ok {
-		return "", false, nil
+		return "", "", false, nil
 	}
 	if now.Before(c.notBefore) {
-		return "", false, nil // not yet valid
+		return "", "", false, nil // not yet valid
 	}
 	if !c.notAfter.IsZero() && !now.Before(c.notAfter) {
-		return "", false, nil // expired (rotated out): now >= notAfter
+		return "", "", false, nil // expired (rotated out): now >= notAfter
 	}
-	return c.callerID, true, nil
+	return c.callerID, c.userID, true, nil
 }
 
 func (m *MemStore) Ping(context.Context) error { return nil }
@@ -827,11 +866,20 @@ func (m *MemStore) SeedRateBudget(nodeID, providerBucket string, tokens float64,
 
 // SeedCaller registers a per-caller key (test-support: model an api_callers row). keySHA256 is
 // sha256(raw key); notAfter zero => no expiry. Drive the rotation/expiry paths by seeding two
-// rows for one callerID with different windows.
+// rows for one callerID with different windows. The key carries NO platform user — use
+// SeedCallerWithUser to seed one and exercise the 0013 owner path.
 func (m *MemStore) SeedCaller(keySHA256 []byte, callerID string, notBefore, notAfter time.Time) {
+	m.SeedCallerWithUser(keySHA256, callerID, "", notBefore, notAfter)
+}
+
+// SeedCallerWithUser is SeedCaller plus the platform user the key acts for (api_callers.user_id,
+// 0013 / item 1) — the value that becomes jobs.owner_user_id at submit. Seed two keys with
+// DIFFERENT userIDs to drive the cross-tenant paths; userID "" models a NULL user_id (a pre-0013
+// key: it authenticates and can submit, but its jobs are ownerless and therefore read-closed).
+func (m *MemStore) SeedCallerWithUser(keySHA256 []byte, callerID, userID string, notBefore, notAfter time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.callers[hex.EncodeToString(keySHA256)] = callerRow{callerID: callerID, notBefore: notBefore, notAfter: notAfter}
+	m.callers[hex.EncodeToString(keySHA256)] = callerRow{callerID: callerID, userID: userID, notBefore: notBefore, notAfter: notAfter}
 }
 
 // SeedPolicy stores a policy; if isDefault, it becomes the default (last write wins).
@@ -849,6 +897,23 @@ func (m *MemStore) CacheLen() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.cache)
+}
+
+// WorkItemsForJob returns every work item belonging to jobID (test-support). It exists so a test can
+// assert that submitted work was STORED, not merely acknowledged — the property kill-switch Rung 4
+// accept-and-defer rests on ("work sits durably in work_items"). Deliberately NOT part of the Store
+// interface: production reads job progress through JobCompletion/ListJobResults, which are
+// owner-scoped (0013); this raw, unscoped view is a fake-only affordance.
+func (m *MemStore) WorkItemsForJob(jobID string) []WorkItemRow {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []WorkItemRow
+	for _, w := range m.workItems {
+		if w.JobID == jobID {
+			out = append(out, w)
+		}
+	}
+	return out
 }
 
 // cacheContents returns a snapshot of the cache (internal test-support).

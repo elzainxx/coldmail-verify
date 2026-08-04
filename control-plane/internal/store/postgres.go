@@ -17,6 +17,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -29,16 +31,121 @@ type PG struct {
 }
 
 // OpenPG connects a pool to the given DSN and pings it. The caller owns Close().
+//
+// NEITHER error wraps the driver error directly (fix-plan U2 / D12). pgx v5.10.0 embeds the WHOLE
+// connection string in `ParseConfigError.Error()`, and its own redaction is incomplete: `redactPW`
+// takes the URL branch for any `postgres://` DSN and then `redactURL` returns `u.String()`, so
+// `RawQuery` is emitted verbatim — a password carried as a QUERY PARAMETER (`?password=`,
+// `?sslpassword=`, both honored by libpq/pgx) is logged in clear; and the keyword/value branch's
+// `password=[^ ]*` regex cannot match the honored spaced spelling `password = SECRET`. Verified
+// first-hand against the pinned version: those three shapes leak, userinfo and unspaced kv do not.
+// The caller at cmd/control-plane logs this error at boot, so a leak lands in the process log — the
+// most-collected, longest-lived surface there is.
+//
+// The defence is scrubDSNError, applied HERE rather than at the log call: a fix at the call site
+// protects only that one caller, and the next `log.Printf("%v", err)` reintroduces it. The DSN is
+// not needed in the message either way — the operator already knows what they configured, and the
+// failure they need is the reason, not the credential.
 func OpenPG(ctx context.Context, dsn string) (*PG, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
-		return nil, fmt.Errorf("store: pgx pool: %w", err)
+		return nil, fmt.Errorf("store: pgx pool: %w", scrubDSNError(err, dsn))
 	}
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("store: ping: %w", err)
+		return nil, fmt.Errorf("store: ping: %w", scrubDSNError(err, dsn))
 	}
 	return &PG{pool: pool}, nil
+}
+
+// scrubbedDSNError replaces a driver error whose text embeds the DSN. It keeps Unwrap so
+// errors.Is/As still reach the original (a caller may legitimately test for a pgx sentinel); only
+// the STRING — the thing that reaches a log — is replaced.
+type scrubbedDSNError struct {
+	err error
+	msg string
+}
+
+func (e *scrubbedDSNError) Error() string { return e.msg }
+func (e *scrubbedDSNError) Unwrap() error { return e.err }
+
+// scrubDSNError returns err unchanged when its text cannot expose the DSN, and a scrubbed
+// replacement when it can.
+//
+// The test is DERIVED, not a pattern list: it asks whether the error text contains any credential
+// candidate actually present in the DSN we were handed. That is why it catches shapes nobody
+// enumerated — a future pgx release that leaks a new field, or a DSN keyword this code has never
+// heard of, is still caught, because the check is "does the message contain one of MY secrets"
+// rather than "does the message match one of THEIR known-bad spellings". A blocklist of `password=`
+// spellings is exactly how pgx's own redaction came to miss two.
+func scrubDSNError(err error, dsn string) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	// The DSN appearing whole is the common case and is enough on its own: user/host/port/database
+	// are not credentials but they are infrastructure detail with no business in a log line.
+	leaks := strings.Contains(msg, dsn)
+	if !leaks {
+		for _, cand := range dsnCredentialCandidates(dsn) {
+			if strings.Contains(msg, cand) {
+				leaks = true
+				break
+			}
+		}
+	}
+	if !leaks {
+		return err
+	}
+	// Deliberately NOT a partial redaction of the message. Selective rewriting is what failed
+	// upstream: it leaves whatever the pattern missed. Replace the whole text and name the one fact
+	// an operator needs — which env var to look at.
+	return &scrubbedDSNError{
+		err: err,
+		msg: "connection string rejected by the driver (message suppressed: it embedded the DSN — check TM_DATABASE_URL)",
+	}
+}
+
+// dsnCredentialCandidates extracts every substring of the DSN that could be a secret, in every
+// spelling pgx/libpq honors: URL userinfo password, URL query values, and keyword/value values
+// (quoted, unquoted, spaced or not). It over-collects on purpose — a false positive costs one
+// error message its detail; a false negative costs a credential.
+func dsnCredentialCandidates(dsn string) []string {
+	var out []string
+	add := func(s string) {
+		// Under 4 chars a "secret" is more likely to appear incidentally in a driver message
+		// ("db", "5432") than to be a real credential, and matching it would suppress every
+		// error. Real credentials are longer than this.
+		if len(s) >= 4 {
+			out = append(out, s)
+		}
+	}
+	if u, err := url.Parse(dsn); err == nil && u.Scheme != "" {
+		if pw, ok := u.User.Password(); ok {
+			add(pw)
+		}
+		for _, vs := range u.Query() {
+			for _, v := range vs {
+				add(v)
+			}
+		}
+	}
+	// Keyword/value form, and the query-ish tail of a URL that failed to parse. Split on whitespace
+	// and '&', then take everything after the first '=' — so `password = SECRET` (spaces around the
+	// '=' are honored) and `password='pass word'` both surrender their value.
+	for _, field := range strings.FieldsFunc(dsn, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == '&' || r == '?'
+	}) {
+		if eq := strings.IndexByte(field, '='); eq >= 0 {
+			add(strings.Trim(strings.TrimSpace(field[eq+1:]), `'"`))
+		} else {
+			// A bare token: either a key awaiting its spaced '=', or the VALUE of a spaced pair
+			// (`password = SECRET` splits into three fields). We cannot tell which without tracking
+			// state, so treat every bare token as a candidate — over-collection, per the note above.
+			add(strings.Trim(field, `'"`))
+		}
+	}
+	return out
 }
 
 func (p *PG) Ping(ctx context.Context) error { return p.pool.Ping(ctx) }
@@ -785,29 +892,48 @@ func (p *PG) CreateJob(ctx context.Context, job JobRow) (string, error) {
 	if status == "" {
 		status = "submitted"
 	}
+	// owner_user_id (0013 / item 1): the platform user the submitting key acts for. nullStr maps ""
+	// to SQL NULL rather than inventing a sentinel owner — a job whose submitter had no recorded
+	// platform user is honestly ownerless, and the read predicates make an ownerless row match no
+	// caller (NULL = $2 is NULL, not true), so the fail-safe direction is read-CLOSED.
 	const q = `
-INSERT INTO jobs (id, policy_key, policy_version, status, total_count, settled_count, caller_ref)
-VALUES ($1,$2,$3,$4,$5,$6,$7)`
+INSERT INTO jobs (id, policy_key, policy_version, status, total_count, settled_count, caller_ref, owner_user_id)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`
 	if _, err := p.pool.Exec(ctx, q,
 		job.ID, job.PolicyKey, job.PolicyVersion, status, job.TotalCount, job.SettledCount,
-		nullStr(job.CallerRef),
+		nullStr(job.CallerRef), nullStr(job.OwnerUserID),
 	); err != nil {
 		return "", fmt.Errorf("store: create job: %w", err)
 	}
 	return job.ID, nil
 }
 
-// GetJob reads one job by id.
-func (p *PG) GetJob(ctx context.Context, jobID string) (JobRow, bool, error) {
+// GetJob reads one job by id, SCOPED TO ITS OWNER (0013 / fix-plan item 1, D1).
+//
+// THE PREDICATE IS `owner_user_id = $2`, NOT a post-read comparison in Go. That matters: a filter
+// applied after the row is in memory is one `if` away from being forgotten (and one refactor away
+// from being logged), whereas a row that never leaves Postgres cannot leak. It also means the
+// index (idx_jobs_owner) does the work.
+//
+// A cross-tenant read is ErrNoRows → known=false → the handler's 404 — byte-identical to a
+// nonexistent id. Never 403: a 403 confirms the id exists, which is the existence disclosure the
+// senders' posture forbids and which would make job ids worth harvesting.
+//
+// $2 = "" (no owner) matches NOTHING, because `owner_user_id = ''::uuid` would be a cast error and
+// nullStr sends NULL instead — and `owner_user_id = NULL` is NULL, not true, under SQL's
+// three-valued logic. So an ownerless caller reads no job, and a pre-0013 NULL-owner row is
+// unreadable over the API by anyone. Both are the fail-safe direction, and both are deliberate.
+func (p *PG) GetJob(ctx context.Context, jobID, ownerUserID string) (JobRow, bool, error) {
 	const q = `
 SELECT id, policy_key, policy_version, status, total_count, settled_count, submitted_at,
-       COALESCE(completed_at, 'epoch'::timestamptz), COALESCE(caller_ref,'')
-FROM jobs WHERE id=$1`
+       COALESCE(completed_at, 'epoch'::timestamptz), COALESCE(caller_ref,''),
+       COALESCE(owner_user_id::text,'')
+FROM jobs WHERE id=$1 AND owner_user_id=$2`
 	var j JobRow
 	var completed time.Time
-	err := p.pool.QueryRow(ctx, q, jobID).Scan(
+	err := p.pool.QueryRow(ctx, q, jobID, nullStr(ownerUserID)).Scan(
 		&j.ID, &j.PolicyKey, &j.PolicyVersion, &j.Status, &j.TotalCount, &j.SettledCount,
-		&j.SubmittedAt, &completed, &j.CallerRef,
+		&j.SubmittedAt, &completed, &j.CallerRef, &j.OwnerUserID,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return JobRow{}, false, nil
@@ -822,11 +948,25 @@ FROM jobs WHERE id=$1`
 }
 
 // JobCompletion judges completion AUTHORITATIVELY (§7.3/GAP-38): NOT EXISTS a non-terminal item.
-func (p *PG) JobCompletion(ctx context.Context, jobID string) (bool, int, int, error) {
+// SCOPED TO ITS OWNER (0013 / item 1).
+//
+// The owner predicate goes on the COUNTS query — the first of the two — so a cross-tenant call
+// exits at ErrNoRows → ErrNotWired without ever running the second. That ordering is deliberate:
+// the NOT EXISTS query is keyed on work_items.job_id, and its boolean answer ("is this job
+// finished?") is itself a small cross-tenant signal. Gate first, then compute.
+//
+// The second query needs no predicate of its own precisely because it is unreachable for a
+// non-owner. It is left keyed on job_id alone rather than joined back to jobs so the GAP-38
+// invariant stays legible as exactly what the spec words say — completion is NOT EXISTS a
+// non-terminal item, never settled==total.
+func (p *PG) JobCompletion(ctx context.Context, jobID, ownerUserID string) (bool, int, int, error) {
 	var total, settled int
 	if err := p.pool.QueryRow(ctx,
-		`SELECT total_count, settled_count FROM jobs WHERE id=$1`, jobID).Scan(&total, &settled); err != nil {
+		`SELECT total_count, settled_count FROM jobs WHERE id=$1 AND owner_user_id=$2`,
+		jobID, nullStr(ownerUserID)).Scan(&total, &settled); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			// Covers BOTH "no such job" and "not yours" — indistinguishable by design (the handler
+			// maps this to the same 404 a nonexistent id gets).
 			return false, 0, 0, ErrNotWired
 		}
 		return false, 0, 0, fmt.Errorf("store: job completion counts: %w", err)
@@ -841,24 +981,42 @@ func (p *PG) JobCompletion(ctx context.Context, jobID string) (bool, int, int, e
 }
 
 // ListJobResults returns settled work-items joined to their verdicts, cursor-paginated by id (§7.1).
-func (p *PG) ListJobResults(ctx context.Context, jobID, cursor string, limit int) ([]WorkItemResult, string, error) {
+// SCOPED TO ITS OWNER (0013 / fix-plan item 1, D1).
+//
+// THIS IS THE PATH D1 ACTUALLY LEAKED THROUGH. GetJob exposed counts and a status; this one hands
+// back the full settled verdicts — status, reason, confidence, recommendation, flags, signals,
+// domain — for every address in the job. That is the PII, and it was readable by any authenticated
+// caller who knew a job_id.
+//
+// The predicate is an INNER JOIN back to jobs, not a WHERE on work_items: work_items has no owner
+// column (nor should it — ownership is a property of the job, stored once). A non-owner therefore
+// matches ZERO ROWS and gets an empty page, never a partial one; there is no arrangement of
+// cursor/limit that walks another tenant's results, because the owner condition is applied before
+// pagination, not after.
+//
+// Note the handler ALSO calls GetJob first and 404s on a non-owner, so this is the second of two
+// independent barriers. That redundancy is intentional: the handler's check protects the HTTP
+// response shape, this one protects the QUERY, and either alone would be one edit away from being
+// the only thing holding.
+func (p *PG) ListJobResults(ctx context.Context, jobID, ownerUserID, cursor string, limit int) ([]WorkItemResult, string, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	// The cursor is the last-seen work_item.id ("" on the first page). It's compared against a uuid
 	// column, so an empty cursor must NOT be cast to uuid (Postgres rejects ''::uuid) — the
-	// ($2='' OR w.id > $2::uuid) guard skips the comparison on the first page.
+	// ($3='' OR w.id > $3::uuid) guard skips the comparison on the first page.
 	const q = `
 SELECT w.id, w.email_hash,
        v.id, v.status, v.reason, v.confidence, v.recommendation, v.flags, v.signals,
        COALESCE(v.mx_provider,''), COALESCE(v.domain,''), v.policy_key, v.policy_version, v.api_version
 FROM work_items w
+JOIN jobs j ON j.id = w.job_id AND j.owner_user_id = $2
 JOIN verifications v ON v.id = w.verification_id
 WHERE w.job_id=$1 AND w.status IN ('settled','dead') AND w.verification_id IS NOT NULL
-  AND ($2 = '' OR w.id > $2::uuid)
+  AND ($3 = '' OR w.id > $3::uuid)
 ORDER BY w.id
-LIMIT $3`
-	rows, err := p.pool.Query(ctx, q, jobID, cursor, limit+1) // +1 to compute nextCursor
+LIMIT $4`
+	rows, err := p.pool.Query(ctx, q, jobID, nullStr(ownerUserID), cursor, limit+1) // +1 to compute nextCursor
 	if err != nil {
 		return nil, "", fmt.Errorf("store: list job results: %w", err)
 	}
@@ -1038,22 +1196,29 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`
 // yields ErrNoRows → ok=false. During a rotation overlap two rows share a caller_id with
 // overlapping windows; the lookup is by key_sha256 (the PK), so each key resolves independently —
 // LIMIT 1 is defensive (key_sha256 is unique). A miss is ok=false, never an error (→ 401).
-func (p *PG) LookupCaller(ctx context.Context, keySHA256 []byte, now time.Time) (string, bool, error) {
+//
+// It also returns user_id — the PLATFORM user the key acts for (0013 / item 1). This is the single
+// origin of jobs.owner_user_id, and it is read HERE, off the credential, so that no code path can
+// take an owner from the request body. Rotation is unaffected: both keys in an overlap window
+// belong to the same caller and carry the same user_id, so a rotation cannot silently move a
+// caller's jobs to a different owner. "" (NULL user_id) means a key issued before ownership was
+// recorded — it authenticates and may submit, but its jobs get a NULL owner and are read-closed.
+func (p *PG) LookupCaller(ctx context.Context, keySHA256 []byte, now time.Time) (string, string, bool, error) {
 	const q = `
-SELECT caller_id FROM api_callers
+SELECT caller_id, COALESCE(user_id::text,'') FROM api_callers
 WHERE key_sha256 = $1
   AND not_before <= $2
   AND (not_after IS NULL OR not_after > $2)
 LIMIT 1`
-	var callerID string
-	err := p.pool.QueryRow(ctx, q, keySHA256, now.UTC()).Scan(&callerID)
+	var callerID, ownerUserID string
+	err := p.pool.QueryRow(ctx, q, keySHA256, now.UTC()).Scan(&callerID, &ownerUserID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", false, nil // unknown OR expired key → not authenticated (caller maps to 401)
+		return "", "", false, nil // unknown OR expired key → not authenticated (caller maps to 401)
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("store: lookup caller: %w", err)
+		return "", "", false, fmt.Errorf("store: lookup caller: %w", err)
 	}
-	return callerID, true, nil
+	return callerID, ownerUserID, true, nil
 }
 
 func orEmptyFlags(f map[string]bool) map[string]bool {

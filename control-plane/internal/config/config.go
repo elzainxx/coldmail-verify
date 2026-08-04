@@ -56,7 +56,7 @@ type FrontDoorMode string
 
 const (
 	FrontDoorServing FrontDoorMode = "serving"
-	FrontDoorDefer   FrontDoorMode = "accept_and_defer" // queue-only (P5+)
+	FrontDoorDefer   FrontDoorMode = "accept_and_defer" // queue-only (P5+) — see FrontDoorDeferring
 	FrontDoorReject  FrontDoorMode = "reject"
 )
 
@@ -73,6 +73,44 @@ type KillSwitch struct {
 // asserts this rung actually works from config alone.
 func (k KillSwitch) CheapLayersOnly() bool {
 	return k.SMTP == SMTPDisabled && k.Fallback == FallbackOff
+}
+
+// FrontDoorRejecting reports whether Rung 4's HARD sub-mode is pulled: nothing is accepted, every
+// request-path surface returns an explicit unavailable envelope (kill-switch-ladder.md Rung 4).
+func (k KillSwitch) FrontDoorRejecting() bool { return k.FrontDoor == FrontDoorReject }
+
+// FrontDoorDeferring reports whether Rung 4's SOFT sub-mode is pulled: accept-and-defer, i.e.
+// "the front door accepts submissions and returns a job handle (P5 §7), but the drainer is stopped —
+// work sits durably in work_items, nothing is processed" (kill-switch-ladder.md Rung 4).
+//
+// This predicate exists because the value used to have NO consumer (fix-plan item 4 / D2): both
+// readers of KillSwitch.FrontDoor compared only against FrontDoorReject, so TM_FRONTDOOR_MODE=
+// accept_and_defer validated and then behaved EXACTLY like serving. A silently inert safety control
+// is worse than an absent one: an operator reaching for the middle rung during a data-integrity
+// incident got full serving, with no error and no warning. Both sub-modes now have a named
+// predicate, so a future surface that forgets one is visible as a missing call rather than as a
+// missing string comparison.
+//
+// Two consequences, both required by the rung's own definition:
+//
+//	(1) DEFER MEANS THE DRAINER DOES NOT RUN. The drainer is what turns a durable work-item into an
+//	    SMTP probe and a LOG row; "verdict production is disabled" is precisely "the drainer is
+//	    stopped". See queue.Drainer.tick.
+//	(2) THERE IS NO DEFERRED FORM OF A SYNCHRONOUS VERIFY. /v1/verify has no handle to hand back and
+//	    no queue row to defer into — its answer IS the verdict. Producing one at this rung would be
+//	    producing a verdict while verdict production is disabled, and NOT producing one while
+//	    returning 200 would be a fabricated verdict, which Door 1/2 forbid outright. So the sync
+//	    surface returns the same explicit unavailable envelope it returns under reject. The
+//	    asymmetry is the point of the rung: bulk degrades to "accepted, paused", sync degrades to
+//	    "unavailable", and neither ever invents an answer.
+func (k KillSwitch) FrontDoorDeferring() bool { return k.FrontDoor == FrontDoorDefer }
+
+// VerdictProductionPaused reports whether Rung 4 is pulled AT ALL (either sub-mode). It is the
+// predicate for "no new verdict may be produced right now" — the thing both sub-modes share, and
+// what the sync surface and the drainer key off. Submission acceptance is where they DIFFER, so
+// the bulk submit path deliberately uses FrontDoorRejecting instead.
+func (k KillSwitch) VerdictProductionPaused() bool {
+	return k.FrontDoorRejecting() || k.FrontDoorDeferring()
 }
 
 // ── Shadow-mode (shadow-mode.md, DR-2) ──────────────────────────────────────────────
@@ -822,6 +860,17 @@ func (c Config) Summary() string {
 	rung := "full"
 	if c.KillSwitch.CheapLayersOnly() {
 		rung = "cheap-layers-only(Rung3)"
+	}
+	// Rung 4 is HIGHER than Rung 3 and subsumes it in the summary: with verdict production paused,
+	// which cheap layers are wired is no longer the operative fact. Naming the sub-mode is the whole
+	// point (fix-plan item 4) — an operator who pulled accept-and-defer must be able to SEE that the
+	// process agrees, in the boot log and on /readyz, rather than inferring it from a config echo
+	// the code ignores.
+	switch {
+	case c.KillSwitch.FrontDoorRejecting():
+		rung = "paused-reject(Rung4)"
+	case c.KillSwitch.FrontDoorDeferring():
+		rung = "paused-accept-and-defer(Rung4)"
 	}
 	return fmt.Sprintf("env=%s listen=%s ladder=%s smtp=%s fallback=%s frontdoor=%s nodes=%d mutators=recommend-only",
 		c.Env, c.ListenAddr, rung, c.KillSwitch.SMTP, c.KillSwitch.Fallback, c.KillSwitch.FrontDoor, len(c.Nodes))

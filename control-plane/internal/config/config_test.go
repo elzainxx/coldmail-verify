@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // These tests pin two Phase-0 done-criteria: (1) the kill-switch defaults to
 // cheap-layers-only — the only rung reachable without SMTP; (2) the four day-one
@@ -414,5 +417,68 @@ func TestLoad_P5LeaseMarginGuard(t *testing.T) {
 		return ""
 	}); err != nil {
 		t.Fatalf("a positive lease margin must be accepted, got %v", err)
+	}
+}
+
+// TestFrontDoorModes_EveryAcceptedValueHasBehaviour is the guard against fix-plan item 4 / D2
+// recurring: `accept_and_defer` passed Validate() and had NO consumer, so pulling the middle rung of
+// the pause control behaved exactly like `serving`.
+//
+// The lasting fix is not "wire this one value" — it is to make the accepted set and the behaviour
+// predicates provably the same set. This test enumerates every value Validate() accepts and requires
+// each to produce a DISTINCT, correct (rejecting, deferring, paused) triple. A future fourth mode
+// that validates but changes nothing fails here, on the day it is added, rather than in an incident.
+//
+// FAIL-VERIFY: add a `FrontDoorMode = "drain_only"` to Validate()'s accepted set without wiring a
+// predicate → its triple collides with serving's and this test fails.
+func TestFrontDoorModes_EveryAcceptedValueHasBehaviour(t *testing.T) {
+	// Every value Validate() accepts. Kept as a literal list on purpose: if someone extends the
+	// switch in Validate() and not this list, the accepted-but-unlisted case is caught below.
+	accepted := []FrontDoorMode{FrontDoorServing, FrontDoorDefer, FrontDoorReject}
+
+	type triple struct{ rejecting, deferring, paused bool }
+	want := map[FrontDoorMode]triple{
+		// serving: nothing pulled.
+		FrontDoorServing: {false, false, false},
+		// accept_and_defer: verdict production paused, but submissions still accepted (NOT rejecting).
+		// This row IS the bug that was: before item 4 it was indistinguishable from serving.
+		FrontDoorDefer: {false, true, true},
+		// reject: nothing accepted at all.
+		FrontDoorReject: {true, false, true},
+	}
+
+	seen := map[triple]FrontDoorMode{}
+	for _, m := range accepted {
+		c := Defaults()
+		c.KillSwitch.FrontDoor = m
+		if err := c.Validate(); err != nil {
+			t.Fatalf("front-door mode %q is in the accepted list but Validate() rejects it: %v", m, err)
+		}
+		got := triple{c.KillSwitch.FrontDoorRejecting(), c.KillSwitch.FrontDoorDeferring(), c.KillSwitch.VerdictProductionPaused()}
+		if got != want[m] {
+			t.Errorf("mode %q: rejecting/deferring/paused = %v, want %v", m, got, want[m])
+		}
+		// No two accepted modes may behave identically — that is exactly what "validates and does
+		// nothing" looks like from the outside.
+		if prev, dup := seen[got]; dup {
+			t.Errorf("modes %q and %q are BEHAVIOURALLY IDENTICAL (%v) — an accepted value with no distinct effect is the D2 defect", prev, m, got)
+		}
+		seen[got] = m
+
+		// And the operator-visible summary must name the state, not just echo the string.
+		if s := c.Summary(); m != FrontDoorServing && !strings.Contains(s, "Rung4") {
+			t.Errorf("mode %q: Summary() does not name Rung 4: %q", m, s)
+		}
+	}
+
+	// An unknown mode must still be REJECTED at load — the fix must not have loosened the gate while
+	// giving the third value a meaning.
+	c := Defaults()
+	c.KillSwitch.FrontDoor = FrontDoorMode("accept-and-defer") // hyphens: the doc spelling, not the config value
+	if err := c.Validate(); err == nil {
+		t.Error("a misspelled front-door mode must be rejected at load, not silently treated as serving")
+	}
+	if c.KillSwitch.VerdictProductionPaused() {
+		t.Error("an unknown mode must not read as paused — a typo'd rung must fail loudly at load, never appear pulled")
 	}
 }

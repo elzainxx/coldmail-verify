@@ -39,22 +39,31 @@ type Verifier interface {
 // store.Store). Injected so api tests use a fake without a DB. nil => per-caller auth not wired
 // (the legacy static-token path governs; the bulk endpoint is then unavailable).
 type CallerAuth interface {
-	LookupCaller(ctx context.Context, keySHA256 []byte, now time.Time) (callerID string, ok bool, err error)
+	// ownerUserID is the PLATFORM user the key acts for (api_callers.user_id, 0013 / item 1) — the
+	// job-owner value, resolved from the CREDENTIAL so no request body can assert it.
+	LookupCaller(ctx context.Context, keySHA256 []byte, now time.Time) (callerID, ownerUserID string, ok bool, err error)
 }
 
 // BulkSubmitter enqueues a bulk submission and returns a job handle + counts (§7.1, satisfied by
-// *queue.Enqueuer). callerRef is the opaque platform correlation string (§7.6). Injected so tests
-// use a fake without a real queue/DB.
+// *queue.Enqueuer). callerRef is the opaque platform correlation string (§7.6). ownerUserID is the
+// authenticated key's platform user, stamped onto the job (0013). Injected so tests use a fake
+// without a real queue/DB.
 type BulkSubmitter interface {
-	SubmitBulk(ctx context.Context, addresses []string, policyKey string, policyVersion int, callerRef string) (queue.BulkResult, error)
+	SubmitBulk(ctx context.Context, addresses []string, policyKey string, policyVersion int, callerRef, ownerUserID string) (queue.BulkResult, error)
 }
 
 // JobReader reads job progress + paginated results (§7.1, satisfied by store.Store). The results
 // are byte-identical /v1/verify verdict objects (Door 1).
+//
+// EVERY METHOD TAKES ownerUserID (0013 / fix-plan item 1, D1; contract §1.4). Before that the three
+// signatures took jobID alone, and the handlers held an authenticated caller they discarded — so any
+// key could read any job's status and verdicts. Widening the INTERFACE, not just the SQL, is the
+// point: a JobReader implementation (including a test fake) can no longer be written that ignores
+// tenancy without visibly dropping a parameter.
 type JobReader interface {
-	GetJob(ctx context.Context, jobID string) (store.JobRow, bool, error)
-	JobCompletion(ctx context.Context, jobID string) (complete bool, total, settled int, err error)
-	ListJobResults(ctx context.Context, jobID, cursor string, limit int) ([]store.WorkItemResult, string, error)
+	GetJob(ctx context.Context, jobID, ownerUserID string) (store.JobRow, bool, error)
+	JobCompletion(ctx context.Context, jobID, ownerUserID string) (complete bool, total, settled int, err error)
+	ListJobResults(ctx context.Context, jobID, ownerUserID, cursor string, limit int) ([]store.WorkItemResult, string, error)
 }
 
 // callerIDKey is the context key under which an authenticated caller_id is stashed (never PII —
@@ -132,7 +141,10 @@ type verifyRequest struct {
 func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	// Sync /v1/verify: a per-caller key OR (during transition) the legacy static token authenticates
 	// (requirePerCaller=false). The bulk-PII surface (requirePerCaller=true) is handled separately.
-	callerID, ok := s.authenticate(r, false)
+	// The owner id is not used here: /v1/verify is synchronous and stores no job, so there is
+	// nothing to own. It is discarded EXPLICITLY rather than by an unnamed `_` so that the contrast
+	// with the bulk path below is visible — that path's `_ = callerID` was precisely D1.
+	callerID, _, ok := s.authenticate(r, false)
 	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
@@ -140,8 +152,19 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	if callerID != "" {
 		r = r.WithContext(context.WithValue(r.Context(), callerIDKey{}, callerID))
 	}
-	// Front-door mode (kill-switch Rung 4): reject if paused-reject.
-	if s.cfg.KillSwitch.FrontDoor == config.FrontDoorReject {
+	// Front-door mode (kill-switch Rung 4): BOTH sub-modes stop the sync surface, because there is no
+	// deferred form of a synchronous answer. /v1/verify has no job handle to return and no queue row
+	// to defer into — its response IS the verdict. At a rung whose definition is "verdict production
+	// disabled", the only two things this handler could do are produce a verdict anyway (defeating
+	// the rung) or return 200 with something that is not a verdict (a fabricated answer, forbidden
+	// by Doors 1 and 2). So it returns the explicit unavailable envelope, and the bulk surface —
+	// which DOES have somewhere to defer to — keeps accepting. That asymmetry is the rung working as
+	// specified, not an inconsistency: "either a job handle + paused job status (accept-and-defer),
+	// or an explicit unavailable response (reject)" (kill-switch-ladder.md Rung 4).
+	//
+	// Before fix-plan item 4 this compared only against FrontDoorReject, so accept_and_defer served
+	// verdicts at full capability (D2).
+	if s.cfg.KillSwitch.VerdictProductionPaused() {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "service paused"})
 		return
 	}
@@ -215,12 +238,18 @@ func (s *Server) bulkAddressCap() int {
 // endpoint, not a change to /v1/verify.
 func (s *Server) handleBulkSubmit(w http.ResponseWriter, r *http.Request) {
 	// PN-13: the bulk surface REQUIRES a per-caller key (requirePerCaller=true).
-	callerID, ok := s.authenticate(r, true)
+	callerID, ownerUserID, ok := s.authenticate(r, true)
 	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
-	if s.cfg.KillSwitch.FrontDoor == config.FrontDoorReject {
+	// Rung 4 REJECT stops here; Rung 4 ACCEPT-AND-DEFER deliberately does NOT (that is the whole
+	// distinction between the two sub-modes — see FrontDoorDeferring). A deferred submission is
+	// accepted, sealed, and stored durably in work_items exactly as normal; the only difference is
+	// that the drainer will not pick it up until the rung is released. The 202 below carries
+	// "processing_paused": true so the caller is TOLD, rather than watching a job sit at zero settled
+	// with no explanation.
+	if s.cfg.KillSwitch.FrontDoorRejecting() {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "service paused"})
 		return
 	}
@@ -250,19 +279,39 @@ func (s *Server) handleBulkSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = callerID // authenticated principal; rate-limiting/attribution by caller_id is a later dial
 
-	res, err := s.bulk.SubmitBulk(r.Context(), req.Addresses, s.defPolicy.Key, s.defPolicy.Version, req.CallerRef)
+	// OWNERSHIP IS STAMPED HERE (0013 / fix-plan item 1, D1). ownerUserID comes from
+	// authenticate() → LookupCaller → api_callers.user_id — the CREDENTIAL. req.CallerRef, one
+	// argument to its left, comes from the BODY and is untrusted; the two must never be confused
+	// (see SubmitBulk's own note). This line is what makes the three read predicates meaningful:
+	// without a stamped owner every job would be ownerless and no caller could read anything.
+	//
+	// Note what is NOT here: any read of an owner/user/tenant field off req. There is no such field
+	// on bulkRequest, and adding one would be the regression — decodeStrict-style unknown-field
+	// rejection is not in play on this endpoint, so a `user_id` in the body is silently ignored
+	// today. That is the correct behaviour for a credential-based module, and the cross-tenant test
+	// asserts it stays that way.
+	res, err := s.bulk.SubmitBulk(r.Context(), req.Addresses, s.defPolicy.Key, s.defPolicy.Version, req.CallerRef, ownerUserID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "bulk submit failed"})
 		return
 	}
 	// 202 Accepted + the handle. counts.total is the accepted (normalizable) set; malformed inputs
 	// are reported, not silently dropped (§7.6 boundary — the platform decides how to present them).
+	//
+	// processing_paused is the Rung-4 accept-and-defer disclosure (fix-plan item 4): the work is
+	// stored, and the drainer is stopped, so this job will report zero progress until the rung is
+	// released. It is ADDITIVE (a new key on a P5 envelope; Door 1 governs the verdict object, which
+	// is untouched) and DERIVED from live config on every response — never stored on the job row.
+	// Deriving it is the load-bearing choice twice over: a stored flag would still read "paused"
+	// after the rung was released (a job would lie about the present), and a hardcoded false would be
+	// the same class of inert control this item exists to remove.
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"job_id": res.JobID,
 		"status": "accepted",
 		"counts": map[string]int{
 			"total": res.Total, "enqueued": res.Enqueued, "duplicate": res.Duplicate, "malformed": res.Malformed,
 		},
+		"processing_paused": s.cfg.KillSwitch.VerdictProductionPaused(),
 	})
 }
 
@@ -270,7 +319,10 @@ func (s *Server) handleBulkSubmit(w http.ResponseWriter, r *http.Request) {
 // NOT a live per-row feed (that's the platform's job, §7.6). Completion is judged AUTHORITATIVELY
 // (NOT EXISTS a non-terminal item, GAP-38), never the denormalized counter.
 func (s *Server) handleJobStatus(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.authenticate(r, true); !ok {
+	// 0013 / item 1: the authenticated key's platform user is now USED, not discarded. Every read
+	// below is scoped to it.
+	_, ownerUserID, ok := s.authenticate(r, true)
+	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
@@ -279,16 +331,20 @@ func (s *Server) handleJobStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jobID := r.PathValue("id")
-	job, known, err := s.jobs.GetJob(r.Context(), jobID)
+	job, known, err := s.jobs.GetJob(r.Context(), jobID, ownerUserID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "job read failed"})
 		return
 	}
 	if !known {
+		// 404 FOR BOTH "no such job" AND "not your job" — the same status, the same body, byte for
+		// byte (fix-plan item 1: "Return 404, not 403"). A 403 here would confirm the id exists,
+		// turning a job id into something worth guessing at; identical 404s mean a cross-tenant
+		// probe learns exactly nothing. This mirrors the senders' no-existence-disclosure posture.
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
 		return
 	}
-	complete, total, settled, err := s.jobs.JobCompletion(r.Context(), jobID)
+	complete, total, settled, err := s.jobs.JobCompletion(r.Context(), jobID, ownerUserID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "job status failed"})
 		return
@@ -297,12 +353,22 @@ func (s *Server) handleJobStatus(w http.ResponseWriter, r *http.Request) {
 	if complete && status != "complete" && status != "complete_with_unknowns" {
 		status = "complete" // authoritative completion overrides a stale stored 'running'
 	}
+	// Rung 4 promises "a job handle + 'processing paused' job status" (kill-switch-ladder.md). It is
+	// reported as an ADDITIVE BOOLEAN, deliberately NOT as a new `status` value: the job-status
+	// vocabulary is a closed set with a DB CHECK constraint (0009: submitted|running|complete|
+	// complete_with_unknowns), and minting a fifth value would change a persisted vocabulary — a
+	// one-way door — to express a transient operational state. A pause is not a state the job is IN;
+	// it is a statement about the system the job is waiting on, which is why the same key with the
+	// same derivation also appears on the 202 submit envelope.
 	writeJSON(w, http.StatusOK, map[string]any{
-		"job_id":    jobID,
-		"status":    status,
-		"complete":  complete,
+		"job_id":     jobID,
+		"status":     status,
+		"complete":   complete,
 		"caller_ref": job.CallerRef, // echoed opaque (§7.6)
-		"counts":    map[string]int{"total": total, "settled": settled, "pending": total - settled},
+		"counts":     map[string]int{"total": total, "settled": settled, "pending": total - settled},
+		// Same live derivation as the submit envelope: never stored, so releasing the rung
+		// immediately stops every job from claiming to be paused.
+		"processing_paused": s.cfg.KillSwitch.VerdictProductionPaused(),
 	})
 }
 
@@ -310,7 +376,9 @@ func (s *Server) handleJobStatus(w http.ResponseWriter, r *http.Request) {
 // cursor-paginated, each the BYTE-IDENTICAL /v1/verify verdict object (Door 1 — a consumer that
 // parses a sync verdict parses a bulk result unchanged, §7.4).
 func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.authenticate(r, true); !ok {
+	// 0013 / item 1: this is the route that returned another tenant's verdicts under D1.
+	_, ownerUserID, ok := s.authenticate(r, true)
+	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
@@ -319,10 +387,13 @@ func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jobID := r.PathValue("id")
-	if _, known, err := s.jobs.GetJob(r.Context(), jobID); err != nil {
+	if _, known, err := s.jobs.GetJob(r.Context(), jobID, ownerUserID); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "job read failed"})
 		return
 	} else if !known {
+		// Same 404 for absent and not-yours (see handleJobStatus). ListJobResults below ALSO carries
+		// the owner predicate, so a non-owner is stopped twice: once on the shape of the response,
+		// once in the query. Belt and braces, on the one route whose payload is the PII.
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
 		return
 	}
@@ -333,7 +404,7 @@ func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	rows, next, err := s.jobs.ListJobResults(r.Context(), jobID, cursor, limit)
+	rows, next, err := s.jobs.ListJobResults(r.Context(), jobID, ownerUserID, cursor, limit)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "job results failed"})
 		return
@@ -382,15 +453,28 @@ func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 //  3. DEV OPEN: only when NO auth is configured at all AND env=development (build smoke) — never in
 //     production, never when a static token or caller-auth is configured.
 //
-// It returns (callerID, ok). callerID is "" for the legacy/dev paths (no per-caller principal).
-func (s *Server) authenticate(r *http.Request, requirePerCaller bool) (callerID string, ok bool) {
+// It returns (callerID, ownerUserID, ok). callerID is "" for the legacy/dev paths (no per-caller
+// principal).
+//
+// ownerUserID (0013 / fix-plan item 1, D1) is the PLATFORM user the authenticated key acts for —
+// the value stamped onto a new job and predicated on by every job read. It comes ONLY from
+// api_callers.user_id via LookupCaller, i.e. from the credential. There is deliberately no path by
+// which a request body, query string, or header other than the bearer can influence it: that is
+// contract §1.4 clause 6's credential-based model, the stronger of the two coherent options, and
+// the one M1 must use because M1 authenticates the CALLER (unlike the senders, where the platform
+// token authorises the platform and the caller supplies user_id).
+//
+// It is "" on the legacy-static-token and dev-open paths, which have no platform user. Those
+// callers can still submit; their jobs get a NULL owner and are then readable by nobody over the
+// API (see GetJob). That is the fail-safe direction — "" must never be read as "match anything".
+func (s *Server) authenticate(r *http.Request, requirePerCaller bool) (callerID, ownerUserID string, ok bool) {
 	presented := trimBearer(r.Header.Get("Authorization"))
 
 	// (1) Per-caller key (PN-13). A presented bearer that matches an active key wins on any endpoint.
 	if s.callerAuth != nil && presented != "" {
 		sum := sha256.Sum256([]byte(presented))
-		if id, hit, err := s.callerAuth.LookupCaller(r.Context(), sum[:], s.now()); err == nil && hit {
-			return id, true
+		if id, owner, hit, err := s.callerAuth.LookupCaller(r.Context(), sum[:], s.now()); err == nil && hit {
+			return id, owner, true
 		}
 		// A miss falls through: it MIGHT still be the legacy static token on a sync call.
 	}
@@ -400,9 +484,9 @@ func (s *Server) authenticate(r *http.Request, requirePerCaller bool) (callerID 
 		if want, configured := s.frontDoorToken(); configured {
 			// Constant-time compare so a wrong token gives no timing oracle.
 			if presented != "" && subtle.ConstantTimeCompare([]byte(presented), []byte(want)) == 1 {
-				return "", true // legacy caller — no per-caller principal
+				return "", "", true // legacy caller — no per-caller principal, no platform user
 			}
-			return "", false // a static token IS configured but didn't match → reject
+			return "", "", false // a static token IS configured but didn't match → reject
 		}
 	}
 
@@ -410,10 +494,10 @@ func (s *Server) authenticate(r *http.Request, requirePerCaller bool) (callerID 
 	// never on the per-caller-required (bulk) surface.
 	if !requirePerCaller && s.callerAuth == nil {
 		if _, configured := s.frontDoorToken(); !configured {
-			return "", s.cfg.Env == "development"
+			return "", "", s.cfg.Env == "development"
 		}
 	}
-	return "", false
+	return "", "", false
 }
 
 // verdictFromRow rebuilds the Door-1 verdict object from a stored LOG row for a bulk result (§7.4).

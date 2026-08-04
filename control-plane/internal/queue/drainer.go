@@ -71,6 +71,24 @@ type Deps struct {
 	BatchSize    int
 	IdlePoll     time.Duration
 	ReclaimEvery time.Duration
+
+	// Paused reports whether verdict production is paused — kill-switch Rung 4 accept-and-defer,
+	// whose definition IS "the drainer is stopped: work sits durably in work_items, nothing is
+	// processed" (kill-switch-ladder.md Rung 4). Satisfied in production by
+	// cfg.KillSwitch.VerdictProductionPaused; nil => never paused (the Rung-0..3 default).
+	//
+	// It is a FUNC, not a bool, for two reasons. First, it keeps the queue package free of an
+	// internal/config dependency — the drainer's contract is "am I allowed to produce verdicts right
+	// now", not "what does the ladder look like". Second, the check is made per tick, so if the
+	// process ever learns to re-read config (there is no reload today), a pull of the rung takes
+	// effect at the next tick with no further plumbing.
+	//
+	// WHY THE PAUSE IS HERE AND NOT AT DEQUEUE. Stopping BEFORE DequeueReady means a paused drainer
+	// takes no lease, so no item is left in_flight holding a lease that nothing will settle. If the
+	// gate were after the lease, pausing would strand every in-flight item until the lease expired
+	// and the reclaim sweep (which is also paused) put it back — a pause that quietly damages the
+	// queue instead of freezing it.
+	Paused func() bool
 }
 
 // Drainer is the background work-item loop. Single-brain (FOR UPDATE SKIP LOCKED, no broker —
@@ -79,6 +97,7 @@ type Drainer struct {
 	d           Deps
 	now         func() time.Time
 	lastReclaim time.Time
+	pausedLast  bool // last observed pause state, so the transition is logged once, not per tick
 }
 
 // ErrLeaseTTLTooShort is returned by NewDrainer when LeaseTTL <= MaxSMTPDeadline — the GAP-37
@@ -110,6 +129,11 @@ func NewDrainer(d Deps) (*Drainer, error) {
 	if d.ReclaimEvery <= 0 {
 		d.ReclaimEvery = d.LeaseTTL // sweep about once per lease lifetime
 	}
+	if d.Paused == nil {
+		// Never paused is the correct default (Rungs 0–3), and it must be a func that ANSWERS rather
+		// than a nil we test for at every call site.
+		d.Paused = func() bool { return false }
+	}
 	return &Drainer{d: d, now: now}, nil
 }
 
@@ -138,7 +162,29 @@ func (dr *Drainer) Run(ctx context.Context) {
 
 // tick runs one drain cycle: an occasional reclaim sweep, then a lease-and-drain batch. It returns
 // whether it did any work (false → the caller idle-sleeps). Exported-for-test via TickOnce.
+//
+// RUNG 4 (accept-and-defer) IS ENFORCED FIRST, before anything touches the queue: the rung's
+// definition is that work sits durably in work_items and nothing is processed. A paused tick does no
+// reclaim, takes no lease, runs no check, and writes no LOG row — it does nothing at all and reports
+// "no work", so Run idle-sleeps. That is a freeze, not a drop: every item keeps its status, attempt
+// count, and not_before, so unpausing resumes with zero loss (§4.4 restart-safety, same property).
 func (dr *Drainer) tick(ctx context.Context) bool {
+	if paused := dr.d.Paused(); paused || dr.pausedLast {
+		// Log only the TRANSITIONS. An operator needs to see the drainer agree that it is paused —
+		// D2 was exactly the failure of a control that changed nothing and said nothing — but a line
+		// every IdlePoll would bury the incident's real signal.
+		if paused != dr.pausedLast {
+			if paused {
+				log.Printf("queue drainer: PAUSED (kill-switch Rung 4 accept-and-defer) — submissions still accepted and stored durably; NOTHING is processed until the rung is released")
+			} else {
+				log.Printf("queue drainer: RESUMED (Rung 4 released) — draining the work that accumulated while paused")
+			}
+			dr.pausedLast = paused
+		}
+		if paused {
+			return false // no work done; Run idle-sleeps. Nothing was leased, so nothing is stranded.
+		}
+	}
 	now := dr.now()
 	// Periodic lease-reclaim sweep (§5.2): an in_flight item whose lease predates now-LeaseTTL is
 	// presumed dead and re-readied. Because LeaseTTL > MaxSMTPDeadline, a live attempt is never
