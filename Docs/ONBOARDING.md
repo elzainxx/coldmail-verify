@@ -142,7 +142,9 @@ neutered is not actually load-bearing — that's a finding.
 ## 5. Running everything locally
 
 **Prerequisites:** Go (1.26+), Docker (for a throwaway Postgres), and Ruby/Bundler are handled
-inside the verifier-node's Docker image (the host needs no Ruby).
+inside the verifier-node's Docker image (the host needs no Ruby). **On a host running TLS-scanning AV
+or a corporate proxy, there is one more prerequisite and it recurs on every image rebuild — see
+"Prerequisite on a TLS-interception host" below before you build the verifier-node.**
 
 ### Control-plane: build, migrate, test
 
@@ -170,6 +172,50 @@ Postgres CAS/lease/append semantics, so most logic is testable with zero externa
 > concurrent invocations. The reliable path is to compile a package's test binary and run it
 > directly: `go test -c -o /tmp/store.test.exe ./internal/store/ && /tmp/store.test.exe -test.v`.
 
+### Prerequisite on a TLS-interception host — refresh the proxy CA before every rebuild
+
+**Skip this on CI and on any host with no TLS-scanning AV/proxy.** It is a no-op there by design.
+
+If your host runs an SSL/TLS-scanning AV or corporate proxy (Norton Web/Mail Shield on this dev
+host), it re-signs HTTPS with a private root CA. The verifier-node image trusts whatever `*.crt`
+files sit in `verifier-node/truemail-rack/certs/` (see the Dockerfile's OPTIONAL TLS-proxy trust
+block — it adds trust for the proxy and never disables verification). Those files are **gitignored**,
+because they are machine-specific — so a fresh clone has none, and the export below is the first
+thing to run:
+
+```bash
+powershell -ExecutionPolicy Bypass -File scripts/export-norton-ca.ps1
+# -> exported LF-only PEM to ...\verifier-node\truemail-rack\certs\norton-ssl-proxy-ca.crt
+```
+
+**Why this is written down rather than left to be rediscovered: it recurs on every rebuild.** The
+proxy rotates its CA **key** while keeping an identical subject and issuer name, so a stale PEM
+still *looks* right — same name, same file, wrong key. In-container `bundle install` then dies on
+`Bundler::Fetcher::CertificateFailureError` against rubygems.org, and the failure surfaces as **the
+RSpec gate exiting 17 with no test output at all** — no spec names, no failure list, nothing to grep.
+Nothing in the tree points at the fix (the export script has no caller), which is exactly how the
+same hour gets spent twice.
+
+**On exit 17 with empty output, re-export the CA first. Do not go looking for a Ruby or spec defect.**
+The tell, if you want to confirm before rebuilding, is a mismatch between the installed CA's Subject
+Key Identifier and the presented leaf's Authority Key Identifier *despite matching names*:
+
+```bash
+openssl x509 -noout -text -in verifier-node/truemail-rack/certs/norton-ssl-proxy-ca.crt \
+  | grep -A1 'Subject Key Identifier'
+openssl s_client -showcerts -connect rubygems.org:443 </dev/null 2>/dev/null \
+  | openssl x509 -noout -text | grep -A1 'Authority Key Identifier'
+```
+
+Two further notes that cost real time here:
+
+- **Only the RSpec gate needs this.** The other gates pass fine without live rubygems.org egress.
+  RSpec is the exception because the image is built with `bundle config set --local without
+  'development test'`, so the test group is absent from the image and RSpec must re-resolve it at
+  run time.
+- **Never read a gate's exit code after a pipe** (`bash gate.sh | tail`) — you get the tail's status,
+  and a dead run reports success. Capture `${PIPESTATUS[0]}`, or don't pipe.
+
 ### Verifier-node: build and run the box
 
 ```bash
@@ -187,7 +233,9 @@ port-25 IP; they are permanent test infrastructure, not scaffolding.
 
 `.github/workflows/ci.yml` is the authoritative gate: `go build` + `go vet` + `go test` against
 a real Postgres, the gem-unmodified assertion, the fork's RSpec suite, the docs-freshness checks,
-and the config-reference freshness check. It is designed to **never fake green** — properties
+and the config-reference freshness check. (Running it on a TLS-interception host: the RSpec job is the
+one that needs the proxy CA refreshed first — **exit 17 with no output is that, not a spec failure.**
+See the prerequisite above.) It is designed to **never fake green** — properties
 that can only be proven against real infrastructure (SMTP round-trips, vendor accuracy) are
 tested at rollout, never asserted in CI.
 

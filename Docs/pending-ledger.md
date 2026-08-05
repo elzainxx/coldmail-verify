@@ -1,5 +1,7 @@
 # The consolidated PENDING ledger — every real-world-gated item across the arc
 
+> **OWNER: MODULE 1 (`coldmail-verify`, the Truemail control-plane / verifier-node pair).** "The arc" below means module 1's own phases 0–7 — nothing here concerns module 2 (`coldmail-send-managed`) or module 3 (`coldmail-send-byo`), which keep their own ledgers under their own `Docs/`. Module 1's *rulings of record* are in [`DECISIONS.md`](DECISIONS.md); this file is only the register of work that is built and fail-verified but honestly blocked on a real-world input (added 2026-08-05).
+
 **Date:** 2026-07-19 · **Status:** the single register of everything that is BUILT + fail-verified in logic but honestly deferred until a real-world input exists. **Every row was flagged PENDING at build time and NONE was ever faked green** (each phase's status doc carries the same "never faked green — the honest ledger" framing; grep-confirmed across `Docs/`, §5 below).
 
 **How to read a row:** *Item* = the deferred thing · *Built + fail-verified now* = the logic that exists and is tested locally · *Why deferred* = the real-world dependency · *Verification command / proof* = the exact thing to run when the dependency lands · *Unblocked by* = the real-world event that makes the proof runnable.

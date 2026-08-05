@@ -1,5 +1,7 @@
 # DECISIONS — Truemail (rulings of record)
 
+> **OWNER: MODULE 1 (`coldmail-verify`).** Every ruling below is module 1's. Modules 2 and 3 (`coldmail-send-managed`, `coldmail-send-byo`) rule in their own `Docs/open-decisions.md` files and are not bound by anything here — and note that module 3's repo contains TWO files named `open-decisions.md` (its own living one, and module 2's carried copy under `Docs/history/`), each now carrying its own ownership header. Module 1's companion register of built-but-real-world-blocked work is [`pending-ledger.md`](pending-ledger.md) (added 2026-08-05).
+
 **Status:** LIVE — the binding decision log for the Truemail control-plane. Rulings here are for-build.
 (Deployable names: the design docs' "brain" is the `control-plane`, "box" is the `verifier-node` — [ADR-0005](adr/ADR-0005-deployable-naming.md). Ruling text below that quotes the consistency report keeps its original "brain"/"box" vocabulary.)
 **Scope of this file:** owner rulings that are *cross-phase* or that *elevate/gate* something a single phase couldn't decide alone. Per-phase sign-offs remain in each spec's Appendix D; this file records only what the phases could not.

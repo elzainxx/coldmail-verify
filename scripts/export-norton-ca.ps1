@@ -1,6 +1,13 @@
 # Export the Norton SSL/TLS-scanning root CA to a PEM in the verifier-node build context,
 # so the container trusts the same interception proxy the host does (security-preserving:
-# we ADD trust for the proxy, we do NOT disable TLS verification). One-off build helper.
+# we ADD trust for the proxy, we do NOT disable TLS verification).
+#
+# NOT a one-off: run this before EVERY verifier-node rebuild on a TLS-interception host. The proxy
+# rotates its CA key while keeping an identical subject/issuer name, so a stale PEM looks correct and
+# fails anyway — in-container `bundle install` dies on CertificateFailureError and the RSpec gate
+# exits 17 with NO output at all. Documented, with the SKI/AKI confirmation and why RSpec is the only
+# gate affected, in Docs/ONBOARDING.md §5 "Prerequisite on a TLS-interception host". This header used
+# to say "one-off build helper", which is how the same diagnosis got paid for twice.
 #
 # Writes LF-only, 64-col-wrapped PEM (update-ca-certificates / OpenSSL c_rehash reject
 # CRLF and malformed wrapping — that silently registers the file but emits empty content).
