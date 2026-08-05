@@ -58,9 +58,20 @@ mode" levers, as OPERATIONS.md described it — is exactly how one half stays ru
 
 ### 2. The SYNC endpoint refuses at BOTH sub-modes
 
-`POST /v1/verify` returns `503 {"error":"service paused"}` under `accept_and_defer`, byte-identical
-to `reject`. There is no deferred form of a synchronous answer: no handle to return, no queue row to
+`POST /v1/verify` returns `503` with `error.code = "paused"` under `accept_and_defer`, identical to
+`reject`. There is no deferred form of a synchronous answer: no handle to return, no queue row to
 defer into. The two alternatives each break a door:
+
+> **AMENDED 2026-08-05 (fix-plan item 18).** This section read `503 {"error":"service paused"}`,
+> **byte-identical** to `reject`. The body is now the contract's coded envelope
+> (`{"error":{code,message,request_id}}`, §1.3), which carries a **per-request `request_id`** — so two
+> refusals can no longer be byte-identical, and the word is wrong rather than the claim. The property
+> this ADR asserts is unchanged and still enforced: a caller **cannot tell which sub-mode is pulled**.
+> `TestFrontDoorDefer_SyncVerifyRefusesLikeReject` now compares the two envelopes with `request_id`
+> blanked, and additionally requires both ids to be present and to DIFFER — so the loosening cannot
+> be satisfied by a build that emits no id, or one constant id, for every request. Amended in place
+> per the ADR-0008 precedent (ADRs are immutable in *number and identity*; a claim the code has since
+> outgrown is corrected with a dated note rather than left standing as a false statement).
 
 - serve the verdict → produce a verdict while verdict production is disabled (defeats the rung);
 - return `200` without one → a fabricated verdict (Doors 1 and 4 forbid it outright).

@@ -14,6 +14,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -175,7 +176,7 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	// with the bulk path below is visible — that path's `_ = callerID` was precisely D1.
 	callerID, _, ok := s.authenticate(r, false)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		writeErr(w, codeUnauthenticated, "auth rejected: no valid per-caller key or legacy token")
 		return
 	}
 	if callerID != "" {
@@ -194,12 +195,12 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	// Before fix-plan item 4 this compared only against FrontDoorReject, so accept_and_defer served
 	// verdicts at full capability (D2).
 	if s.cfg.KillSwitch.VerdictProductionPaused() {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "service paused"})
+		writeErr(w, codePaused, "kill-switch Rung 4 pulled (TM_FRONTDOOR_MODE)")
 		return
 	}
 	var req verifyRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil || req.Email == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "email is required"})
+		writeErr(w, codeValidationFailed, "verify: email missing or body undecodable", fieldDetail{Field: "email", Issue: issueRequired})
 		return
 	}
 
@@ -207,29 +208,37 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	// score → LOG → cache → respond). If it isn't wired (no DB/pepper), we are NOT ready —
 	// return 503 rather than a fabricated verdict (Door 2: never a verdict we can't log).
 	if s.verifier == nil || s.defPolicy == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "not ready"})
+		writeErr(w, codeUnavailable, "orchestrator or policy not wired (no DB/pepper)")
 		return
 	}
 	// P1 ships exactly one policy (the default). A request naming a different policy is
 	// not-found for now (the seam for multiple policies exists in the store/§4.6).
 	if req.Policy != "" && req.Policy != s.defPolicy.Key {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown policy"})
+		writeErr(w, codeValidationFailed, "request named a policy this build does not serve", fieldDetail{Field: "policy", Issue: issueNotFound})
 		return
 	}
 
 	resp, err := s.verifier.Verify(r.Context(), req.Email, s.defPolicy)
 	if err != nil {
 		if errors.Is(err, orchestrator.ErrNotReady) {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "not ready"})
+			writeErr(w, codeUnavailable, "orchestrator or policy not wired (no DB/pepper)")
 			return
 		}
 		// A processing failure must NOT become a fabricated verdict — surface 500 honestly.
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "verification failed"})
+		writeErr(w, codeInternalError, "orchestrator Verify failed")
 		return
 	}
 	if !resp.Valid() {
 		// Defensive: never emit an out-of-contract response (Door 1/4). Should be impossible.
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal contract violation"})
+		//
+		// Its own code, not internal_error (item 18): this is the one 500 that means "a Door-1 shape
+		// check failed," and it must never be lost in generic internal noise. It also REUSES the
+		// verdict's own request_id rather than minting a fresh one, so the error body, the LOG row
+		// the orchestrator already wrote, and this log line all name the same id — the correlation
+		// item 18 exists to provide. Meta.RequestID is empty only if the verdict lacked one, and
+		// writeErrWithID mints a fallback in that case.
+		writeErrWithID(w, resp.Meta.RequestID, codeContractViolation,
+			"orchestrator returned a verdict that failed Valid() — Door-1 shape violation")
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -269,7 +278,7 @@ func (s *Server) handleBulkSubmit(w http.ResponseWriter, r *http.Request) {
 	// PN-13: the bulk surface REQUIRES a per-caller key (requirePerCaller=true).
 	callerID, ownerUserID, ok := s.authenticate(r, true)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		writeErr(w, codeUnauthenticated, "auth rejected: no valid per-caller key or legacy token")
 		return
 	}
 	// Rung 4 REJECT stops here; Rung 4 ACCEPT-AND-DEFER deliberately does NOT (that is the whole
@@ -279,31 +288,37 @@ func (s *Server) handleBulkSubmit(w http.ResponseWriter, r *http.Request) {
 	// "processing_paused": true so the caller is TOLD, rather than watching a job sit at zero settled
 	// with no explanation.
 	if s.cfg.KillSwitch.FrontDoorRejecting() {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "service paused"})
+		writeErr(w, codePaused, "kill-switch Rung 4 pulled (TM_FRONTDOOR_MODE)")
 		return
 	}
 	if s.bulk == nil || s.defPolicy == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "not ready"})
+		writeErr(w, codeUnavailable, "orchestrator or policy not wired (no DB/pepper)")
 		return
 	}
 	// Bound the body (a 100k-address list of ~small strings; generous cap, still bounded).
 	var req bulkRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<20)).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		writeErr(w, codeValidationFailed, "bulk submit: body did not decode", fieldDetail{Field: "body", Issue: issueMalformed})
 		return
 	}
 	if len(req.Addresses) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "addresses is required and must be non-empty"})
+		writeErr(w, codeValidationFailed, "bulk submit: addresses absent or empty", fieldDetail{Field: "addresses", Issue: issueRequired})
 		return
 	}
 	if cap := s.bulkAddressCap(); len(req.Addresses) > cap {
-		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
-			"error": "too many addresses", "max": cap, "got": len(req.Addresses),
-		})
+		// THE SECOND SHAPE (audit classification 2.7). This was the one route answering in a
+		// different envelope entirely — `{error, max, got}` — so a client had to special-case it.
+		// The cap and the submitted count are genuinely useful to a caller, so they are not
+		// dropped: they move into the internalReason (for the operator's log line) and the caller
+		// learns WHICH field was out of range through details[], which is the envelope's own
+		// mechanism for exactly this. No free-text channel, no bespoke shape.
+		writeErr(w, codePayloadTooLarge,
+			fmt.Sprintf("bulk submit: %d addresses exceeds the cap of %d", len(req.Addresses), cap),
+			fieldDetail{Field: "addresses", Issue: issueOutOfRange})
 		return
 	}
 	if req.Policy != "" && req.Policy != s.defPolicy.Key {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown policy"})
+		writeErr(w, codeValidationFailed, "request named a policy this build does not serve", fieldDetail{Field: "policy", Issue: issueNotFound})
 		return
 	}
 	_ = callerID // authenticated principal; rate-limiting/attribution by caller_id is a later dial
@@ -321,7 +336,7 @@ func (s *Server) handleBulkSubmit(w http.ResponseWriter, r *http.Request) {
 	// asserts it stays that way.
 	res, err := s.bulk.SubmitBulk(r.Context(), req.Addresses, s.defPolicy.Key, s.defPolicy.Version, req.CallerRef, ownerUserID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "bulk submit failed"})
+		writeErr(w, codeInternalError, "bulk submit: store write failed")
 		return
 	}
 	// 202 Accepted + the handle. counts.total is the accepted (normalizable) set; malformed inputs
@@ -352,17 +367,17 @@ func (s *Server) handleJobStatus(w http.ResponseWriter, r *http.Request) {
 	// below is scoped to it.
 	_, ownerUserID, ok := s.authenticate(r, true)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		writeErr(w, codeUnauthenticated, "auth rejected: no valid per-caller key or legacy token")
 		return
 	}
 	if s.jobs == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "not ready"})
+		writeErr(w, codeUnavailable, "orchestrator or policy not wired (no DB/pepper)")
 		return
 	}
 	jobID := r.PathValue("id")
 	job, known, err := s.jobs.GetJob(r.Context(), jobID, ownerUserID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "job read failed"})
+		writeErr(w, codeInternalError, "job read: store query failed")
 		return
 	}
 	if !known {
@@ -370,12 +385,12 @@ func (s *Server) handleJobStatus(w http.ResponseWriter, r *http.Request) {
 		// byte (fix-plan item 1: "Return 404, not 403"). A 403 here would confirm the id exists,
 		// turning a job id into something worth guessing at; identical 404s mean a cross-tenant
 		// probe learns exactly nothing. This mirrors the senders' no-existence-disclosure posture.
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
+		writeErr(w, codeNotFound, "job absent, or owned by a different caller (tenancy scoping, D1)")
 		return
 	}
 	complete, total, settled, err := s.jobs.JobCompletion(r.Context(), jobID, ownerUserID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "job status failed"})
+		writeErr(w, codeInternalError, "job status: progress aggregation failed")
 		return
 	}
 	status := job.Status
@@ -408,22 +423,22 @@ func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
 	// 0013 / item 1: this is the route that returned another tenant's verdicts under D1.
 	_, ownerUserID, ok := s.authenticate(r, true)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		writeErr(w, codeUnauthenticated, "auth rejected: no valid per-caller key or legacy token")
 		return
 	}
 	if s.jobs == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "not ready"})
+		writeErr(w, codeUnavailable, "orchestrator or policy not wired (no DB/pepper)")
 		return
 	}
 	jobID := r.PathValue("id")
 	if _, known, err := s.jobs.GetJob(r.Context(), jobID, ownerUserID); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "job read failed"})
+		writeErr(w, codeInternalError, "job read: store query failed")
 		return
 	} else if !known {
 		// Same 404 for absent and not-yours (see handleJobStatus). ListJobResults below ALSO carries
 		// the owner predicate, so a non-owner is stopped twice: once on the shape of the response,
 		// once in the query. Belt and braces, on the one route whose payload is the PII.
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
+		writeErr(w, codeNotFound, "job absent, or owned by a different caller (tenancy scoping, D1)")
 		return
 	}
 	cursor := r.URL.Query().Get("cursor")
@@ -435,7 +450,7 @@ func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, next, err := s.jobs.ListJobResults(r.Context(), jobID, ownerUserID, cursor, limit)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "job results failed"})
+		writeErr(w, codeInternalError, "job results: page query failed")
 		return
 	}
 	// Rebuild each result as the Door-1 verdict object. The stored VerificationRow → verdict.Response

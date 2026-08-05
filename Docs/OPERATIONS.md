@@ -162,9 +162,18 @@ TM_FRONTDOOR_MODE=serving
 
 What you will see, and what to tell a caller:
 
-- `POST /v1/verify` returns **503 `{"error":"service paused"}` at BOTH sub-modes.** A synchronous
+- `POST /v1/verify` returns **503 with `error.code = "paused"` at BOTH sub-modes.** A synchronous
   call has no deferred form — no handle to return, nowhere to defer to — and answering it would
   either defeat the pause or fabricate a verdict. **Accept-and-defer only helps bulk callers.**
+  The two sub-modes are indistinguishable to the caller apart from the per-request `request_id`.
+
+  **`paused` is a DIFFERENT code from `unavailable`, over the same 503** (fix-plan item 18). If you
+  are triaging and see `unavailable`, the pause is **not** what you are looking at — that code means
+  the process is not wired (no pepper or no reachable DB) and someone should be paged. `paused` means
+  an operator pulled this rung deliberately; a caller should retry later, and nobody needs waking.
+  When a caller reports a failure, **ask for the `request_id`** and grep it in the control-plane log:
+  every error logs one line as `api error: code=… status=… request_id=… reason="…"`, where `reason`
+  is the internal detail that is deliberately NOT in the response body.
 - `POST /v1/verify/bulk` at `accept_and_defer` returns **202 with a `job_id` and
   `"processing_paused": true`**; the addresses are stored encrypted in `work_items` as `ready`.
   `GET /v1/jobs/{id}` keeps working and repeats `processing_paused: true` with `settled: 0`, so a

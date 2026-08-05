@@ -61,7 +61,7 @@ Both sub-modes disable verdict production; they differ only in whether *new work
 
 | surface | `accept_and_defer` | `reject` |
 |---|---|---|
-| `POST /v1/verify` (sync) | **503** `{"error":"service paused"}` | **503** — byte-identical |
+| `POST /v1/verify` (sync) | **503** `{"error":{"code":"paused","message":"The service is paused by an operator.","request_id":"<uuid>"}}` | **503** — identical apart from `request_id` |
 | `POST /v1/verify/bulk` | **202** + `job_id` + `processing_paused: true`; addresses stored encrypted in `work_items` (`ready`) | **503** — nothing accepted |
 | `GET /v1/jobs/{id}` | **200**, readable, `processing_paused: true`, `settled: 0` | *(no new jobs; pre-existing handles still read)* |
 | queue drainer | **stopped** — no lease, no check, no LOG row, no lease-reclaim sweep | stopped |

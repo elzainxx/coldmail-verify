@@ -113,9 +113,36 @@ func TestFrontDoorDefer_SyncVerifyRefusesLikeReject(t *testing.T) {
 
 	srvReject, _, _ := deferServer(t, now, config.FrontDoorReject)
 	recReject := do(t, srvReject, http.MethodPost, "/v1/verify", body)
-	if recReject.Code != recDefer.Code || recReject.Body.String() != recDefer.Body.String() {
-		t.Fatalf("the two pause sub-modes must be indistinguishable on the SYNC surface: defer=%d %s vs reject=%d %s",
-			recDefer.Code, recDefer.Body.String(), recReject.Code, recReject.Body.String())
+
+	// INDISTINGUISHABLE EXCEPT THE CORRELATION ID (loosened, deliberately and narrowly, by fix-plan
+	// item 18). This compared Body.String() byte-for-byte, which was right when every error body was
+	// `{"error":"service paused"}` — a constant. Item 18 puts a per-request `request_id` in every
+	// error body, so two requests can no longer produce identical bytes, and a byte comparison would
+	// now be asserting the ABSENCE of the correlation id rather than the property ADR-0015 states.
+	//
+	// The property is a caller cannot tell WHICH SUB-MODE is pulled (ADR-0015 §2: "the rung's
+	// sub-mode is operational detail, not a client concern"). So: same status, and the same envelope
+	// with the request_id blanked. That still fails if the code diverges, if the message diverges, if
+	// either side grows a details[] the other lacks, or if a field is added on one path only — the
+	// only thing it now tolerates is the one field that is per-request BY DESIGN.
+	if recReject.Code != recDefer.Code {
+		t.Fatalf("the two pause sub-modes must answer the same STATUS on the SYNC surface: defer=%d vs reject=%d",
+			recDefer.Code, recReject.Code)
+	}
+	deferBody, deferID := splitRequestID(t, recDefer.Body.Bytes())
+	rejectBody, rejectID := splitRequestID(t, recReject.Body.Bytes())
+	if deferBody != rejectBody {
+		t.Fatalf("the two pause sub-modes must be indistinguishable on the SYNC surface apart from request_id: defer=%s vs reject=%s",
+			recDefer.Body.String(), recReject.Body.String())
+	}
+	// And the ids must actually be there and actually DIFFER — otherwise the comparison above would
+	// be satisfied by a build that emits no request_id at all, or emits one constant for every
+	// request, either of which defeats the correlation item 18 exists to provide.
+	if deferID == "" || rejectID == "" {
+		t.Fatalf("a paused refusal must carry a request_id (item 18): defer=%q reject=%q", deferID, rejectID)
+	}
+	if deferID == rejectID {
+		t.Fatalf("two separate requests returned the SAME request_id %q — a per-request correlation id that repeats correlates nothing", deferID)
 	}
 
 	// ANTI-VACUITY: the identical request at `serving` must NOT be 503, or the two assertions above
