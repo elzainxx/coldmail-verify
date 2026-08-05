@@ -3,6 +3,8 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -396,7 +398,7 @@ func drainOnce(t *testing.T, pg *store.PG, cipher *queue.AddrCipher, now time.Ti
 type pgSettleComputer struct{ now time.Time }
 
 func (c pgSettleComputer) ComputeForQueue(_ context.Context, _ string, _ *policy.Definition, _ string) (orchestrator.QueueOutcome, error) {
-	id := "018f0000-0000-7000-8000-" + tenancyHex12()
+	id := tenancyVerificationID()
 	return orchestrator.QueueOutcome{Class: orchestrator.QSettled, Row: store.VerificationRow{
 		ID: id, RequestID: id, CheckedAt: c.now, CreatedAt: c.now,
 		EmailHash: []byte("tenancy-hash"), HashScheme: hash.SchemeTag, Domain: "acmecorp.com",
@@ -409,17 +411,87 @@ func (c pgSettleComputer) EscalateExhausted(_ context.Context, _ string, _ *poli
 	return out
 }
 
-var tenancyCounter int
-
-// tenancyHex12 yields the 12-hex final uuid group, unique per call within a run.
-func tenancyHex12() string {
-	tenancyCounter++
-	const hexd = "0123456789abcdef"
-	n := tenancyCounter
-	b := make([]byte, 12)
-	for i := 11; i >= 0; i-- {
-		b[i] = hexd[n&0xf]
-		n >>= 4
+// tenancyVerificationID mints the verification-row id this file's fixtures settle under.
+//
+// WHY THIS IS NOT A COUNTER. It was one, and the counter was a real defect that this suite's own
+// first full-repo run caught. `verifications` is APPEND-ONLY (Door 2 — the insert has no upsert and
+// no ON CONFLICT), its primary key is `id`, and `go test ./...` points EVERY package at the one
+// TM_TEST_DATABASE_URL database. internal/queue/pg_e2e_test.go has held a `randHex12()` since
+// before this file existed: same counter-from-1 algorithm, same "018f0000-0000-7000-8000-" prefix.
+// Two packages therefore minted the identical id sequence into the identical table, and the second
+// one to settle lost the insert to a duplicate-key error. The drainer logs that and moves on, so
+// the visible failure was not "duplicate key" — it was this file's own anti-vacuity guard at
+// property (3) reporting `complete=false`, i.e. a leak test with nothing left to leak.
+//
+// It reproduced 5/5 on `go test ./internal/api/ ./internal/queue/` and passed 5/5 on either package
+// alone: the class of flake that looks like an infrastructure hiccup and gets re-run rather than
+// read. CI runs `go test ./...` against one Postgres service, so it was live there too.
+//
+// crypto/rand rather than a wider counter or a PID/time prefix: the id only has to be unique, never
+// reproducible, and 12 hex chars of real entropy per row cannot collide with a sibling package's
+// scheme no matter what that scheme is or when it was written. There is nothing left to coordinate.
+func tenancyVerificationID() string {
+	b := make([]byte, 6)
+	if _, err := rand.Read(b); err != nil {
+		panic("tenancy fixture: crypto/rand unavailable: " + err.Error())
 	}
-	return string(b)
+	return "018f0000-0000-7000-8000-" + hex.EncodeToString(b)
+}
+
+// TestPGTenancyFixtureIDsDoNotCollideWithSiblingPackages is the CONTROL for the fix above, and it is
+// the test the original counter would have failed.
+//
+// The property: this file's fixture ids must be unique per call and must not be predictable from a
+// call ordinal. A counter satisfies "unique per call" perfectly WITHIN one process and still
+// collides across packages, which is exactly how the defect hid — so asserting uniqueness alone is
+// not enough. This asserts the stronger property that actually prevents the collision: two
+// independent id sequences started from the same state do not agree.
+//
+// Fail-verify (observed, not predicted): restore `tenancyVerificationID` to the counter body and
+// this test fails at the collision assertion, because two "runs" of a counter reset to 0 emit the
+// identical sequence. Both sub-assertions are load-bearing — the uniqueness half alone passes
+// against the counter.
+//
+// It needs no database: the bug was in id GENERATION, so generation is what gets pinned. Pinning it
+// here rather than in the drain path also means the guard survives someone rewriting the fixtures.
+func TestPGTenancyFixtureIDsDoNotCollideWithSiblingPackages(t *testing.T) {
+	const n = 512
+
+	// (a) Unique per call.
+	seen := make(map[string]bool, n)
+	for i := 0; i < n; i++ {
+		id := tenancyVerificationID()
+		if seen[id] {
+			t.Fatalf("tenancyVerificationID repeated %q within %d calls — verifications.id is a "+
+				"primary key on an append-only table, so a repeat is a lost INSERT", id, n)
+		}
+		seen[id] = true
+		// Must stay a syntactically valid uuid or Postgres rejects the row outright.
+		if len(id) != 36 {
+			t.Fatalf("id %q is %d chars, want 36 (uuid) — a malformed id fails as a 500, not a 404", id, len(id))
+		}
+	}
+
+	// (b) NOT derivable from call order. A counter passes (a) and fails (b); crypto/rand passes both.
+	// internal/queue/pg_e2e_test.go's randHex12() is the concrete sibling this guards against: same
+	// prefix, same counter algorithm, same table, different package.
+	const counterPrefix = "018f0000-0000-7000-8000-"
+	ordinal := func(i int) string {
+		const hexd = "0123456789abcdef"
+		nn := i
+		b := make([]byte, 12)
+		for j := 11; j >= 0; j-- {
+			b[j] = hexd[nn&0xf]
+			nn >>= 4
+		}
+		return counterPrefix + string(b)
+	}
+	for i := 1; i <= n; i++ {
+		if seen[ordinal(i)] {
+			t.Fatalf("id %q is the %d-th value of a from-1 counter and this fixture minted it: the "+
+				"ids are call-order derivable, so any sibling package using the same scheme "+
+				"(internal/queue/pg_e2e_test.go does) collides on verifications.id under "+
+				"`go test ./...`, which shares one TM_TEST_DATABASE_URL", ordinal(i), i)
+		}
+	}
 }
