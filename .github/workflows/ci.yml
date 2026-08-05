@@ -126,6 +126,17 @@ jobs:
         run: bash scripts/check-docs-updated.sh "${{ github.event.pull_request.base.sha || 'HEAD~1' }}"
       - name: config-reference freshness
         run: bash scripts/check-config-reference-fresh.sh
+      # The META-GATE: it checks that this workflow's own test DISCOVERY still holds, and that every
+      # check script is actually named here. M1's Go and RSpec tests are found automatically (a
+      # module-wide `go test ./...` and RSpec's default glob), which is why M1 needs no go_suite list
+      # — but those two properties can be lost silently, by a second go.mod, a //go:build tag on a
+      # test file, an .rspec --pattern, or CI hand-listing packages. Modules 2 and 3 each shipped
+      # tests that were written, passing, and run by nothing; a prose warning did not prevent the
+      # recurrence, because a warning comment is not a control. These two steps are the control.
+      - name: test-enumeration meta-gate (discovery intact + every gate wired)
+        run: bash scripts/check-test-enumeration.sh
+      - name: test-enumeration meta-gate SELF-TEST (the paired control)
+        run: bash scripts/check-test-enumeration-selftest.sh
 
   code-review:
     name: code-reviewer gate
