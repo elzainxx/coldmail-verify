@@ -146,8 +146,14 @@ jobs:
       # The code-reviewer gate runs on every change (PROJECT_RULES.md §7). This job is the
       # CI hook for it; the reviewer checks correctness, the additive-only doors, no hardcoded
       # manifest flag, no secret in the diff, and no future-phase mechanism built early.
-      # Wired to the org's code-review action/runner at integration; a placeholder that FAILS
-      # if removed keeps the gate from silently disappearing.
+      # Wired to the org's code-review action/runner at integration.
+      #
+      # THIS COMMENT USED TO CLAIM "a placeholder that FAILS if removed keeps the gate from silently
+      # disappearing." It was FALSE, break-verified 2026-08-05: deleting this entire job left all five
+      # gates rc=0 and nothing noticed. The comment WAS the whole mechanism — a warning comment is not
+      # a control. What actually keeps this job here now is rule 6 of scripts/check-test-enumeration.sh,
+      # which fails if a PROJECT_RULES.md §7 job is absent from this file. Verified by deleting the job
+      # again with the rule in place and watching the gate go red.
       - run: |
           echo "code-reviewer gate: wired to the org reviewer at integration (PROJECT_RULES.md §7)."
           echo "This step is a visible placeholder — do not delete it; deleting the gate is a rules violation."

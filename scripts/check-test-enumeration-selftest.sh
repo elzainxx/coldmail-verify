@@ -48,6 +48,12 @@
 #      workflow. A gate that fails on valid input is how exemption lists get born.
 #  14. a check script named only in a step NAME -> FAIL (rule 5). Narrows the fix: the rule is "a run
 #      command invokes it," not "the text survives comment-stripping." A `name:` is prose too.
+#  15. the `code-review` JOB deleted entirely -> FAIL (rule 6). Rule 5 is structurally blind to it:
+#      there is no check-*.sh behind that job. Break-verified on the real tree the same day — deleting
+#      it left all five gates rc=0, while ci.yml's own comment claimed "a placeholder that FAILS if
+#      removed keeps the gate from silently disappearing."
+#  16. the `code-review:` job header COMMENTED OUT -> FAIL (rule 6). A disabled job, exactly like case
+#      12's disabled step; the comment-stripped read is what makes rule 6 see it.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$HERE"
@@ -78,8 +84,23 @@ fi
 
 fail=0
 
+# write_workflow — reads a fixture workflow on stdin and APPENDS the PROJECT_RULES §7 `code-review`
+# job that rule 6 requires. Every case needs that job, so it lives here instead of being copy-pasted
+# into eight heredocs where one omission would make a case fail for rule 6 while claiming to test its
+# own rule — the wrong-reason failure the message assertions exist to catch. Cases 15 and 16 write the
+# workflow DIRECTLY, bypassing this helper, because that job's absence is precisely what they test.
+write_workflow() {
+  cat >"$TMP/$WORKFLOW"
+  cat >>"$TMP/$WORKFLOW" <<'EOF'
+  code-review:
+    steps:
+      - run: echo "code-reviewer gate"
+EOF
+}
+
 # reset_fixture — a minimal skeleton the real gate should call ok: one module, one globbing CI step,
-# one untagged test file, an unnarrowed .rspec, and one check script named in the workflow.
+# one untagged test file, an unnarrowed .rspec, one check script named in the workflow, and the
+# required code-review job.
 reset_fixture() {
   rm -rf "$TMP/control-plane" "$TMP/verifier-node" "$TMP/extra"
   # Remove any orphan check script a previous case dropped in. Without this the cases LEAK and a
@@ -107,7 +128,7 @@ RSpec.configure do |config|
 end
 EOF
   : >"$TMP/scripts/check-thing.sh"
-  cat >"$TMP/$WORKFLOW" <<'EOF'
+  write_workflow <<'EOF'
 jobs:
   control-plane:
     defaults:
@@ -158,7 +179,7 @@ expect "a conformant skeleton passes" 0 "test-enumeration: ok"
 
 # 2. Rule 1 — CI hand-lists packages instead of globbing. This is M1 acquiring M2/M3's exposure.
 reset_fixture
-cat >"$TMP/$WORKFLOW" <<'EOF'
+write_workflow <<'EOF'
 jobs:
   control-plane:
     steps:
@@ -256,7 +277,7 @@ expect "an unwired GENERATOR is correctly ignored" 0 "test-enumeration: ok"
 #     command is hand-listed AND a comment mentions the glob — so the anchor to a `run:` line cannot
 #     be dropped again.
 reset_fixture
-cat >"$TMP/$WORKFLOW" <<'EOF'
+write_workflow <<'EOF'
 jobs:
   control-plane:
     steps:
@@ -281,7 +302,7 @@ expect "a COMMENT mentioning go test ./... does not satisfy rule 1" 1 \
 # 12. The defect. The orphan gate is REAL and on disk; only its step is gone.
 reset_fixture
 : >"$TMP/scripts/check-disabled.sh"
-cat >"$TMP/$WORKFLOW" <<'EOF'
+write_workflow <<'EOF'
 jobs:
   control-plane:
     steps:
@@ -300,7 +321,7 @@ expect "a COMMENTED-OUT gate step does not satisfy rule 5" 1 \
 #     three of its steps, so that narrowing was one refactor away from a false red.
 reset_fixture
 : >"$TMP/scripts/check-block.sh"
-cat >"$TMP/$WORKFLOW" <<'EOF'
+write_workflow <<'EOF'
 jobs:
   control-plane:
     steps:
@@ -318,7 +339,7 @@ expect "commands inside a 'run: |' block satisfy both rules" 0 "test-enumeration
 #     naming the script is prose, exactly like a comment, and must wire nothing.
 reset_fixture
 : >"$TMP/scripts/check-named-only.sh"
-cat >"$TMP/$WORKFLOW" <<'EOF'
+write_workflow <<'EOF'
 jobs:
   control-plane:
     steps:
@@ -332,9 +353,51 @@ EOF
 expect "a gate named only in a step NAME does not satisfy rule 5" 1 \
   "named nowhere in" "scripts/check-named-only.sh"
 
+# --- RULE 6 — A REQUIRED JOB WITH NO SCRIPT BEHIND IT (cases 15-16, added 2026-08-05) -------------
+# Rule 5 can only see a gate that exists as a check-*.sh file. `code-review` is required by
+# PROJECT_RULES.md §7 and has no script — it is a bare `run: echo` placeholder until integration, so
+# rule 5 is structurally blind to its deletion. ci.yml's comment claimed the placeholder itself was
+# the protection: "a placeholder that FAILS if removed keeps the gate from silently disappearing."
+# Break-verified on the real tree: deleting the whole job left all five gates rc=0 and nothing
+# anywhere referenced it. The comment WAS the mechanism. These two cases are the real one.
+#
+# 15. The job is gone. Note these two cases write the workflow directly, NOT via write_workflow().
+reset_fixture
+cat >"$TMP/$WORKFLOW" <<'EOF'
+jobs:
+  control-plane:
+    steps:
+      - run: go test -v ./...
+      - run: bash scripts/check-thing.sh
+      - run: bash scripts/check-test-enumeration.sh
+      - run: bash scripts/check-test-enumeration-selftest.sh
+EOF
+expect "a DELETED required job fails rule 6" 1 \
+  "required by PROJECT_RULES.md §7 are absent" "code-review"
+
+# 16. The job header is commented out — a disabled job, the same shape as case 12's disabled step.
+#     Without the comment-stripped read this would pass, and "disabled" is the realistic way a
+#     required job stops running: nobody deletes a gate outright, they comment it out "for now."
+reset_fixture
+cat >"$TMP/$WORKFLOW" <<'EOF'
+jobs:
+  control-plane:
+    steps:
+      - run: go test -v ./...
+      - run: bash scripts/check-thing.sh
+      - run: bash scripts/check-test-enumeration.sh
+      - run: bash scripts/check-test-enumeration-selftest.sh
+#  code-review:
+#    steps:
+#      - run: echo "code-reviewer gate"
+EOF
+expect "a COMMENTED-OUT required job fails rule 6" 1 \
+  "required by PROJECT_RULES.md §7 are absent" "code-review"
+
 if [[ "$fail" -eq 0 ]]; then
-  echo "test-enumeration-selftest: ok — 14 cases (4 accept, 10 reject), all 5 rules exercised, and"
+  echo "test-enumeration-selftest: ok — 16 cases (4 accept, 12 reject), all 6 rules exercised, and"
   echo "  both scripts confirmed wired in $WORKFLOW. Cases 11-14 pin the prose-satisfaction defect in"
-  echo "  BOTH rule 1 and rule 5, plus the block-scalar form the narrow fix would have rejected."
+  echo "  BOTH rule 1 and rule 5, plus the block-scalar form the narrow fix would have rejected;"
+  echo "  15-16 pin rule 6, where the 'placeholder that fails if removed' did not fail if removed."
 fi
 exit "$fail"

@@ -38,6 +38,14 @@
 #      verbatim: a gate on disk the workflow never names is indistinguishable from a gate that
 #      passes. That is exactly how module 3's config_consumption_selftest.sh landed unwired — and I
 #      "verified" it there by globbing the checks directory, which is not what CI does.
+#   6. Every JOB that PROJECT_RULES.md §7 requires still exists in the workflow. Rule 5 covers gates
+#      that live on disk as a file; it is structurally blind to a required job with no script behind
+#      it. `code-review` is exactly that: PROJECT_RULES.md §7 makes it mandatory on every change, and
+#      it is a bare `run: echo` placeholder whose own comment claimed "a placeholder that FAILS if
+#      removed keeps the gate from silently disappearing." That claim was FALSE, break-verified
+#      2026-08-05: deleting the entire job left all five gates rc=0 and nothing else noticed. The
+#      comment was the only thing "keeping" the gate — a warning comment is not a control, in the
+#      file whose header says so. Rule 6 is the mechanism.
 #
 # Rule 5 covers this file too, but it cannot detect its own absence — hence it is wired in the same
 # commit that creates it, and check-test-enumeration-selftest.sh asserts BOTH are named in CI.
@@ -225,11 +233,54 @@ if [[ -n "${unwired//[$'\n']/}" ]]; then
   fail=1
 fi
 
+# --- 6) Every REQUIRED JOB still exists in the workflow ------------------------------------------
+# Rule 5's blind spot, found 2026-08-05 by break-testing the OTHER claims in ci.yml (fix-plan item 3:
+# "grant tests as the runtime role, or delete the false CI claim"). Rule 5 can only see a gate that
+# exists as a check-*.sh on disk. A required job with no script behind it is invisible to it.
+#
+# `code-review` is exactly that job. PROJECT_RULES.md §7 makes the code-reviewer gate mandatory on
+# EVERY change, doc changes included, and until integration it is a bare `run: echo` placeholder whose
+# own comment read: "a placeholder that FAILS if removed keeps the gate from silently disappearing."
+# Break-verified: deleting the ENTIRE job left all five gates rc=0 and nothing anywhere noticed. The
+# comment was the only thing keeping the gate — in a file whose header states that a warning comment
+# is not a control. That claim is now deleted from ci.yml and replaced by this rule.
+#
+# Job names, not step text: what §7 requires is that the JOB runs, and a job is what a branch
+# protection rule can be a required status check on. Matched as `^  <name>:` at job indentation, on a
+# comment-stripped read of the file — a `#`-commented job header is a disabled job, exactly like a
+# commented-out step in rule 5.
+#
+# LIMIT, stated rather than assumed away: this checks the job EXISTS, not that its body does anything.
+# Gutting the job's steps while keeping the `code-review:` key would pass. That is not a regression —
+# the body is already only an `echo` until integration — and it is not worth a step-content rule that
+# would have to be rewritten the moment the real reviewer is wired. What rule 6 protects is the JOB
+# NAME, which is what a branch-protection required status check binds to. Written down because an
+# unverified claim of immunity is the defect that produced this rule in the first place.
+REQUIRED_JOBS=(code-review)
+missingjobs=""
+jobkeys="$(sed -e 's|\(^\|[[:space:]]\)#.*$||' "$WORKFLOW" | grep -oE '^  [A-Za-z0-9_-]+:' | tr -d ' :' | sort -u || true)"
+for j in "${REQUIRED_JOBS[@]}"; do
+  if ! grep -qxF -- "$j" <<<"$jobkeys"; then
+    missingjobs+="$j"$'\n'
+  fi
+done
+
+if [[ -n "${missingjobs//[$'\n']/}" ]]; then
+  echo "FAIL (test-enumeration): job(s) required by PROJECT_RULES.md §7 are absent from $WORKFLOW:"
+  printf '%s' "$missingjobs" | sed '/^$/d;s/^/    - /'
+  echo "  §7 makes the code-reviewer gate mandatory on every change, doc changes included. Until it is"
+  echo "  wired to the org reviewer it is a placeholder job — and a placeholder that can be deleted"
+  echo "  silently is not a gate. Deleting it is a rules violation, not a cleanup."
+  echo "  Fix: restore the job. If §7 changed, change §7 first and update REQUIRED_JOBS here."
+  fail=1
+fi
+
 if [[ "$fail" -eq 0 ]]; then
   ntests="$(find . -name '*_test.go' -not -path './.git/*' -not -path '*/vendor/*' | wc -l | tr -d ' ')"
   nspecs="$(find . -name '*_spec.rb' -not -path './.git/*' | wc -l | tr -d ' ')"
   ngates="$(ls scripts/check-*.sh | wc -l | tr -d ' ')"
   echo "test-enumeration: ok — go test ./... intact over 1 module ($ntests test files, 0 build-tagged),"
-  echo "  RSpec discovery unnarrowed ($nspecs spec files), all $ngates check script(s) wired in $WORKFLOW."
+  echo "  RSpec discovery unnarrowed ($nspecs spec files), all $ngates check script(s) wired in $WORKFLOW,"
+  echo "  and all ${#REQUIRED_JOBS[@]} PROJECT_RULES §7 job(s) present."
 fi
 exit "$fail"
