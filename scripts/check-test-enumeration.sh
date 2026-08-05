@@ -54,14 +54,70 @@ SPEC_HELPER="verifier-node/truemail-rack/spec/spec_helper.rb"
 
 fail=0
 
+# --- WHAT THE WORKFLOW ACTUALLY EXECUTES (shared by rules 1 and 5) ------------------------------
+# Emit ONLY the shell text the workflow EXECUTES: the value of every `run:` key, including the body
+# of `run: |` block scalars, with comments stripped. Everything else in the YAML — a `name:`, a
+# full-line comment, a trailing comment — is prose ABOUT the workflow, not the workflow.
+#
+# Both rules below read this, deliberately, rather than each grepping the file its own way. Rules 1
+# and 5 were checking the same property with two different mechanisms; one was fixed on 2026-08-05
+# and the other was left broken while a comment claimed it was fine (see rule 1's CORRECTION note).
+# One reading means they cannot diverge like that again.
+#
+# A `#` begins a comment at start-of-line or after whitespace (YAML's rule, and close enough to the
+# shell's inside a run block: a shell comment in a run block invokes nothing either). Verified
+# against this workflow before adopting: its only trailing comment sits on `fetch-depth: 0`, not on a
+# `run:` line, so nothing real is truncated. NOTE `defaults: run:` at ci.yml:21 is a MAPPING, not a
+# command — it yields an empty line here (no pattern can match it), and its nested
+# `working-directory:` key is never read as a command, because a block scalar is entered only when
+# the value literally begins with `|` or `>`. Block-scalar membership is "indented deeper than the
+# `run` key itself", measured from `run` rather than from the line's leading whitespace, so the
+# `- run: |` list-item form cannot swallow its sibling keys.
+workflow_commands() {
+  awk '
+    function strip(s) { sub(/(^|[ \t])#.*$/, "", s); return s }
+    {
+      if (inblock) {
+        if ($0 ~ /^[ \t]*$/) { next }
+        match($0, /^[ \t]*/)
+        if (RLENGTH > blockind) { print strip($0); next }
+        inblock = 0
+      }
+      if ($0 ~ /^[ \t]*(-[ \t]+)?run:/) {
+        blockind = index($0, "run:") - 1
+        rest = $0
+        sub(/^[ \t]*(-[ \t]+)?run:[ \t]*/, "", rest)
+        if (rest ~ /^[|>]/) { inblock = 1; next }
+        print strip(rest)
+      }
+    }
+  ' "$1"
+}
+
+# `|| true`: a workflow with no `run:` key yields nothing, and an empty result must still reach both
+# rules and fail them LOUDLY rather than killing this script here with no output at all — the same
+# reasoning that fixed config_consumption's silent death on an emptied ledger, found the same day.
+CMDS="$(workflow_commands "$WORKFLOW" || true)"
+
 # --- 1) CI still runs `go test ./...`, not a hand-listed subset ---------------------------------
-# The `run:` anchor is load-bearing and was NOT in the first version of this check. Without it the
-# pattern matched the explanatory COMMENT in ci.yml that mentions `go test ./...` while describing
-# this very gate — so break-verification on the real tree (replace the real command with a
-# hand-listed package subset) left the gate GREEN. A gate satisfied by prose about itself is the
-# purest form of the vacuity this file exists to prevent. Rule 5 had the anchor from the start; rule
-# 1 did not, and only breaking it on the real tree showed the difference. Selftest case 11 pins it.
-if ! grep -qE '^[[:space:]]*(-[[:space:]]+)?run:.*go test( +-[^ ]+)* +\./\.\.\.' "$WORKFLOW"; then
+# Reading EXECUTED COMMANDS is load-bearing and was NOT in the first version of this check. It grepped
+# the whole file, so the pattern matched the explanatory COMMENT in ci.yml that mentions
+# `go test ./...` while describing this very gate — and break-verification on the real tree (replace
+# the real command with a hand-listed package subset) left the gate GREEN. A gate satisfied by prose
+# about itself is the purest form of the vacuity this file exists to prevent. Selftest case 11 pins it.
+#
+# CORRECTION (2026-08-05, same day). The first fix was a `run:`-anchored regex here, and this comment
+# then read "Rule 5 had the anchor from the start; rule 1 did not, and only breaking it on the real
+# tree showed the difference." The first clause was FALSE — rule 5 matched the script path ANYWHERE in
+# the workflow, comments included, and a break proved it green on a deleted step. The claim is the
+# instructive part: it asserted a neighbouring rule was immune WITHOUT breaking it, in a file whose
+# whole subject is that unverified claims of immunity are worthless.
+#
+# The anchored regex was also too narrow in the other direction: it required the command to sit on the
+# `run:` line itself, so moving `go test ./...` into a perfectly ordinary `run: |` block would have
+# failed this rule on a correct workflow — and a gate that rejects valid input is how exemption lists
+# get born. Reading workflow_commands() fixes both directions at once, and both rules now share it.
+if ! grep -qE 'go test( +-[^ ]+)* +\./\.\.\.' <<<"$CMDS"; then
   echo "FAIL (test-enumeration): $WORKFLOW no longer runs 'go test ./...' over the whole module."
   echo "  M1's Go tests are discovered automatically ONLY because CI globs the module. If CI now names"
   echo "  packages individually, M1 has acquired module 2/3's exposure: a new package runs nowhere and"
@@ -135,11 +191,26 @@ fi
 # The transferable rule. gen-config-reference.sh is deliberately NOT covered: it is the GENERATOR,
 # and check-config-reference-fresh.sh (which IS enumerated) invokes it — so it is exercised in CI
 # through its checker. The glob is check-*.sh precisely so a generator cannot be mistaken for a gate.
+#
+# THE MATCH IS AGAINST EXECUTED COMMANDS, NOT THE WORKFLOW FILE (fixed 2026-08-05). Rule 1's header
+# above says "Rule 5 had the anchor from the start." That was WRONG — rule 5 matched the script's
+# PATH anywhere in the file, and the comment right here claimed that using the path rather than the
+# bare filename made a comment unable to satisfy it. Break-verified on this tree: deleting the
+# check-no-secret-leak.sh step outright and leaving behind
+#     # TODO: re-enable bash scripts/check-no-secret-leak.sh — the canary boot is slow on the runner
+# left this gate GREEN, reporting "all 5 check script(s) wired in .github/workflows/ci.yml" about a
+# workflow that ran four. So rule 1's fix was incomplete in the very same file, and the incorrect
+# claim about rule 5 is precisely what would have stopped anyone re-checking it. A comment asserting
+# a gate is immune is worth nothing; only the break tells you.
+#
+# Third instance of one shape in a single day: rule 1 matched `go test ./...` inside a comment about
+# itself, both send-managed/send-byo config_consumption gates accepted a TODO naming a config key as
+# that key's consumer, and now this. A commented-out step is the LIKELIEST way to reach it — it is
+# what someone writes while disabling a gate they mean to restore, which is exactly when a blocking
+# gate silently stops blocking. $CMDS is the shared reading defined near the top of this file.
 unwired=""
 for g in scripts/check-*.sh; do
-  # Match the path as it appears in a workflow `run:` line, not the bare filename, so a passing
-  # mention inside a comment cannot satisfy this.
-  if ! grep -qF "$g" "$WORKFLOW"; then
+  if ! grep -qF "$g" <<<"$CMDS"; then
     unwired+="$g"$'\n'
   fi
 done

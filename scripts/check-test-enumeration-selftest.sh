@@ -38,6 +38,16 @@
 #      not a hypothetical: rule 1 originally matched the glob string anywhere in the workflow, and
 #      ci.yml's own comment about this gate contains it, so the first break-verification on the real
 #      tree came back GREEN. See the anchor comment in the gate.
+#  12. a gate step DELETED with a comment naming its path left behind -> FAIL (rule 5). The SAME
+#      defect as case 11, in the neighbouring rule, found 2026-08-05 — and found only because rule 5
+#      was break-tested instead of trusted: the gate's own comment asserted rule 5 "had the anchor
+#      from the start," which was false. Deleting check-no-secret-leak.sh's step on the real tree and
+#      leaving a `# TODO: re-enable bash scripts/check-no-secret-leak.sh` behind left the gate GREEN.
+#  13. `go test ./...` inside a `run: |` BLOCK SCALAR -> ok (rule 1). Load-bearing: the first fix for
+#      case 11 was a regex anchored to the `run:` LINE, which would have REJECTED this correct
+#      workflow. A gate that fails on valid input is how exemption lists get born.
+#  14. a check script named only in a step NAME -> FAIL (rule 5). Narrows the fix: the rule is "a run
+#      command invokes it," not "the text survives comment-stripping." A `name:` is prose too.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$HERE"
@@ -259,8 +269,72 @@ EOF
 expect "a COMMENT mentioning go test ./... does not satisfy rule 1" 1 \
   "no longer runs 'go test ./...'"
 
+# --- RULE 5 HAS THE SAME DEFECT (cases 12-14, added 2026-08-05) ----------------------------------
+# Case 11 fixed rule 1 and the gate then claimed, in a comment, that rule 5 "had the anchor from the
+# start." It did not — rule 5 grepped for the script's PATH anywhere in the workflow. Break-verified
+# on the real tree: deleting the check-no-secret-leak.sh step and leaving
+# `# TODO: re-enable bash scripts/check-no-secret-leak.sh — the canary boot is slow on the runner`
+# behind left the gate GREEN, reporting "all 5 check script(s) wired" about a workflow running four.
+# The unverified claim of immunity is what would have kept anyone from re-checking, in a file whose
+# whole subject is that such claims are worthless.
+#
+# 12. The defect. The orphan gate is REAL and on disk; only its step is gone.
+reset_fixture
+: >"$TMP/scripts/check-disabled.sh"
+cat >"$TMP/$WORKFLOW" <<'EOF'
+jobs:
+  control-plane:
+    steps:
+      - run: go test -v ./...
+      - run: bash scripts/check-thing.sh
+      # TODO: re-enable bash scripts/check-disabled.sh — the canary boot is slow on the runner
+      - run: bash scripts/check-test-enumeration.sh
+      - run: bash scripts/check-test-enumeration-selftest.sh
+EOF
+expect "a COMMENTED-OUT gate step does not satisfy rule 5" 1 \
+  "named nowhere in" "scripts/check-disabled.sh"
+
+# 13. A `run: |` block scalar must still count, for BOTH rules. Load-bearing in the strict sense: the
+#     regex that first fixed case 11 required the command on the `run:` line itself, so this correct
+#     workflow would have FAILED rule 1 — and this repo's real ci.yml already uses the block form for
+#     three of its steps, so that narrowing was one refactor away from a false red.
+reset_fixture
+: >"$TMP/scripts/check-block.sh"
+cat >"$TMP/$WORKFLOW" <<'EOF'
+jobs:
+  control-plane:
+    steps:
+      - name: go suite and gates
+        run: |
+          go test -v ./...
+          bash scripts/check-thing.sh
+          bash scripts/check-block.sh
+          bash scripts/check-test-enumeration.sh
+          bash scripts/check-test-enumeration-selftest.sh
+EOF
+expect "commands inside a 'run: |' block satisfy both rules" 0 "test-enumeration: ok"
+
+# 14. Narrowing: stripping comments is not the rule — the text must be a RUN command. A step name
+#     naming the script is prose, exactly like a comment, and must wire nothing.
+reset_fixture
+: >"$TMP/scripts/check-named-only.sh"
+cat >"$TMP/$WORKFLOW" <<'EOF'
+jobs:
+  control-plane:
+    steps:
+      - run: go test -v ./...
+      - run: bash scripts/check-thing.sh
+      - name: formerly ran scripts/check-named-only.sh
+        run: echo skipped
+      - run: bash scripts/check-test-enumeration.sh
+      - run: bash scripts/check-test-enumeration-selftest.sh
+EOF
+expect "a gate named only in a step NAME does not satisfy rule 5" 1 \
+  "named nowhere in" "scripts/check-named-only.sh"
+
 if [[ "$fail" -eq 0 ]]; then
-  echo "test-enumeration-selftest: ok — 11 cases (3 accept, 8 reject), all 5 rules exercised,"
-  echo "  and both scripts confirmed wired in $WORKFLOW."
+  echo "test-enumeration-selftest: ok — 14 cases (4 accept, 10 reject), all 5 rules exercised, and"
+  echo "  both scripts confirmed wired in $WORKFLOW. Cases 11-14 pin the prose-satisfaction defect in"
+  echo "  BOTH rule 1 and rule 5, plus the block-scalar form the narrow fix would have rejected."
 fi
 exit "$fail"
