@@ -377,9 +377,17 @@ func TestErrorEnvelope_CodeRegistryIsComplete(t *testing.T) {
 // not something a comment can promise: a plausible-looking `"unauthorized"` here instead of
 // `"unauthenticated"` would silently split the client's switch in two.
 //
-// M1 deliberately carries codes the senders have no equivalent condition for (paused,
-// contract_violation, payload_too_large) and lacks several of theirs — this asserts the OVERLAP is
+// M1 deliberately carries codes the senders have no equivalent condition for (contract_violation,
+// payload_too_large, unavailable) and lacks several of theirs — this asserts the OVERLAP is
 // exact, not that the sets are equal.
+//
+// `paused` MOVED INTO THE OVERLAP ON 2026-08-05. It was listed above as M1-only until fix-plan item
+// 12 gave both senders a graduated dispatch rung ladder whose two deepest rungs answer `503 paused`
+// on their intake route (their ADR-0017). The condition is the same on all three modules — an
+// operator pulled a kill-switch, and this exact request will succeed later unchanged — so the code
+// and its 503 are now genuinely cross-module and belong in this assertion. That it had to be MOVED,
+// rather than having been caught by anything, is the honest lesson: a comment asserting a code was
+// module-local kept saying so for as long as nobody re-read it.
 //
 // LIMIT, stated rather than assumed away: the senders' spellings are HARDCODED here, because the
 // three modules are separate repos and separate Go modules by design (OD-7 isolation) — this test
@@ -394,10 +402,34 @@ func TestErrorEnvelope_CodesSharedWithTheSendersMatchByteForByte(t *testing.T) {
 		"validation_failed": codeValidationFailed,
 		"not_found":         codeNotFound,
 		"internal_error":    codeInternalError,
+		"paused":            codePaused, // added 2026-08-05 — see the header note
 	}
 	for want, got := range senderSpellings {
 		if got != want {
 			t.Errorf("M1 spells the shared code %q as %q — a client switching on error.code across the three modules would need two branches for one condition", want, got)
+		}
+	}
+
+	// The STATUS is half the contract. A client meeting an unrecognised code degrades by status
+	// (item 7's unknown-code rule), so two modules agreeing on the spelling of `paused` while
+	// disagreeing on whether it is a 503 or a 409 would break exactly the clients this shared
+	// vocabulary is for — and would do it silently, since the switch arm they share would still
+	// match. The senders' values are transcribed, with the same stated limit as the spellings above.
+	senderStatuses := map[string]int{
+		"unauthenticated":   401,
+		"validation_failed": 400,
+		"not_found":         404,
+		"internal_error":    500,
+		"paused":            503,
+	}
+	for code, want := range senderStatuses {
+		got, ok := codeStatus[code]
+		if !ok {
+			t.Errorf("M1's codeStatus has no entry for the shared code %q — it cannot be emitted here at all, so this module's half of the shared vocabulary is incomplete", code)
+			continue
+		}
+		if got != want {
+			t.Errorf("M1 maps the shared code %q to HTTP %d, the senders map it to %d — a client that degrades an unrecognised code by status (item 7) would take a different branch per module for one condition", code, got, want)
 		}
 	}
 }

@@ -48,19 +48,34 @@ import (
 
 // The code enum. ADDITIVE-ONLY: never rename, never repurpose (Door 4 / §6's two-vocabulary rule).
 //
-// WHERE THE SLUGS COME FROM. The four M1 shares with the senders — unauthenticated,
-// validation_failed, not_found, internal_error — are spelled BYTE-IDENTICALLY to
+// WHERE THE SLUGS COME FROM. The five M1 shares with the senders — unauthenticated,
+// validation_failed, not_found, internal_error, paused — are spelled BYTE-IDENTICALLY to
 // send-byo/send-managed platformapi/errors.go, so a platform client's error handling across the
 // three modules is one switch and not three. Checked against their source, not assumed, and held by
 // TestErrorEnvelope_CodesSharedWithTheSendersMatchByteForByte.
 //
-// The other four are M1-ONLY, and this is NOT "a subset plus two": payload_too_large, unavailable,
-// paused, and contract_violation all describe conditions the senders have no equivalent of (a
-// submission cap, an unwired deployment, kill-switch Rung 4, a Door-1 shape check). Equally, M1 does
-// NOT carry method_not_allowed / conflict / unprocessable / rate_limited, which the senders do. The
+// `paused` JOINED THAT SHARED SET ON 2026-08-05. Until then this comment called it M1-ONLY, which
+// was true when written and stopped being true when fix-plan item 12 gave both senders a graduated
+// dispatch rung ladder that answers `503 paused` at its two deepest rungs (their ADR-0017). The
+// codes still mean the same thing on all three — "an operator pulled a kill-switch; this exact
+// request will succeed later, unchanged" — and they carry the same 503, which is what makes the
+// client's single switch correct rather than merely convenient. A comment claiming a code is
+// module-local is precisely the kind of unverified claim of immunity that the cross-module test
+// below exists to replace, so the fix was to add the code to that test, not only to correct the
+// prose here.
+//
+// The other three are M1-ONLY, and this is NOT "a subset plus one": payload_too_large, unavailable,
+// and contract_violation all describe conditions the senders have no equivalent of (a submission
+// cap, an unwired deployment, a Door-1 shape check). Equally, M1 does NOT carry
+// method_not_allowed / conflict / unprocessable / rate_limited, which the senders do. The
 // overlap is exact where it exists; the sets are deliberately different sizes, because the modules
 // genuinely fail in different ways and a shared code that meant something slightly different per
 // module would be worse than no shared code at all.
+//
+// The RUNG LADDERS themselves are NOT shared and are not required to be: M1's Rung 4 has two
+// sub-modes (reject / accept-and-defer) because its sync surface has nowhere to defer to, while the
+// senders' four-rung ladder separates "stop sending" from "stop accepting" because theirs does. Only
+// the wire code and its status are contractual across modules.
 const (
 	codeUnauthenticated   = "unauthenticated"    // 401
 	codeValidationFailed  = "validation_failed"  // 400
