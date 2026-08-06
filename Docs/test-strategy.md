@@ -89,11 +89,35 @@ CI surfaces these as **explicit `PROVABLE-ONLY-AT-ROLLOUT` markers**, not skippe
 ## 5. CI shape
 
 Per PROJECT_RULES.md §7, every change runs (see [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml)):
-1. **control-plane:** `go build ./...`, `go vet ./...`, `go test ./...`
-2. **verifier-node (Door 5):** `assert-gem-unmodified.sh` (host-portable) + `bundle list truemail`==3.3.1 in Docker
-3. **docs-updated staleness check** — a behavior change without a doc/ADR touch fails
-4. **config-reference freshness** — regenerate and diff; drift fails
-5. **the code-reviewer gate** — on every change, docs included
+1. **control-plane:** `go build ./...`, `go vet ./...`, `go test -v ./...` against a real Postgres
+2. **every declared test actually EXECUTED** — a skip is a shortfall, not a pass; two-tiered so the
+   PENDING GAP harness below stays legal and everything else must run
+   (`scripts/check-test-execution.sh`, plus its paired self-test)
+3. **verifier-node (Door 5):** `assert-gem-unmodified.sh` (host-portable) + `bundle list truemail`==3.3.1 in Docker
+4. **verifier-node RSpec** — the fork's own suite (stock specs + the P2 `/v1` wrapper specs)
+5. **no credential reaches a log line** — boot the real binary with canary secrets and scan the log
+   (`scripts/check-no-secret-leak.sh`)
+6. **docs-updated staleness check** — a behavior change without a doc/ADR touch fails
+   (`scripts/check-docs-updated.sh`)
+7. **config-reference freshness** — regenerate and diff; drift fails
+   (`scripts/check-config-reference-fresh.sh`)
+8. **test discovery intact + every gate wired** — the meta-gate: no second `go.mod`, no build-tagged
+   test file, RSpec's glob unnarrowed, every `check-*.sh` named in the workflow, every §7 job present,
+   and every gate named in THIS list (`scripts/check-test-enumeration.sh`, plus its paired self-test)
+9. **the code-reviewer gate** — on every change, docs included
+
+**This list is checked, not trusted.** It stood at five items while CI ran nine, which is the same
+count-drift this project has already found twice (a gate count below CI's; 53 documented config keys
+against 89 in the database). `check-test-enumeration.sh` rule 7 fails if any `check-*.sh` wired into
+the workflow is not named here — so the mechanism that catches an unwired gate also catches this list
+falling behind it. That is why each item carries its `scripts/…` path as well as the sentence saying
+what it proves: the prose is for the reader, the path is what a mechanism can check. Item 1 is
+intentionally not a script and is exempt; everything else must appear here, so adding a gate without
+touching this file is red. What rule 7 does NOT prove is that a description here is *accurate* — a
+wrong sentence about a real gate passes, and that remains the code reviewer's job (§7).
 
 CI **must not fake green**: the rollout-only truths (§4) are reported as pending markers, and the
-verifier-node Docker build is the real (not stubbed) resolution of the pinned gem.
+verifier-node Docker build is the real (not stubbed) resolution of the pinned gem. §5's own history is
+why: `go test ./...` exiting 0 says nothing about whether the tests RAN (audit D13 — two grant tests
+that always skipped while ci.yml claimed they proved append-only on every push), which is what item 2
+exists to assert.

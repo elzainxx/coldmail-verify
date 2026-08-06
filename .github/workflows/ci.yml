@@ -66,6 +66,35 @@ jobs:
         env:
           TM_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/cptest
         run: go test -v ./...
+      # EXECUTION, not merely discovery. The step above exits 0 and prints `ok` for a package in which
+      # every test SKIPPED — which is exactly what audit D13 was: two grant tests that always skipped
+      # while the comment at the top of this job claimed they proved append-only on every push.
+      # Measured 2026-08-06: with this DSN set, 376 of 381 tests execute; with it EMPTY, 345 execute
+      # and 36 skip, and `go test ./...` still exits 0 with `ok` on every package. This gate fails on
+      # any shortfall, so an emptied secret can no longer read as green. It runs the suite a SECOND
+      # time (~3s) on purpose: making it the test runner would move `go test ./...` out of this
+      # workflow and turn check-test-enumeration.sh rule 1 red, correctly.
+      #
+      # working-directory overrides this job's control-plane default: the gate lives at the repo root
+      # and cd's into the module itself.
+      - name: test-execution gate (every declared test actually RAN)
+        working-directory: .
+        env:
+          TM_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/cptest
+        run: bash scripts/check-test-execution.sh
+      # The PAIRED CONTROL for the step above. On a green tree that gate prints ok, which means every
+      # one of its failure branches is unexercised — it could be broken to accept everything and this
+      # workflow would stay green forever. This self-test builds throwaway fixtures that trip each
+      # branch and asserts BOTH the exit code and the message, because a gate that fails for the wrong
+      # reason is not a control. It includes the break that found a real hole in the gate: a workflow
+      # pointing at `${{ secrets.PGDSN }}` with that secret EMPTY passed the gate's first version with
+      # `ok [DEGRADED]` and exit 0 while 31 tests did not run.
+      #
+      # It needs no database — its fixtures are dependency-free Go modules in a temp dir — so it is a
+      # step here only because Go is already set up in this job.
+      - name: test-execution gate SELF-TEST (the paired control)
+        working-directory: .
+        run: bash scripts/check-test-execution-selftest.sh
 
   door5-gem-unmodified:
     name: verifier-node (Door 5 — engine pinned, unmodified)

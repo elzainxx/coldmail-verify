@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -40,11 +41,14 @@ import (
 //
 // WHAT IT PINS (all four are separate properties, and each has its own mutation below):
 //
-//	(1) A second tenant reading a job it does not own gets 404 — BYTE-IDENTICAL to the 404 for an
-//	    id that does not exist at all. Status, headers, body, all of it. This is the
-//	    no-existence-disclosure posture the senders already hold and the fix plan requires
-//	    ("Return 404, not 403"): a 403 confirms the id is real, which turns a job id into something
-//	    worth guessing at. UUIDv7 ids are time-ordered, so "worth guessing at" is not theoretical.
+//	(1) A second tenant reading a job it does not own gets 404 — INDISTINGUISHABLE from the 404 for
+//	    an id that does not exist at all. Status, headers, and every byte of the body except the
+//	    per-request `request_id`, which is equally random in both and so discloses nothing (see
+//	    assertIndistinguishable, which normalizes exactly that one field and asserts BOTH that it is
+//	    present and that it still varies). This is the no-existence-disclosure posture the senders
+//	    already hold and the fix plan requires ("Return 404, not 403"): a 403 confirms the id is real,
+//	    which turns a job id into something worth guessing at. UUIDv7 ids are time-ordered, so
+//	    "worth guessing at" is not theoretical.
 //	(2) ZERO ROWS leak. Not "a redacted page", not "an empty results array with a real count" —
 //	    the owner-scoped query matches nothing, asserted at the store level as well as through HTTP,
 //	    because the HTTP 404 and the SQL predicate are two independent barriers and either one alone
@@ -369,11 +373,71 @@ func assertIndistinguishable(t *testing.T, route string, cross, absent *httptest
 	if ct, at := cross.Header().Get("Content-Type"), absent.Header().Get("Content-Type"); ct != at {
 		t.Fatalf("%s: content-type differs: cross=%q absent=%q", route, ct, at)
 	}
-	if !bytes.Equal(cross.Body.Bytes(), absent.Body.Bytes()) {
-		t.Fatalf("%s: bodies are NOT byte-identical:\n  cross-tenant : %s\n  nonexistent  : %s",
-			route, cross.Body.String(), absent.Body.String())
+	// request_id is EXCLUDED from the comparison, and excluding it is the whole subtlety here.
+	//
+	// This helper compared raw bytes when it was written, and that was correct then. Item 18 (commit
+	// cc3ce0e) later routed every error body through writeErr, which stamps a FRESH uuid into
+	// `request_id` per request — deliberately, so an operator can correlate one body with one log
+	// line. Two separate HTTP requests can therefore never be byte-equal again, which made this
+	// assertion IMPOSSIBLE TO PASS rather than merely wrong. It went unnoticed for two reasons at
+	// once, and both are the reason the exclusion is spelled out rather than done quietly:
+	//   (a) this whole file t.Skip()s unless TM_TEST_DATABASE_URL is set, so an ordinary local run
+	//       never executes it; and
+	//   (b) this repo has NO git remote, so .github/workflows/ci.yml — which DOES set that DSN and
+	//       would have gone red on the first push — has never actually run.
+	// A later commit invalidated an older assertion and the only two things that would have noticed
+	// were both silent. Found 2026-08-06 by running the suite against a real Postgres by hand.
+	//
+	// THE DISCLOSURE PROPERTY IS UNCHANGED, and that is why the fix is to normalize rather than to
+	// weaken. What must not differ is anything DERIVED FROM WHETHER THE JOB EXISTS. request_id is
+	// derived from the request, not from the answer: it is equally random in both responses, carries
+	// no information about the id being real, and would be identical in distribution if the job
+	// existed or not. Every other byte — code, message, details, field order, content-type, status —
+	// is still compared exactly, so a 403-vs-404, a "job not owned by you" message, a `details`
+	// entry naming the owner, or an extra field on one branch all still fail this.
+	//
+	// The normalization is deliberately NARROW: exactly the value of the top-level `request_id`
+	// field, replaced with a fixed sentinel. It is NOT a "strip all uuids" pass — that would also
+	// blank a leaked job id or owner id, which is the very leak assertions below hunt for. If a
+	// SECOND nondeterministic field is ever added to the envelope, this must fail loudly and be
+	// extended one field at a time, rather than being loosened into a subset match.
+	crossN, absentN := normalizeErrRequestID(t, cross.Body.Bytes()), normalizeErrRequestID(t, absent.Body.Bytes())
+	if !bytes.Equal(crossN, absentN) {
+		t.Fatalf("%s: bodies differ in something OTHER than request_id — the difference IS the disclosure:\n  cross-tenant : %s\n  nonexistent  : %s\n  (raw)\n  cross-tenant : %s\n  nonexistent  : %s",
+			route, crossN, absentN, cross.Body.String(), absent.Body.String())
+	}
+	// Anti-vacuity for the normalization itself: if request_id ever stops being present, or stops
+	// being per-request, the comparison above silently becomes weaker than advertised (two bodies
+	// that are equal because both had nothing to normalize). Both halves are asserted.
+	if !bytes.Contains(cross.Body.Bytes(), []byte(`"request_id"`)) {
+		t.Fatalf("%s: error body carries no request_id field, so normalizing it proves nothing — either the envelope changed (update this helper) or writeErr regressed: %s",
+			route, cross.Body.String())
+	}
+	if bytes.Equal(cross.Body.Bytes(), absent.Body.Bytes()) {
+		t.Fatalf("%s: the two error bodies are byte-identical INCLUDING request_id — that id is supposed to be minted per request (item 18). If it has become constant, the log-correlation mechanism is broken: %s",
+			route, cross.Body.String())
 	}
 }
+
+// normalizeErrRequestID replaces the value of the error envelope's top-level `request_id` with a
+// fixed sentinel, leaving every other byte — including key order, which json.Marshal emits in struct
+// field order and is therefore stable — untouched.
+//
+// Implemented by editing the RAW BYTES rather than by unmarshal/marshal round-tripping through
+// map[string]any, on purpose: a round-trip through a map would reorder keys, drop an unexpected
+// field entirely, and coerce number formats, so it would hide exactly the envelope-shape differences
+// this comparison exists to catch. Here, a field the helper does not know about still shows up as a
+// byte difference.
+func normalizeErrRequestID(t *testing.T, body []byte) []byte {
+	t.Helper()
+	return errRequestIDValue.ReplaceAll(body, []byte(`"request_id":"<normalized>"`))
+}
+
+// The `[^"]*` value class is deliberate: it matches whatever writeErr put there (a UUIDv7, or the
+// obviously-degenerate all-zero fallback) without asserting a uuid SHAPE. This helper's job is to
+// remove a known-nondeterministic value from a comparison, not to validate it — the id's shape is
+// pinned in errors_test.go, where it belongs.
+var errRequestIDValue = regexp.MustCompile(`"request_id":"[^"]*"`)
 
 // drainOnce runs one real drainer tick against real Postgres so the fixture job holds settled
 // verdicts. Uses the production drainer + CAS + settle path (nothing about the settlement is faked);

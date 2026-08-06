@@ -54,6 +54,16 @@
 #      removed keeps the gate from silently disappearing."
 #  16. the `code-review:` job header COMMENTED OUT -> FAIL (rule 6). A disabled job, exactly like case
 #      12's disabled step; the comment-stripped read is what makes rule 6 see it.
+#  17. a gate wired in CI but ABSENT from Docs/test-strategy.md §5 -> FAIL (rule 7). Not hypothetical:
+#      §5 was found listing five CI items while ci.yml ran nine. Rules 5 and 6 both read the WORKFLOW
+#      and are blind to the document that tells a reader what a green CI means.
+#  18. a gate whose paired SELF-TEST is not separately listed -> ok. §5 documents a gate and its
+#      self-test as ONE item, which is how a reader thinks about them; demanding two entries would turn
+#      §5 into a line-by-line restatement of the workflow, and that friction is what stops a doc being
+#      maintained at all. Load-bearing accept case.
+#  19. Docs/test-strategy.md ABSENT -> FAIL (rule 7), not a silent skip. A `[[ -f ]]` guard around a
+#      rule reads as harmless until the file goes missing and the rule quietly stops checking — this
+#      whole file exists because of controls that went quiet.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$HERE"
@@ -128,6 +138,18 @@ RSpec.configure do |config|
 end
 EOF
   : >"$TMP/scripts/check-thing.sh"
+  # Rule 7's substrate: the strategy doc must name every gate CI runs. The conformant fixture names
+  # both of its gates, so a case that adds a script trips rule 7 as well as rule 5 unless it calls
+  # document_gate — which is deliberate (an undocumented gate IS both), and document_gate is how the
+  # cases that mean to test ONLY rule 5 stay single-reason.
+  mkdir -p "$TMP/Docs"
+  cat >"$TMP/Docs/test-strategy.md" <<'EOF'
+## 5. CI shape
+
+1. **control-plane:** `go build ./...`, `go vet ./...`, `go test ./...`
+2. **the fixture's stand-in gate** (`scripts/check-thing.sh`)
+3. **test discovery intact** (`scripts/check-test-enumeration.sh`, plus its paired self-test)
+EOF
   write_workflow <<'EOF'
 jobs:
   control-plane:
@@ -140,6 +162,15 @@ jobs:
       - run: bash scripts/check-test-enumeration.sh
       - run: bash scripts/check-test-enumeration-selftest.sh
 EOF
+}
+
+# document_gate <name> — add a gate to the fixture strategy doc, so a case testing another rule is not
+# ALSO failing rule 7. Writes the same shape §5 uses: prose plus the scripts/… path, since the path is
+# what rule 7 matches. Sentence included rather than the bare path so this helper cannot drift into
+# passing a form the real doc would not use.
+document_gate() {
+  printf '9. **the %s gate** — documented by the fixture (`scripts/check-%s.sh`)\n' "$1" "$1" \
+    >>"$TMP/Docs/test-strategy.md"
 }
 
 # expect <case-name> <want-rc> <substring...>  (every substring must appear)
@@ -244,8 +275,11 @@ expect "a spec_helper config.pattern fails" 1 \
   "narrows RSpec's file discovery" "spec_helper.rb"
 
 # 8. Rule 5 — an unwired gate. Module 3's config_consumption_selftest defect.
+#    document_gate keeps this case single-reason: an undocumented gate trips rule 7 too, and a case that
+#    fails for two reasons cannot tell you the one it names is working.
 reset_fixture
 : >"$TMP/scripts/check-orphan.sh"
+document_gate orphan
 expect "an unwired check script fails" 1 "named nowhere in" "scripts/check-orphan.sh"
 
 # 9. A //go:build string DEEP in a file is NOT a constraint — Go only honours it in the header.
@@ -321,6 +355,7 @@ expect "a COMMENTED-OUT gate step does not satisfy rule 5" 1 \
 #     three of its steps, so that narrowing was one refactor away from a false red.
 reset_fixture
 : >"$TMP/scripts/check-block.sh"
+document_gate block
 write_workflow <<'EOF'
 jobs:
   control-plane:
@@ -339,6 +374,7 @@ expect "commands inside a 'run: |' block satisfy both rules" 0 "test-enumeration
 #     naming the script is prose, exactly like a comment, and must wire nothing.
 reset_fixture
 : >"$TMP/scripts/check-named-only.sh"
+document_gate named-only
 write_workflow <<'EOF'
 jobs:
   control-plane:
@@ -394,10 +430,69 @@ EOF
 expect "a COMMENTED-OUT required job fails rule 6" 1 \
   "required by PROJECT_RULES.md §7 are absent" "code-review"
 
+# --- RULE 7 — THE DOCUMENTED GATE LIST FALLING BEHIND CI (cases 17-19, added 2026-08-06) -----------
+# Docs/test-strategy.md §5 was found listing FIVE CI items while ci.yml ran nine. Rules 5 and 6 both
+# read the WORKFLOW; neither can see that the document telling a reader what a green CI means has
+# stopped matching it. Third instance of the count-drift shape in this repo (a gate count below CI's;
+# 53 documented config keys against 89 in the database), and the one with the largest blast radius,
+# because §5 is the artifact a reader trusts instead of reading the workflow.
+#
+# 17. A gate wired in CI but absent from the doc.
+reset_fixture
+: >"$TMP/scripts/check-undocumented.sh"
+write_workflow <<'EOF'
+jobs:
+  control-plane:
+    steps:
+      - run: go test -v ./...
+      - run: bash scripts/check-thing.sh
+      - run: bash scripts/check-undocumented.sh
+      - run: bash scripts/check-test-enumeration.sh
+      - run: bash scripts/check-test-enumeration-selftest.sh
+  code-review:
+    steps:
+      - run: echo "code-reviewer gate"
+EOF
+expect "a gate CI runs but the strategy doc omits fails rule 7" 1 \
+  "absent from Docs/test-strategy.md" "check-undocumented.sh"
+
+# 18. The accept case that keeps 17 honest: a gate whose paired SELF-TEST is not separately listed must
+#     PASS. §5 documents a gate and its self-test as one item, which is how a reader thinks about them;
+#     a rule demanding two entries would push the doc toward restating the workflow line by line, and
+#     the natural response to that friction is to stop maintaining §5 at all.
+reset_fixture
+: >"$TMP/scripts/check-paired.sh"
+: >"$TMP/scripts/check-paired-selftest.sh"
+document_gate paired
+write_workflow <<'EOF'
+jobs:
+  control-plane:
+    steps:
+      - run: go test -v ./...
+      - run: bash scripts/check-thing.sh
+      - run: bash scripts/check-paired.sh
+      - run: bash scripts/check-paired-selftest.sh
+      - run: bash scripts/check-test-enumeration.sh
+      - run: bash scripts/check-test-enumeration-selftest.sh
+  code-review:
+    steps:
+      - run: echo "code-reviewer gate"
+EOF
+expect "one doc entry covers a gate AND its self-test" 0 "test-enumeration: ok"
+
+# 19. The doc itself missing must fail LOUDLY, not silently make rule 7 inert. This is the shape that
+#     produced rule 7: a check nobody notices has stopped checking. A missing file is the easiest way to
+#     reach it, and `[[ -f ]]` guards read as harmless until they are the whole story.
+reset_fixture
+rm -f "$TMP/Docs/test-strategy.md"
+expect "the strategy doc missing fails rather than skipping rule 7" 1 \
+  "is missing — rule 7 has nothing to check"
+
 if [[ "$fail" -eq 0 ]]; then
-  echo "test-enumeration-selftest: ok — 16 cases (4 accept, 12 reject), all 6 rules exercised, and"
+  echo "test-enumeration-selftest: ok — 19 cases (5 accept, 14 reject), all 7 rules exercised, and"
   echo "  both scripts confirmed wired in $WORKFLOW. Cases 11-14 pin the prose-satisfaction defect in"
   echo "  BOTH rule 1 and rule 5, plus the block-scalar form the narrow fix would have rejected;"
-  echo "  15-16 pin rule 6, where the 'placeholder that fails if removed' did not fail if removed."
+  echo "  15-16 pin rule 6, where the 'placeholder that fails if removed' did not fail if removed;"
+  echo "  17-19 pin rule 7, added after Docs/test-strategy.md §5 was found listing 5 CI items to CI's 9."
 fi
 exit "$fail"

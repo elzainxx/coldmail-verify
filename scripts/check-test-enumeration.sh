@@ -275,12 +275,74 @@ if [[ -n "${missingjobs//[$'\n']/}" ]]; then
   fail=1
 fi
 
+# --- 7) The DOCUMENTED gate list must not fall behind the gates CI runs --------------------------
+# Docs/test-strategy.md §5 enumerates what every change runs. Found 2026-08-06 standing at FIVE items
+# while ci.yml ran nine — it had not been touched as gates were added. That is the THIRD instance of
+# one shape in this repo: a doc's gate count below CI's, and architecture-overview.md claiming 53
+# config keys where the database held 89. The list is load-bearing in a way a stale count is not:
+# §5 is what a reader consults to learn what CI proves, and one that under-reports teaches that gates
+# nobody listed are optional.
+#
+# The direction checked is DOC-BEHIND-CI, which is the direction that lies about coverage. A doc naming
+# a gate that no longer exists is caught by rule 5 from the other side (the script would have to exist
+# to be wired) and by the docs-updated gate; it also fails safe, over-promising rather than under.
+#
+# Why not check the COUNT: a count is exactly what drifted, and a count can be edited to match without
+# anyone reading what changed. The token matched is the gate's own PATH, `scripts/check-<name>.sh`, so
+# adding a gate requires naming it in the doc — the same standard rule 5 applies to the workflow.
+#
+# WHY A PATH AND NOT THE PROSE DESCRIPTION. Matching descriptive words was the first attempt and it was
+# wrong in both directions: §5's "config-reference freshness" does not contain the script's name, so a
+# correctly-documented gate went red, while any rule loose enough to accept it would also be satisfied by
+# unrelated prose — this repo's most-repeated defect (rule 1 matched by a comment about itself, rule 5 by
+# a commented-out step, two sender gates by a TODO). A path cannot be accidentally present. So §5 carries
+# both: the sentence that says what the gate PROVES, and the path, which is the part a mechanism can
+# check. The path also earns its keep for the reader, who can go straight from the claim to the code.
+#
+# LIMIT, stated rather than assumed away: this proves the doc NAMES each gate, not that what it says
+# about one is true. A §5 entry describing a gate incorrectly passes. Prose accuracy is the code
+# reviewer's job (PROJECT_RULES.md §7); what is mechanised here is the failure that actually occurred —
+# a gate added and §5 never touched.
+#
+# Rule 5 runs first and shares the $CMDS reading, so by here every check-*.sh is known to be wired;
+# this rule iterates the same glob and asks whether the doc knows about it. The self-test's accept-case
+# is what keeps this from being satisfiable by a doc that merely mentions the word "gate".
+STRATEGY="Docs/test-strategy.md"
+if [[ -f "$STRATEGY" ]]; then
+  undocumented=""
+  for g in scripts/check-*.sh; do
+    # A gate and its paired self-test are ONE documented item: §5 lists "the meta-gate + its self-test"
+    # as one line, which is how a reader thinks about them. Requiring two entries would push the doc
+    # toward mechanical restatement of the workflow instead of an explanation of what CI proves.
+    want="${g%-selftest.sh}"; want="${want%.sh}.sh"
+    if ! grep -qF -- "$want" "$STRATEGY"; then
+      undocumented+="$g (expected the doc to name \"$want\")"$'\n'
+    fi
+  done
+  if [[ -n "${undocumented//[$'\n']/}" ]]; then
+    echo "FAIL (test-enumeration): gate(s) run by CI but absent from $STRATEGY §5:"
+    printf '%s' "$undocumented" | sed '/^$/d;s/^/    - /'
+    echo "  §5 is what a reader consults to learn what a green CI means. It stood at five items while"
+    echo "  CI ran nine, which is how this rule came to exist. A gate CI runs but the strategy does not"
+    echo "  name teaches that unlisted gates are optional — and this repo has three separate instances"
+    echo "  of a documented count drifting below reality."
+    echo "  Fix: add the gate to $STRATEGY §5 — the sentence saying what it PROVES, plus its"
+    echo "  scripts/… path, which is the part this rule can check (see the header on why not prose)."
+    fail=1
+  fi
+else
+  echo "FAIL (test-enumeration): $STRATEGY is missing — rule 7 has nothing to check."
+  echo "  It is the document that states what each test layer is allowed to CLAIM (and what CI must"
+  echo "  never fake green). Its absence is not a no-op: rule 7 would silently pass forever."
+  fail=1
+fi
+
 if [[ "$fail" -eq 0 ]]; then
   ntests="$(find . -name '*_test.go' -not -path './.git/*' -not -path '*/vendor/*' | wc -l | tr -d ' ')"
   nspecs="$(find . -name '*_spec.rb' -not -path './.git/*' | wc -l | tr -d ' ')"
   ngates="$(ls scripts/check-*.sh | wc -l | tr -d ' ')"
   echo "test-enumeration: ok — go test ./... intact over 1 module ($ntests test files, 0 build-tagged),"
-  echo "  RSpec discovery unnarrowed ($nspecs spec files), all $ngates check script(s) wired in $WORKFLOW,"
-  echo "  and all ${#REQUIRED_JOBS[@]} PROJECT_RULES §7 job(s) present."
+  echo "  RSpec discovery unnarrowed ($nspecs spec files), all $ngates check script(s) wired in $WORKFLOW"
+  echo "  and each named in $STRATEGY, and all ${#REQUIRED_JOBS[@]} PROJECT_RULES §7 job(s) present."
 fi
 exit "$fail"
