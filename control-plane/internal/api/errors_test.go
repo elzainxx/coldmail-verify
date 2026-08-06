@@ -337,9 +337,16 @@ func TestErrorEnvelope_RequestIDsAreUniquePerRequest(t *testing.T) {
 // FAILS IF: a code is added to one map and not the other, or given a 2xx/3xx status.
 func TestErrorEnvelope_CodeRegistryIsComplete(t *testing.T) {
 	all := []string{
-		codeUnauthenticated, codeValidationFailed, codeNotFound, codePayloadTooLarge,
-		codeUnavailable, codePaused, codeInternalError, codeContractViolation,
+		codeUnauthenticated, codeValidationFailed, codeNotFound, codeMethodNotAllowed,
+		codePayloadTooLarge, codeUnavailable, codePaused, codeInternalError, codeContractViolation,
 	}
+	// codeMethodNotAllowed was added by fix-plan item 14, and THIS TEST is what noticed. The code
+	// went into the const block and both maps, `go test ./internal/api/` was run in isolation on the
+	// new route tests and passed, and the full-suite run then failed here with "codeStatus carries
+	// method_not_allowed, which is not in this test's declared list". That orphan branch is doing
+	// exactly the job its header describes — a new code must be declared in two places and the second
+	// one is a test, so adding a code cannot be a silent act. Worth recording because the same run
+	// also shows why per-package isolation is not a substitute for the full suite.
 	for _, c := range all {
 		status, ok := codeStatus[c]
 		if !ok {
@@ -403,6 +410,11 @@ func TestErrorEnvelope_CodesSharedWithTheSendersMatchByteForByte(t *testing.T) {
 		"not_found":         codeNotFound,
 		"internal_error":    codeInternalError,
 		"paused":            codePaused, // added 2026-08-05 — see the header note
+		// added 2026-08-06 (fix-plan item 14). Before that, M1 answered a wrong verb with ServeMux's
+		// plain-text 405 — the code did not exist here at all, which is why the header's list of
+		// "codes only the senders carry" named it. Transcribed from both senders'
+		// services/control/internal/platformapi/errors.go, same stated limit as the rest.
+		"method_not_allowed": codeMethodNotAllowed,
 	}
 	for want, got := range senderSpellings {
 		if got != want {
@@ -416,11 +428,12 @@ func TestErrorEnvelope_CodesSharedWithTheSendersMatchByteForByte(t *testing.T) {
 	// vocabulary is for — and would do it silently, since the switch arm they share would still
 	// match. The senders' values are transcribed, with the same stated limit as the spellings above.
 	senderStatuses := map[string]int{
-		"unauthenticated":   401,
-		"validation_failed": 400,
-		"not_found":         404,
-		"internal_error":    500,
-		"paused":            503,
+		"unauthenticated":    401,
+		"validation_failed":  400,
+		"not_found":          404,
+		"internal_error":     500,
+		"paused":             503,
+		"method_not_allowed": 405,
 	}
 	for code, want := range senderStatuses {
 		got, ok := codeStatus[code]

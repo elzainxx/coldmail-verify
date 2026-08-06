@@ -64,22 +64,37 @@ import (
 // below exists to replace, so the fix was to add the code to that test, not only to correct the
 // prose here.
 //
+// `method_not_allowed` JOINED THAT SHARED SET ON 2026-08-06 (fix-plan item 14), and the paragraph
+// below used to list it among the codes only the senders carry. That was true and is a second
+// instance of the same lesson `paused` taught two days earlier: a comment enumerating what a module
+// does NOT have goes stale the moment someone adds it, and nothing fails. Both corrections were made
+// by adding the code to the cross-module test, not only by editing this prose — the test is the part
+// that cannot drift. Why it changed here: M1 answered a wrong verb with net/http.ServeMux's own
+// plain-text 405, which is not this package's envelope at all, so the code was genuinely absent
+// rather than merely unshared (module 3's audit D17, found here by adopting their route gate).
+//
 // The other three are M1-ONLY, and this is NOT "a subset plus one": payload_too_large, unavailable,
 // and contract_violation all describe conditions the senders have no equivalent of (a submission
 // cap, an unwired deployment, a Door-1 shape check). Equally, M1 does NOT carry
-// method_not_allowed / conflict / unprocessable / rate_limited, which the senders do. The
-// overlap is exact where it exists; the sets are deliberately different sizes, because the modules
-// genuinely fail in different ways and a shared code that meant something slightly different per
-// module would be worse than no shared code at all.
+// conflict / unprocessable / rate_limited, which the senders do. The overlap is exact where it
+// exists; the sets are deliberately different sizes, because the modules genuinely fail in different
+// ways and a shared code that meant something slightly different per module would be worse than no
+// shared code at all.
 //
 // The RUNG LADDERS themselves are NOT shared and are not required to be: M1's Rung 4 has two
 // sub-modes (reject / accept-and-defer) because its sync surface has nowhere to defer to, while the
 // senders' four-rung ladder separates "stop sending" from "stop accepting" because theirs does. Only
 // the wire code and its status are contractual across modules.
 const (
-	codeUnauthenticated   = "unauthenticated"    // 401
-	codeValidationFailed  = "validation_failed"  // 400
-	codeNotFound          = "not_found"          // 404
+	codeUnauthenticated  = "unauthenticated"   // 401
+	codeValidationFailed = "validation_failed" // 400
+	codeNotFound         = "not_found"         // 404
+	// codeMethodNotAllowed JOINED THE SHARED SET on 2026-08-06 (fix-plan item 14). The comment below
+	// used to list it among the codes "the senders carry and M1 does not" — accurate then, because M1
+	// answered a wrong verb with net/http.ServeMux's own plain-text 405: no code, no request_id, not
+	// this package's envelope at all. That is module 3's audit D17 defect, present here and found the
+	// same way — by adopting the senders' route gate rather than by reading the code.
+	codeMethodNotAllowed  = "method_not_allowed" // 405 — a real path, a verb it does not serve
 	codePayloadTooLarge   = "payload_too_large"  // 413
 	codeUnavailable       = "unavailable"        // 503 — this deployment is not wired (no DB/pepper)
 	codePaused            = "paused"             // 503 — an operator pulled kill-switch Rung 4
@@ -97,9 +112,15 @@ const (
 
 // fixedMessages — the ONLY sentences that reach a caller. One per code, curated, no interpolation.
 var fixedMessages = map[string]string{
-	codeUnauthenticated:   "Missing or invalid credentials.",
-	codeValidationFailed:  "One or more fields are invalid.",
-	codeNotFound:          "The requested resource was not found.",
+	codeUnauthenticated:  "Missing or invalid credentials.",
+	codeValidationFailed: "One or more fields are invalid.",
+	codeNotFound:         "The requested resource was not found.",
+	// Byte-identical to BOTH senders' sentence for this code (checked in their
+	// services/control/internal/platformapi/errors.go, not assumed). `message` is not contractual the
+	// way `code` and the status are — a client must never parse it — but where three modules answer
+	// the same condition there is no reason for three sentences, and a user pasting one into a support
+	// ticket should not make the module guessable from wording alone.
+	codeMethodNotAllowed:  "This method is not allowed on this path.",
 	codePayloadTooLarge:   "The request is larger than this endpoint accepts.",
 	codeUnavailable:       "The service is not ready to serve this request.",
 	codePaused:            "The service is paused by an operator.",
@@ -113,6 +134,7 @@ var codeStatus = map[string]int{
 	codeUnauthenticated:   http.StatusUnauthorized,
 	codeValidationFailed:  http.StatusBadRequest,
 	codeNotFound:          http.StatusNotFound,
+	codeMethodNotAllowed:  http.StatusMethodNotAllowed,
 	codePayloadTooLarge:   http.StatusRequestEntityTooLarge,
 	codeUnavailable:       http.StatusServiceUnavailable,
 	codePaused:            http.StatusServiceUnavailable,

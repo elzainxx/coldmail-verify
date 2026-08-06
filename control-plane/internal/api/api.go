@@ -16,7 +16,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/coldmail-verify/control-plane/internal/config"
@@ -149,17 +151,112 @@ func (s *Server) WithBulk(b BulkSubmitter, j JobReader, maxAddrs int) *Server {
 	return s
 }
 
+// Route is one served endpoint: the ServeMux pattern and the handler behind it.
+//
+// WHY A SLICE AND NOT SIX mux.HandleFunc CALLS (fix-plan item 14). The senders gate served-set ==
+// documented-set in CI; M1 had no such gate, so a route could be added, removed, or renamed with
+// nothing but a human noticing that Docs no longer matched. Go's ServeMux cannot be asked which
+// patterns it holds, so the alternative was a check that GREPS this file for `mux.HandleFunc(` —
+// and a source-scanning check narrower than the property it guards is a defect shape this project
+// has already hit (a config-consumption gate satisfied by a TODO naming the key). Declaring the
+// table makes the served set the COMPILER'S view: Routes() is what Handler() serves, by
+// construction, because Handler() is a loop over it. The gate reads the same slice the server runs,
+// which is the same reason the test-execution gate reads `go test -list` instead of a literal.
+//
+// WHAT ENFORCES THE ABOVE (routes_contract_test.go, all four run on every `go test`):
+//
+//   - TestRoutes_ServedSetMatchesTheDocumentedSet — Routes() vs the Docs/api-contract.md table, in
+//     BOTH directions. Adding a route here without documenting it fails; documenting one that is not
+//     served fails too.
+//   - TestRoutes_HandlerServesExactlyTheRouteTable — every pattern dispatches, and unclaimed paths
+//     get the envelope's 404.
+//   - TestRoutes_WrongVerbIsTheEnvelopeNotServeMuxsPlainText — 30 wrong-verb combinations, derived
+//     from this slice, all in the envelope with a correct Allow.
+//   - TestRoutes_HandlerIsALoopOverRoutes — the structural half: exactly three mux.HandleFunc
+//     registrations in this package. A fourth means a route bypassed this slice, which the three
+//     tests above CANNOT see (verified: B83 left them green while this one went red).
+type Route struct {
+	// Pattern is the Go 1.22+ ServeMux pattern, METHOD first: "GET /v1/jobs/{id}".
+	Pattern string
+	handler http.HandlerFunc
+}
+
+// Method returns the verb half of the pattern ("GET"), Path the rest ("/v1/jobs/{id}").
+func (r Route) Method() string { m, _, _ := strings.Cut(r.Pattern, " "); return m }
+
+// Path returns the path half of the pattern, wildcards included.
+func (r Route) Path() string { _, p, _ := strings.Cut(r.Pattern, " "); return p }
+
+// Routes is the SERVED SURFACE — the single source of truth for what this module answers.
+// Handler() serves exactly these and nothing else.
+func (s *Server) Routes() []Route {
+	return []Route{
+		{"POST /v1/verify", s.handleVerify},
+		// P5 bulk (§7): the async submission → handle → progress → results lifecycle. These are the
+		// bulk-PII surface — auth REQUIRES a per-caller key (PN-13); the legacy static token is rejected.
+		{"POST /v1/verify/bulk", s.handleBulkSubmit},
+		{"GET /v1/jobs/{id}", s.handleJobStatus},
+		{"GET /v1/jobs/{id}/results", s.handleJobResults},
+		{"GET /healthz", s.handleHealthz},
+		{"GET /readyz", s.handleReadyz},
+	}
+}
+
 // Handler builds the mux. Kept explicit (stdlib) — no framework dependency.
+//
+// THE 405/404 FALLBACKS ARE THIS MODULE'S, NOT ServeMux's (fix-plan item 14 / module 3's audit D17,
+// found here while adopting the senders' route gate). Measured on this tree before the fix:
+//
+//	GET    /v1/verify -> 405 text/plain "Method Not Allowed\n"   (no code, no request_id)
+//	GET    /v1/nope   -> 404 text/plain "404 page not found\n"
+//
+// Item 18 unified 26 hand-rolled error sites into one coded envelope with a correlatable
+// request_id — and could not see these two, because they never reach a handler. So a client doing
+// body.error.code on any non-2xx nil-deref'd on every wrong verb and every typo'd path, and there
+// was no id to grep. Registering "/" and per-path method fallbacks routes both through the same
+// writeErr as everything else.
+//
+// The fallbacks are derived from Routes(), never hand-listed: the allowed-methods set per path comes
+// from the table, so a new route gets a correct Allow header with no second list to keep in step.
+// The pattern "/" is ServeMux's least-specific match, so it catches only what no real route claimed.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/verify", s.handleVerify)
-	// P5 bulk (§7): the async submission → handle → progress → results lifecycle. These are the
-	// bulk-PII surface — auth REQUIRES a per-caller key (PN-13); the legacy static token is rejected.
-	mux.HandleFunc("POST /v1/verify/bulk", s.handleBulkSubmit)
-	mux.HandleFunc("GET /v1/jobs/{id}", s.handleJobStatus)
-	mux.HandleFunc("GET /v1/jobs/{id}/results", s.handleJobResults)
-	mux.HandleFunc("GET /healthz", s.handleHealthz)
-	mux.HandleFunc("GET /readyz", s.handleReadyz)
+
+	// Which verbs each path serves, from the route table itself.
+	byPath := map[string][]string{}
+	for _, rt := range s.Routes() {
+		mux.HandleFunc(rt.Pattern, rt.handler)
+		byPath[rt.Path()] = append(byPath[rt.Path()], rt.Method())
+	}
+
+	// A real path with a verb it does not serve: 405 + Allow, in the envelope.
+	//
+	// Registered as a METHOD-LESS pattern per path, which ServeMux treats as less specific than any
+	// method-qualified one, so this is reached only for the verbs the table does not claim. GET also
+	// implies HEAD in ServeMux, and Allow reports that, matching what the mux will actually answer.
+	for path, methods := range byPath {
+		allow := append([]string(nil), methods...)
+		for _, m := range methods {
+			if m == http.MethodGet {
+				allow = append(allow, http.MethodHead)
+			}
+		}
+		sort.Strings(allow)
+		allowHdr := strings.Join(allow, ", ")
+		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+			// Allow is set BEFORE writeErr, since writeErr writes the status line.
+			w.Header().Set("Allow", allowHdr)
+			writeErr(w, codeMethodNotAllowed,
+				"wrong verb "+r.Method+" on "+r.URL.Path+" (served: "+allowHdr+")")
+		})
+	}
+
+	// Anything else: 404 in the envelope, with the SAME code and message a real-but-absent resource
+	// gets. An unknown path and a job owned by someone else must be indistinguishable (D1 tenancy),
+	// and that only holds if this fallback does not announce itself as a routing miss.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		writeErr(w, codeNotFound, "no route for "+r.Method+" "+r.URL.Path)
+	})
 	return mux
 }
 
