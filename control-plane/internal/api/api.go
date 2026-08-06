@@ -553,9 +553,30 @@ func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
 	// Rebuild each result as the Door-1 verdict object. The stored VerificationRow → verdict.Response
 	// mapping is the same shape /v1/verify returns (status/reason/confidence/recommendation/flags/
 	// signals). We do NOT expose work-item internals (lease, attempt, plaintext) — §7.4/§7.6.
+	//
+	// FIX-PLAN ITEM 14, M1's OWN GAP. §7.4 says a bulk result is BYTE-IDENTICAL to a sync verdict, and
+	// the sync path at line ~328 refuses to emit one that fails Valid(). This path did not check at
+	// all: verdictFromRow coerced a missing api_version to "v1" and shipped whatever else the row held.
+	// So the two halves of the same promise had different enforcement, and the weaker half was the one
+	// serving PII-bearing stored rows. Now BOTH refuse. The check is here rather than inside
+	// verdictFromRow because that function returns a value, not an error, and the useful thing to do on
+	// a bad row is fail the PAGE with a coded 500 — a caller must not receive a page that silently
+	// omitted the rows that were off-contract, which is what per-row skipping would do.
 	results := make([]verdict.Response, 0, len(rows))
 	for _, row := range rows {
-		results = append(results, verdictFromRow(row.Verdict))
+		v := verdictFromRow(row.Verdict)
+		if !v.Valid() {
+			// Same code as the sync path's Door-1 refusal, for the same reason: this is not generic
+			// internal noise, it means a STORED row cannot be served on contract. Unlike the sync case
+			// this one is genuinely reachable — api_version is `text NOT NULL` with no CHECK
+			// (0001_verifications.sql:41), and vocabulary/confidence are equally unconstrained at the
+			// column level, so a row written by an older build or a future /v2 is a real input here.
+			// The internal detail names the job, never the row's contents (two-vocabulary rule).
+			writeErr(w, codeContractViolation,
+				"a stored verification row failed Valid() — it cannot be served as an on-contract verdict")
+			return
+		}
+		results = append(results, v)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"job_id":      jobID,
@@ -710,6 +731,14 @@ func (s *Server) authenticate(r *http.Request, requirePerCaller bool) (callerID,
 //     latency, node) belongs to each attempt, not the job-level result envelope.
 //
 // Flags/Signals/Status/Reason/Confidence/Recommendation are the settled verdict verbatim.
+//
+// api_version is passed through VERBATIM, and that is a fix-plan item 14 change, not an oversight.
+// It previously read `firstNonEmpty(row.APIVersion, "v1")`, which INVENTED a version for any row that
+// did not carry one — the exact failure item 14 exists to remove, stated as "refuse rather than emit a
+// version you cannot vouch for". The coercion was worse than a missing check because it was
+// self-concealing: it guaranteed the field always looked right, so the caller's Valid() could never
+// see the one thing it needed to see. A row with an empty api_version now fails Valid() at the call
+// site and the page returns a coded 500 instead of a verdict wearing a version nobody stored.
 func verdictFromRow(row store.VerificationRow) verdict.Response {
 	flags := row.Flags
 	if flags == nil {
@@ -721,7 +750,7 @@ func verdictFromRow(row store.VerificationRow) verdict.Response {
 	}
 	policy := row.PolicyKey
 	return verdict.Response{
-		APIVersion:     firstNonEmpty(row.APIVersion, "v1"),
+		APIVersion:     row.APIVersion,
 		Status:         vocab.Status(row.Status),
 		Reason:         vocab.Reason(row.Reason),
 		Confidence:     row.Confidence,
@@ -735,12 +764,10 @@ func verdictFromRow(row store.VerificationRow) verdict.Response {
 	}
 }
 
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
-}
+// firstNonEmpty was DELETED with the api_version coercion above, deliberately rather than left in
+// place. It had exactly one caller, and a helper whose only purpose was to invent a default is a
+// standing invitation to re-introduce the defect at the next field that looks empty. (internal/smtp
+// has its own unrelated copy, still used, for an SMTP transcript field where a fallback IS correct.)
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")

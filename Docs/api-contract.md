@@ -49,6 +49,49 @@ Every route this module serves. `{id}` is a ServeMux wildcard.
 **The `/v1` prefix is LOCKED** (build-plan §1.1, URI-path versioning). A breaking change means
 `/v2`, never an in-place edit — which is the same rule `verdict.APIVersion` enforces on the body.
 
+### `api_version` is DERIVED and never invented (fix-plan item 14, M1's own half)
+
+Item 14's property, identical in all three modules: **declare the version once, derive what you
+publish from it, and refuse rather than emit a version you cannot vouch for.** M1 declares it once as
+`verdict.APIVersion` and enforces it with `verdict.Response.Valid()`, which every writer calls before
+the write. Both senders derive theirs from the served route table instead; the property is the same,
+the mechanism differs per module.
+
+**The gap this closed, found by adopting the senders' gate rather than by reading the code.** §7.4
+promises a bulk result is byte-identical to a sync verdict. The sync path honoured that —
+`handleVerify` refuses a response failing `Valid()` (`api.go:328`, `contract_violation`). The bulk
+results path did **not check at all**, and `verdictFromRow` coerced a missing `api_version` to `"v1"`:
+
+```go
+APIVersion: firstNonEmpty(row.APIVersion, "v1"),   // REMOVED
+```
+
+So the two halves of one promise had different enforcement, and the weaker half was the one serving
+stored, PII-adjacent rows. The coercion was worse than a missing check because it was
+**self-concealing**: it guaranteed the field always looked right, so no caller-side check could ever
+observe it missing. `firstNonEmpty` was deleted along with it — a helper whose only purpose is to
+invent a default invites re-introducing the defect at the next field that looks empty.
+
+**The bad row is reachable, not hypothetical.** `migrations/0001_verifications.sql:41` declares
+`api_version text NOT NULL` with **no CHECK**, and status/reason/recommendation/confidence are
+likewise unconstrained at the column level. An older build, a partially-applied migration, or a
+future `/v2` writer each produce a row this surface must refuse.
+
+**What a caller sees.** `GET /v1/jobs/{id}/results` answers `contract_violation` (500) if **any** row
+on the page fails `Valid()`, and ships no partial page. Failing the page is deliberate: filtering the
+bad rows out would look friendlier and be silent data loss — a page that quietly omits rows is
+indistinguishable from one whose omitted rows were never submitted, and `next_cursor` still advances,
+so the caller has no field to detect it by. Tenancy still short-circuits first: a job that is absent
+or another caller's is `not_found` before the page is read, so the refusal code cannot become a
+cross-tenant oracle.
+
+Held by `control-plane/internal/api/job_results_contract_test.go` (8 tests), each break-verified:
+B106 restored the coercion (only the empty-version cases went red, proving the other four control the
+missing `Valid()` call independently), B107 deleted the `Valid()` branch (all five refusal cases red,
+positive control green), and B109 replaced the page refusal with a per-row skip plus an
+all-rows-bad check — which left every single-row case green and only
+`TestJobResults_ARefusedRowFailsTheWholePage` red, which is that test's whole reason for existing.
+
 ### Not served, deliberately
 
 - **No `/metrics`.** `internal/metrics` computes block/unknown/cache rates and latency percentiles
