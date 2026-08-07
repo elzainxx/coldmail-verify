@@ -151,8 +151,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0   # docs-updated needs history to diff against the base
+      # The base ref is passed EXPLICITLY, which puts the gate in RANGE mode and is what makes CI the
+      # enforcement point for committed work. It also matters that this argument is present: without
+      # it, and with no origin/main in the checkout, the gate judges only uncommitted work — and CI
+      # has none. That is the N2 fix's boundary, and check-docs-updated-selftest case 10 fails if the
+      # commit-range path is ever disarmed.
       - name: docs-updated staleness gate
         run: bash scripts/check-docs-updated.sh "${{ github.event.pull_request.base.sha || 'HEAD~1' }}"
+      - name: docs-updated SELF-TEST (the paired control)
+        run: bash scripts/check-docs-updated-selftest.sh
       - name: config-reference freshness
         run: bash scripts/check-config-reference-fresh.sh
       # The META-GATE: it checks that this workflow's own test DISCOVERY still holds, and that every

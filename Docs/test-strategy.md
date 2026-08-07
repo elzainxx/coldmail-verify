@@ -98,7 +98,16 @@ Per PROJECT_RULES.md §7, every change runs (see [`../.github/workflows/ci.yml`]
 5. **no credential reaches a log line** — boot the real binary with canary secrets and scan the log
    (`scripts/check-no-secret-leak.sh`)
 6. **docs-updated staleness check** — a behavior change without a doc/ADR touch fails
-   (`scripts/check-docs-updated.sh`)
+   (`scripts/check-docs-updated.sh`, plus its paired self-test
+   `scripts/check-docs-updated-selftest.sh`). The self-test is not optional decoration: this gate
+   reported `ok (code_changed=true docs_changed=true)` for weeks on changes it exists to reject,
+   because its verdict came from a UNION of the previous commit's diff and the working tree — the
+   range supplied `docs_changed`, the tree supplied `code_changed`, and no single change ever had to
+   satisfy the rule. Two further holes were measured while confirming that one: untracked files were
+   invisible to `git diff` (a brand-new behaviour file could not be seen at all), and an unresolvable
+   base ref degraded to an empty diff, which this gate reports as success. Cases 2, 3 and 11 of the
+   self-test are those three measurements; case 10 fails if the fix ever disarms CI's commit-range
+   enforcement.
 7. **config-reference freshness** — regenerate and diff; drift fails
    (`scripts/check-config-reference-fresh.sh`)
 8. **test discovery intact + every gate wired** — the meta-gate: no second `go.mod`, no build-tagged
