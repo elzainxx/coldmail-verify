@@ -44,6 +44,14 @@
 #  10. the sanctioned-skip package absent entirely              -> FAIL, not a silent no-op. If the
 #      tier-2 boundary vanishes, every skip in the module silently becomes a tier-1 failure; that must
 #      be a loud configuration error rather than a behaviour change nobody chose.
+#  11. a package with NO test files                             -> ok. The one legitimate zero, and the
+#      case that keeps the floor below from being a blanket `declared==0 → fail` (this tree has two
+#      such packages).
+#  12. a test file that is present but does NOT COMPILE          -> FAIL. Same declared=0 arithmetic as
+#      the host fault that exposed all this; the floor must distinguish "nothing to declare" from
+#      "could not declare".
+#  13. a module where NOTHING declares a test                    -> FAIL, never "ok — 0 of 0 EXECUTED".
+#      The per-package floor cannot fire if the loop never runs.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$HERE"
@@ -287,7 +295,81 @@ reset_fixture
 rm -rf "$TMP/control-plane/test"
 expect "the sanctioned-skip package missing fails loudly" 1 "sanctioned-skip package"
 
+# --- THE NONZERO FLOOR (cases 11-13, added 2026-08-07) --------------------------------------------
+#
+# WHY THESE EXIST, AND WHY THIS FILE COULD NOT SEE THE DEFECT. Cases 1-10 above all stage fixtures
+# that DECLARE tests, so every one of them exercises the gate on a nonzero roster. The gate's central
+# comparison is `executed < declared`, and on the single input declared=0 that comparison is
+# VACUOUSLY TRUE-BY-EQUALITY: 0 of 0 matches, nothing looks missing, and the old `continue` at the top
+# of the loop removed the package from the report entirely. So the one input the gate cannot judge was
+# also the one input this control never supplied.
+#
+# It was found the way these things get found — by accident, from the OUTSIDE. Run on the Windows host,
+# cases 2, 3 and 9 returned `exit 0, want 1`, and the failure output showed the just-appended fixture
+# package ABSENT from the gate's report while a DIFFERENT package was named. The host had silently not
+# executed the freshly-linked test binary (not a hang, not an error — no run), so `go test -list`
+# returned nothing and the package fell through the `continue`. Three of this file's ten branches
+# passed by omission, which is exactly the class of defect it was written to catch, occurring inside
+# its own fixtures.
+#
+# NOTE ON WHAT CASE 12 CAN AND CANNOT STAGE. A selftest cannot reproduce "the toolchain refused to run
+# the binary" on a WORKING toolchain — that is an environment fault, not a fixture. What it CAN stage
+# is the other producer of the same declared=0 signal: a test file that does not COMPILE. Both reach
+# the identical arithmetic, so the floor is what is being tested, not the cause. Recorded plainly
+# because a case that claims to reproduce the host fault would be a false claim about its own reach.
+#
+# 11. THE ACCEPT CASE, and it is load-bearing. A package with NO test files legitimately declares
+#     zero, and this tree has two of them (cmd/control-plane, internal/verdict). Without this case a
+#     floor implemented as a blanket `declared -eq 0 → fail` would pass cases 12 and 13 and be wrong
+#     on the real tree — the floor would go from missing a defect to inventing one.
+reset_fixture
+mkdir -p "$TMP/control-plane/internal/notests"
+cat >"$TMP/control-plane/internal/notests/lib.go" <<'EOF'
+package notests
+
+func Add(a, b int) int { return a + b }
+EOF
+expect "a package with NO test files is a legitimate zero" 0 \
+  "test-execution: ok [STRICT]" "no test files — nothing to execute"
+
+# 12. A test file that is PRESENT but does not compile. Same declared=0 arithmetic as the host fault,
+#     and the case that proves the floor distinguishes "nothing to declare" from "could not declare".
+reset_fixture
+mkdir -p "$TMP/control-plane/internal/broken"
+cat >"$TMP/control-plane/internal/broken/lib.go" <<'EOF'
+package broken
+
+func Add(a, b int) int { return a + b }
+EOF
+cat >"$TMP/control-plane/internal/broken/lib_test.go" <<'EOF'
+package broken
+
+import "testing"
+
+func TestBroken(t *testing.T) { thisSymbolDoesNotExist() }
+EOF
+expect "a test file that does not COMPILE fails the floor" 1 \
+  "DECLARED ZERO TESTS" "test files present"
+
+# 13. THE MODULE-WIDE FLOOR. The per-package floor cannot fire if the loop never runs, so a package set
+#     in which nothing declares a test must fail rather than print "ok — 0 of 0 declared EXECUTED".
+#     Staged by removing every test file: `go list ./...` still succeeds and still returns packages, so
+#     none of the gate's earlier guards fire and this is genuinely the last line of defence.
+reset_fixture
+rm -f "$TMP/control-plane/internal/thing/thing_test.go" "$TMP/control-plane/test/gaps/gaps_test.go"
+cat >"$TMP/control-plane/test/gaps/lib.go" <<'EOF'
+package gaps
+EOF
+cat >"$TMP/control-plane/internal/thing/lib.go" <<'EOF'
+package thing
+EOF
+expect "a module that declares ZERO tests in total fails" 1 \
+  "the module declared ZERO tests in total"
+
 if [[ "$fail" -eq 0 ]]; then
-  echo "test-execution-selftest: ok — all 10 branches of $GATE behave as documented"
+  echo "test-execution-selftest: ok — all 13 branches of $GATE behave as documented"
+  echo "  Cases 11-13 pin the NONZERO FLOOR, added after three of cases 1-10 passed BY OMISSION on a"
+  echo "  host that silently did not execute freshly-built test binaries: declared=0 made the gate's"
+  echo "  own comparison vacuously true and dropped the package from its report."
 fi
 exit "$fail"

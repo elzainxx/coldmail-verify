@@ -214,9 +214,69 @@ shortfalls=""
 unvouched=""
 
 for pkg in $PKGS; do
-  declared="$(go test -list '.*' "$pkg" 2>/dev/null | grep -cE '^(Test|Example|Fuzz)' || true)"
+  # THE NONZERO FLOOR. `declared=0` used to `continue` here with the comment "no test files, or a
+  # package that failed to build — the test step reports the latter", and that disjunction was the
+  # hole: the two cases are indistinguishable at this line, only ONE of them is legitimate, and the
+  # arithmetic below compares 0 against 0, MATCHES, and reports success having checked nothing.
+  #
+  # MEASURED, not theorised (2026-08-07). On this Windows host a freshly-linked Go test binary is
+  # sometimes silently never executed — not a hang, not an error, just no run. `go test -list` then
+  # reports nothing, `declared` is 0, this `continue` fired, and the package vanished from the gate's
+  # own output. Three branches of the paired self-test passed that way: `exit 0, want 1`, with the
+  # fixture package the case had just written absent from the report entirely. A gate that computes
+  # "declared vs executed" cannot see a shortfall in a roster it never obtained, and 0-of-0 is the
+  # one input on which its central comparison is vacuously true.
+  #
+  # So `declared` is now DERIVED TWICE and the two are cross-checked: the roster from `go test -list`,
+  # and — independently — whether the package HAS test files at all, from `go list`. Zero declarations
+  # is legitimate if and only if there are no test files to declare from. Measured on this tree: two
+  # packages are legitimately zero (cmd/control-plane, internal/verdict — 0 TestGoFiles, 0
+  # XTestGoFiles), so a blanket floor would false-fail; and a package with a test file that does not
+  # COMPILE also yields declared=0 (probed: `go test -list` exits 1 and prints "[build failed]",
+  # which the old `2>/dev/null` discarded). The stderr is captured now rather than swallowed, because
+  # "the test step reports the latter" is an assumption about a DIFFERENT step, and this gate's whole
+  # premise is that a green from another step is not evidence.
+  # `if ! x="$(cmd)"` rather than `x="$(cmd)"; rc=$?`. The second form is what this fix was FIRST
+  # written as, and under `set -e` (line 47) a failing command substitution in a plain assignment
+  # ABORTS THE SCRIPT before the next statement runs — so `list_rc` was never read and the whole floor
+  # below was unreachable on the one input it exists to catch. Break-verified: selftest case 12 caught
+  # it as "exit code was right (1) but the message did not contain: DECLARED ZERO TESTS", with EMPTY
+  # gate output. An unreachable guard whose absence still produced the right exit code is this
+  # project's own failure family — the assertion on the MESSAGE, not just the status, is what saw it.
+  list_rc=0
+  if ! list_out="$(go test -list '.*' "$pkg" 2>&1)"; then
+    list_rc=1
+  fi
+  declared="$(printf '%s\n' "$list_out" | grep -cE '^(Test|Example|Fuzz)' || true)"
+  testfiles="$(go list -f '{{len .TestGoFiles}} {{len .XTestGoFiles}}' "$pkg" 2>/dev/null || echo "? ?")"
+  has_tests=1
+  [[ "$testfiles" == "0 0" ]] && has_tests=0
+
   if [[ "$declared" -eq 0 ]]; then
-    continue   # no test files, or a package that failed to build — the test step reports the latter
+    if [[ "$has_tests" -eq 0 && "$list_rc" -eq 0 ]]; then
+      # The ONLY sanctioned zero: nothing to declare, and the roster command agreed.
+      echo "  $pkg: declared=0 (no test files — nothing to execute)"
+      continue
+    fi
+    echo "FAIL (test-execution): $pkg DECLARED ZERO TESTS, and that is not legitimate here."
+    echo "  test files present: TestGoFiles+XTestGoFiles = $testfiles; 'go test -list' exit = $list_rc"
+    echo "  A zero roster is the one input this gate's declared-vs-executed comparison cannot judge:"
+    echo "  0 executed of 0 declared MATCHES, so without this floor the package is skipped silently"
+    echo "  and the gate reports success. Either the test binary did not build, or it did not RUN."
+    echo "  'go test -list' said:"
+    printf '%s\n' "$list_out" | sed 's/^/      /'
+    fail=1
+    continue
+  fi
+
+  # A nonzero roster obtained from a command that FAILED is not trustworthy either.
+  if [[ "$list_rc" -ne 0 ]]; then
+    echo "FAIL (test-execution): $pkg — 'go test -list' exited $list_rc while still naming $declared test(s)."
+    echo "  A partially-obtained roster understates 'declared', which makes any shortfall below it"
+    echo "  arithmetically invisible. Fix the build/list failure; do not proceed on a partial roster."
+    printf '%s\n' "$list_out" | sed 's/^/      /'
+    fail=1
+    continue
   fi
 
   out="$(go test -count=1 -v "$pkg" 2>&1 || true)"
@@ -262,6 +322,27 @@ for pkg in $PKGS; do
   fi
   echo "  $pkg: declared=$declared executed=$executed skipped=$skipped"
 done
+
+# --- THE MODULE-WIDE FLOOR ------------------------------------------------------------------------
+# The per-package floor above cannot fire if the LOOP NEVER RUNS. `go list ./...` succeeding with an
+# empty or test-less package set would leave every total at 0, every comparison vacuously true, and
+# this gate printing "ok [STRICT] — 0 of 0 declared test(s) EXECUTED" with exit 0. That sentence is
+# grammatically a success and semantically nothing, and it is precisely the shape the paired self-test
+# case 1 ("a conformant skeleton passes") would still accept, because its fixture DOES declare tests.
+#
+# The floor is deliberately a bare "more than zero" rather than a pinned number. A hardcoded count
+# (`-lt 392`) would be a second roster to maintain by hand — the exposure check-test-enumeration.sh
+# rule 1 exists to prevent, reintroduced inside this gate. The property worth asserting is not "this
+# module has 392 tests"; it is "this gate actually measured something".
+if [[ "$total_declared" -eq 0 ]]; then
+  echo "FAIL (test-execution): the module declared ZERO tests in total."
+  echo "  'go list ./...' returned $(printf '%s\n' $PKGS | grep -c . || true) package(s) and not one"
+  echo "  declared a test, so every comparison this gate makes was vacuously satisfied and it was"
+  echo "  about to report success. A gate that measured nothing must never be green: 0 executed of 0"
+  echo "  declared MATCHES. Causes seen in practice: a toolchain that does not execute freshly-built"
+  echo "  test binaries (see the per-package floor above), a wrong MODULE_DIR, or a build break."
+  fail=1
+fi
 
 if [[ -n "$shortfalls" ]]; then
   echo "FAIL (test-execution): declared tests did not execute:"
