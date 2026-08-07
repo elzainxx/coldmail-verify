@@ -106,16 +106,73 @@ func scrubDSNError(err error, dsn string) error {
 	}
 }
 
+// structuralDSNKeys are the libpq/pgx connection keywords whose VALUES cannot be a credential: they
+// name where the database is and how to reach it, not who you are.
+//
+// THE DIRECTION OF RISK IS DELIBERATE, AND IT IS THE OPPOSITE OF A BLOCKLIST'S. A key MISSING from
+// this map is over-collection: its value becomes a candidate, and the cost is one error message
+// losing its detail. A key WRONGLY PRESENT is under-collection, and that costs a credential — so this
+// map contains only keywords whose libpq semantics make a secret value impossible. `password` and
+// `sslpassword` are deliberately absent, as is every keyword nobody has enumerated: an unknown key is
+// treated as possibly-secret, which is what keeps the check DERIVED rather than a blocklist of
+// known-bad spellings, and what TestDSNRedaction_UnknownKeywordShapeStillCaught pins.
+//
+// `sslkey` and `passfile` are PATHS here, not secrets — the file they point at holds the secret, and
+// a path in a log line is infrastructure detail, not a credential.
+var structuralDSNKeys = map[string]bool{
+	"host": true, "hostaddr": true, "port": true, "dbname": true, "database": true,
+	"user": true, "application_name": true, "fallback_application_name": true,
+	"connect_timeout": true, "client_encoding": true, "options": true, "service": true,
+	"sslmode": true, "sslrootcert": true, "sslcert": true, "sslcrl": true, "sslcrldir": true,
+	"sslsni": true, "sslnegotiation": true, "sslkey": true, "passfile": true,
+	"target_session_attrs": true, "load_balance_hosts": true, "channel_binding": true,
+	"require_auth": true, "gssencmode": true, "gsslib": true, "krbsrvname": true,
+	"replication": true, "tcp_user_timeout": true,
+	"keepalives": true, "keepalives_idle": true, "keepalives_interval": true, "keepalives_count": true,
+	"pool_max_conns": true, "pool_min_conns": true, "pool_min_idle_conns": true,
+	"pool_max_conn_lifetime": true, "pool_max_conn_lifetime_jitter": true,
+	"pool_max_conn_idle_time": true, "pool_health_check_period": true,
+	"search_path": true,
+}
+
+// knownDSNKey is structuralDSNKeys plus the credential-bearing keywords. Used only to recognise a
+// BARE token as a key awaiting its spaced '=' rather than as a value.
+func knownDSNKey(s string) bool {
+	return structuralDSNKeys[s] || s == "password" || s == "sslpassword"
+}
+
 // dsnCredentialCandidates extracts every substring of the DSN that could be a secret, in every
 // spelling pgx/libpq honors: URL userinfo password, URL query values, and keyword/value values
-// (quoted, unquoted, spaced or not). It over-collects on purpose — a false positive costs one
-// error message its detail; a false negative costs a credential.
+// (quoted, unquoted, spaced or not).
+//
+// THE SPACED SPELLING IS WHY THIS TRACKS STATE, AND WHY structuralDSNKeys EXISTS. libpq honors
+// `password = SECRET`, which splits into three whitespace fields, so the value arrives detached from
+// its key. The first version handled that by collecting EVERY bare token and every `key=value` value
+// regardless of the key — and MEASURED at the pin on 2026-08-07, that suppressed FIVE of six
+// credential-free messages an operator actually needs:
+//
+//	dsn                                        message                                    suppressed by
+//	host=h port=5432 dbname=verifydb …         dial tcp 10.0.0.5:5432: connection refused  "5432"
+//	host=db.internal port=5432 dbname=…        lookup db.internal: no such host            "db.internal"
+//	host=h … user=cp_runtime password = …      password authentication failed for "…"      "cp_runtime"
+//	host=h … sslmode=require                   failed to configure TLS (sslmode invalid)   "require"
+//	host=h port=5432 dbname=verifydb user=…    failed to connect to `user=… database=…`     "verifydb"
+//
+// Every one of those is replaced by "connection string rejected by the driver", so an operator whose
+// database is simply DOWN is told their connection string is malformed. Blinding every operator to
+// every database error is not a conservative failure — it is a different outage.
+// TestDSNRedaction_ShortValuesDoNotSuppressEverything did not catch it because its fixture is the URL
+// form `?sslmode=disable`, whose one extractable value never appears in a connect error; the KV form
+// a real deployment uses is what breaks. TestDSNRedaction_StructuralValuesNeverSuppress is the
+// generalisation, with both spellings, so a fixture that happens to dodge the bug cannot pass for the
+// property again.
 func dsnCredentialCandidates(dsn string) []string {
 	var out []string
 	add := func(s string) {
 		// Under 4 chars a "secret" is more likely to appear incidentally in a driver message
-		// ("db", "5432") than to be a real credential, and matching it would suppress every
-		// error. Real credentials are longer than this.
+		// ("db", "u") than to be a real credential, and matching it would suppress every error. This
+		// is a backstop BENEATH structuralDSNKeys, not the primary defence — 5432 is four characters,
+		// which is exactly why the length floor alone was not enough.
 		if len(s) >= 4 {
 			out = append(out, s)
 		}
@@ -124,26 +181,57 @@ func dsnCredentialCandidates(dsn string) []string {
 		if pw, ok := u.User.Password(); ok {
 			add(pw)
 		}
-		for _, vs := range u.Query() {
+		for k, vs := range u.Query() {
+			if structuralDSNKeys[k] {
+				continue
+			}
 			for _, v := range vs {
 				add(v)
 			}
 		}
 	}
-	// Keyword/value form, and the query-ish tail of a URL that failed to parse. Split on whitespace
-	// and '&', then take everything after the first '=' — so `password = SECRET` (spaces around the
-	// '=' are honored) and `password='pass word'` both surrender their value.
+	// Keyword/value form, and the query-ish tail of a URL that failed to parse.
+	var pendingKey string
 	for _, field := range strings.FieldsFunc(dsn, func(r rune) bool {
 		return r == ' ' || r == '\t' || r == '\n' || r == '&' || r == '?'
 	}) {
 		if eq := strings.IndexByte(field, '='); eq >= 0 {
-			add(strings.Trim(strings.TrimSpace(field[eq+1:]), `'"`))
-		} else {
-			// A bare token: either a key awaiting its spaced '=', or the VALUE of a spaced pair
-			// (`password = SECRET` splits into three fields). We cannot tell which without tracking
-			// state, so treat every bare token as a candidate — over-collection, per the note above.
-			add(strings.Trim(field, `'"`))
+			key := strings.TrimSpace(field[:eq])
+			val := strings.Trim(strings.TrimSpace(field[eq+1:]), `'"`)
+			if key == "" {
+				// A lone "=" or "=VALUE": the key was the previous field (`password = SECRET`).
+				key = pendingKey
+			}
+			if val == "" {
+				// `password =` — the value is the next field.
+				pendingKey = key
+				continue
+			}
+			pendingKey = ""
+			if !structuralDSNKeys[key] {
+				add(val)
+			}
+			continue
 		}
+		token := strings.Trim(field, `'"`)
+		if pendingKey != "" {
+			// The detached value of a spaced pair.
+			if !structuralDSNKeys[pendingKey] {
+				add(token)
+			}
+			pendingKey = ""
+			continue
+		}
+		if knownDSNKey(token) {
+			// A key awaiting its spaced '='. Not a value, so not a candidate — and collecting it would
+			// make the literal word "password" a candidate, which suppresses every
+			// `password authentication failed for user "u"` the server ever returns.
+			pendingKey = token
+			continue
+		}
+		// An unrecognised bare token: possibly the value of a spaced pair for a keyword this code has
+		// never heard of. Over-collect, per the risk direction documented on structuralDSNKeys.
+		add(token)
 	}
 	return out
 }

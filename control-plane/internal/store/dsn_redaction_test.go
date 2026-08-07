@@ -217,6 +217,130 @@ func TestDSNRedaction_ShortValuesDoNotSuppressEverything(t *testing.T) {
 	}
 }
 
+// TestDSNRedaction_StructuralValuesNeverSuppress is the GENERALISATION of the test above, and it was
+// added because the test above did not catch a live defect (MEASURED 2026-08-07, at this pin).
+//
+// dsnCredentialCandidates originally collected every bare token and every `key=value` value with no
+// regard for the key, so `port=5432` yielded the candidate "5432" — four characters, so the length
+// floor let it through. Measured against the messages an operator actually gets, FIVE of six
+// credential-free errors were replaced by the suppression notice: connection-refused (via "5432"),
+// no-such-host (via "db.internal"), `password authentication failed for user "cp_runtime"` (via
+// "cp_runtime"), `sslmode is invalid` (via "require"), and `user=… database=…` (via "verifydb"). An
+// operator whose database is simply DOWN was told their connection string was malformed.
+//
+// WHY ShortValuesDoNotSuppressEverything MISSED IT — and this is the lesson, not the bug. Its fixture
+// is `postgres://ci@127.0.0.1:1/db?sslmode=disable`: URL form, and its ONE extractable value
+// ("disable") never appears in a connect error. It therefore passed while the KV form — which is what
+// a real deployment's TM_DATABASE_URL uses — suppressed everything. A counterweight test is only as
+// strong as the shape of its fixture, so this one takes every structural keyword in BOTH spellings.
+// `port = 5432` must behave exactly like `port=5432`, which is the whole point of tracking the pending
+// key across fields.
+func TestDSNRedaction_StructuralValuesNeverSuppress(t *testing.T) {
+	cases := map[string]struct{ dsn, msg string }{
+		"port, kv unspaced": {
+			dsn: "host=db.internal port=5432 dbname=verifydb user=cp_runtime",
+			msg: "dial tcp 10.0.0.5:5432: connect: connection refused",
+		},
+		"port, kv SPACED": {
+			dsn: "host = db.internal port = 5432 dbname = verifydb",
+			msg: "dial tcp 10.0.0.5:5432: connect: connection refused",
+		},
+		"hostname": {
+			dsn: "host=db.internal port=5432 dbname=verifydb",
+			msg: "hostname resolving error: lookup db.internal: no such host",
+		},
+		"dbname and user": {
+			dsn: "host=h port=5432 dbname=verifydb user=cp_runtime",
+			msg: "failed to connect to `user=cp_runtime database=verifydb`: server closed the connection",
+		},
+		"url form, structural only": {
+			dsn: "postgres://cp_runtime@db.internal:5432/verifydb?sslmode=require&connect_timeout=10",
+			msg: "dial tcp 10.0.0.5:5432: i/o timeout",
+		},
+
+		// THE THREE CASES BELOW ARE THE ONLY PROOF THAT THE URL-QUERY BRANCH SKIPS STRUCTURAL KEYS,
+		// AND THE CASE ABOVE IS NOT. Mutation testing caught that: deleting `if structuralDSNKeys[k]
+		// { continue }` from the url.Query() loop left this whole file green, because no query fixture
+		// carried a structural value that could suppress anything. `sslmode=require` yields "require",
+		// which never appears in an i/o-timeout message, and `connect_timeout=10` / `pool_max_conns=10`
+		// yield "10", which is under the 4-char floor and so is never a candidate at all. That is the
+		// same weakness that let ShortValuesDoNotSuppressEverything pass over the original defect for
+		// as long as it existed: the fixture's SHAPE dodged the bug. A case only controls this branch if
+		// its structural value is >=4 chars AND appears in the message AND the message does not also
+		// echo the whole DSN (the containment check would suppress it regardless, masking the branch).
+		//
+		// These three messages are not invented. They are the verbatim errors pgx v5.10.0 returned for
+		// these DSNs, measured 2026-08-07; the third's path spelling is the same shape as the measured
+		// `unable to read CA file: open /etc/ssl/verify-ca.pem` with the whole-DSN prefix pgx puts on
+		// parse failures removed, so that the candidate check is the only thing under test.
+		"url query host= override, unix socket path in message": {
+			dsn: "postgres://cp_runtime@127.0.0.1:5432/verifydb?host=/var/run/postgresql",
+			msg: "failed to connect to `user=cp_runtime database=verifydb`: /var/run/postgresql/.s.PGSQL.5432 " +
+				"(/var/run/postgresql): dial error: dial unix /var/run/postgresql/.s.PGSQL.5432: connect: no such file or directory",
+		},
+		"url query dbname and user, both echoed": {
+			dsn: "postgres://127.0.0.1:5432/?dbname=verifydb&user=cp_runtime&connect_timeout=2",
+			msg: "failed to connect to `user=cp_runtime database=verifydb`: 127.0.0.1:5432 (127.0.0.1): " +
+				"dial error: dial tcp 127.0.0.1:5432: connect: connection refused",
+		},
+		"url query sslrootcert, path in message": {
+			dsn: "postgres://cp_runtime@db.internal:5432/verifydb?sslmode=verify-full&sslrootcert=/etc/ssl/verify-ca.pem",
+			msg: "failed to configure TLS (unable to read CA file: open /etc/ssl/verify-ca.pem: no such file or directory)",
+		},
+		"the literal word password in a SERVER error": {
+			// `password` as a bare key must not itself become a candidate, or every authentication
+			// failure — the error most likely to be a real misconfiguration — is suppressed.
+			dsn: "host=h port=5432 dbname=verifydb user=cp_runtime password = " + dsnCanary,
+			msg: `failed to connect: password authentication failed for user "cp_runtime"`,
+		},
+		"sslmode value": {
+			dsn: "host=h port=5432 dbname=verifydb sslmode=require",
+			msg: "failed to configure TLS (sslmode is invalid: require)",
+		},
+		"pool option value": {
+			dsn: "postgres://u@h:5432/verifydb?pool_max_conns=10",
+			msg: "cannot parse pool_max_conns: too many connections (10)",
+		},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := scrubDSNError(errors.New(c.msg), c.dsn)
+			if got.Error() != c.msg {
+				t.Fatalf("a message with NO credential in it was suppressed. An operator loses this\n"+
+					"diagnosis entirely, which for connection-refused means every DB outage looks like a\n"+
+					"DSN syntax error:\n  dsn:      %s\n  raw:      %s\n  scrubbed: %s", c.dsn, c.msg, got.Error())
+			}
+		})
+	}
+}
+
+// TestDSNRedaction_SpacedCredentialStillCaught is the counterweight to the test above: making
+// structural values safe must NOT have made the spaced credential spelling safe too. This is the exact
+// shape pgx itself fails to redact, so it is the one that most needs to survive the fix — and without
+// it, "stop suppressing structural values" could be satisfied by simply collecting nothing.
+func TestDSNRedaction_SpacedCredentialStillCaught(t *testing.T) {
+	for name, dsn := range map[string]string{
+		"password spaced":            "host=h port=5432 dbname=d password = " + dsnCanary,
+		"sslpassword spaced":         "host=h port=5432 dbname=d sslpassword = " + dsnCanary,
+		"password spaced, quoted":    "host=h port=5432 dbname=d password = '" + dsnCanary + "'",
+		"password unspaced":          "host=h port=5432 dbname=d password=" + dsnCanary,
+		"unknown keyword, spaced":    "host=h port=5432 dbname=d future_secret = " + dsnCanary,
+		"unknown keyword, unspaced":  "host=h port=5432 dbname=d future_secret=" + dsnCanary,
+		"url query unknown keyword":  "postgres://u@h:5432/d?future_secret=" + dsnCanary,
+		"url query sslpassword only": "postgres://u@h:5432/d?sslpassword=" + dsnCanary,
+	} {
+		t.Run(name, func(t *testing.T) {
+			// A message naming the credential WITHOUT quoting the whole DSN, so only the derived
+			// candidate check can catch it.
+			got := scrubDSNError(errors.New("driver said: "+dsnCanary), dsn)
+			if strings.Contains(got.Error(), dsnCanary) {
+				t.Fatalf("the credential was NOT caught for %q — making structural values safe must not\n"+
+					"make credentials safe. dsn: %s\n  got: %s", name, dsn, got.Error())
+			}
+		})
+	}
+}
+
 // TestDSNRedaction_CandidateCheckStandsAlone tests scrubDSNError DIRECTLY, with synthetic messages
 // that contain ONLY a credential and never the whole DSN.
 //
