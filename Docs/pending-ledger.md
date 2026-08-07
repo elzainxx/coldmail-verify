@@ -103,4 +103,63 @@ Every `PENDING-REAL-*` marker sits inside an "honest ledger / never faked green"
 
 ---
 
+## 6. Chunk-4 disposition (2026-08-07) — all 20 rows are GENUINELY UNCLOSABLE here, and that is a claim about the rows, not about effort
+
+The Chunk-4 close required emptying every open-decision ledger in all four repos — rule it, close it,
+or move it to future-work — and listing anything genuinely unclosable. **This ledger is the honest
+"unclosable" list. All twenty rows stay open, and none is a deferral of a decision.**
+
+**The test applied to every row, one at a time.** A row may stay only if its blocker is a *real-world
+input that does not exist yet* — not a design question, not unfinished work, not a judgement call
+someone has been avoiding. A row that could be closed by *deciding* something must be decided now; a
+row that could be closed by *building* something belongs in a future-work register with a fix shape.
+**Every one of these twenty fails to be closable for the first reason.** Grouped by what is actually
+missing:
+
+| What is missing | Rows | Count |
+|---|---|---|
+| **A physical machine with a specific network identity** — outbound :25, settable PTR, a known-clean IP, a second IP | B1, B2, B3, B4, B5, B7 | 6 |
+| **A counterparty whose behaviour cannot be simulated** — a real greylisting MX, a real vendor's accuracy on the residue, real DSN fidelity | B6, V1, S4 | 3 |
+| **A commercial or legal act** — a signed DPA, a vendor selection | V2, V3 | 2 |
+| **Another system that does not exist yet** — the sender emitting authenticated outcomes, and the contract it commits to | S2, S3 | 2 |
+| **Accumulated time or observed volume** — you cannot fast-forward a reputation or a calibration corpus | S1, S5, V4, V5 | 4 |
+| **Infrastructure that only exists at go-live** — a real snapshot to restore; a Linux host to bind a real port | B8, H1, H2 | 3 |
+
+**Twenty rows, twenty blockers, zero of them a decision.** That distribution is itself the finding: the
+un-mockable surface of this system is almost entirely *reputation, counterparties, and elapsed time* —
+the three things a test harness structurally cannot manufacture. §4's chain is the same observation
+stated per phase.
+
+**What was checked, so this is a verification and not a re-assertion.** Each row was read for the three
+disqualifying shapes rather than taken on trust:
+
+1. **Is it actually a disguised open decision?** Two came close and both were checked and cleared.
+   `V4` (budget ceiling *values*) reads like an unmade decision, but the mechanism consumes the dials
+   and UNSET means not-enforced — the *policy* is ruled ("start conservative, raise from observed
+   volume, never loosen blind"); only the numbers wait on volume that does not exist. `V5` is
+   explicitly labelled operational-not-built, which is a correct disposition, not a pending one.
+2. **Is it a build task hiding in a deferral?** One is, and it is already flagged loudly rather than
+   quietly parked: the `port25_open` write path (§1's note) has **no** operator/env/admin command to
+   flip it true, with a `cp_admin` break-glass `UPDATE` as the interim and the DR-3 admin-audit
+   egress-test-writer as its permanent home. That is real work with a known shape, recorded in
+   `go-live-runbook.md` Stage 1 step 1 and Stage 0 — **it is not one of the twenty**, and it is named
+   here again so the distinction stays visible: the *reputation behaviour* is unclosable, the *plumbing
+   to record it* is merely unbuilt.
+3. **Does the row still describe the tree?** `B8` did not, and was corrected on 2026-08-07 — see the
+   blockquote under §1. It read as one recovery option among several; measurement (0 `.down.sql`, no
+   version-tracking table, `cp_runtime` holding no `UPDATE`/`DELETE` on the LOG) showed restore is the
+   *only* recovery path the LOG has. **A row that understates its own load-bearing weight is the same
+   failure class as a stale assertion:** it stays technically true while quietly ceasing to mean what a
+   reader takes it to mean.
+
+**What this section does not claim.** It does not claim the twenty are un-closable *forever* — each has
+a named unblocking event and (where one can exist) an exact command to run when it lands. It does not
+claim they are low-risk: `V1`, `S1`, and `S4` are precisely where this system's *accuracy* will first be
+measured against reality, and §2's claim discipline exists because "we have coverage" must never harden
+into "we are accurate." And it does not claim the *count* is stable — a new phase can add a
+twenty-first. What it claims is narrower and checkable: **as of 2026-08-07 nothing in this ledger is
+waiting on a decision, a judgement, or a piece of unwritten code inside this repo.**
+
+---
+
 *Companion docs: the ordered go-live path is [`go-live-runbook.md`](go-live-runbook.md); the arc's honest close is [`arc-closing.md`](arc-closing.md).*
