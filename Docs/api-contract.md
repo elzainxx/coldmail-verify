@@ -49,6 +49,41 @@ Every route this module serves. `{id}` is a ServeMux wildcard.
 **The `/v1` prefix is LOCKED** (build-plan §1.1, URI-path versioning). A breaking change means
 `/v2`, never an in-place edit — which is the same rule `verdict.APIVersion` enforces on the body.
 
+### Auth: the `Bearer` scheme is MANDATORY (fix-plan item 15b)
+
+Every authenticated route takes `Authorization: Bearer <token>`. **A scheme-less bare token is
+rejected**, on both credential kinds (per-caller key and the legacy static token) and both surfaces
+(sync and bulk). The scheme name is matched **case-insensitively**, so `bearer`/`BEARER` are accepted:
+RFC 9110 §11.1 makes the scheme case-insensitive, both senders already do this
+(`platformapi/auth.go`, `adminapi/auth.go` — `strings.EqualFold`), and M1 alone used to reject a
+conforming request. Closing the laxness and fixing that strictness were the same edit; a
+case-sensitive fix would have swapped one cross-module divergence for another.
+
+The ruling predates the fix twice: **OQ-13**, resolved "Bearer for `/v1/verify`"
+(`phase-1-foundations-spec.md:774`), and `canonical-module-contract.md` §1 clause 1, which names M1's
+laxness explicitly. No ADR is owed.
+
+**Why it survived a full audit — the comment, not the code.** The old `trimBearer` fell through to
+`return h` for any header lacking the prefix, justified by "the front door is bearer; the verifier-node
+token is raw — kept distinct per P1 §3.5.4". Both halves are true and they describe **opposite
+directions**: the raw node token is sent *outbound* by `internal/node/*_client.go` and validated by the
+Ruby node (`wrapper/app.rb:176`, stock `AccessToken`). It never arrives at this package. `trimBearer`
+had exactly one caller — the inbound front door — so the clause mentioning raw tokens did no work at
+the only site that ran. A comment explaining why a laxness is acceptable is the most durable kind of
+laxness.
+
+A scheme-less credential now lands on the same path as no credential at all: `presented == ""` skips
+the per-caller branch and fails the static branch's non-empty guard, so it is `unauthenticated` (401)
+rather than being compared against a secret, and the envelope never echoes what was presented.
+
+Held by `control-plane/internal/api/bearer_scheme_test.go` (3 tests, 9 cases), break-verified with two
+splits that are **not** what they read like: **B110** (fallback restored) reddens only the two *bare*
+cases — `Basic …` and `Bearer…`-no-space stay green, because with the fallback they are rejected for
+the wrong reason (compared whole, matching no secret); **B111** (case-sensitive `CutPrefix`, the naive
+fix) reddens *only* the case test while every refusal case stays green; **B112** (always return `""`)
+reddens both authenticating tests; **B113** (static compare neutered) reddens only the positive
+control, which is what makes it non-redundant with the case test.
+
 ### `api_version` is DERIVED and never invented (fix-plan item 14, M1's own half)
 
 Item 14's property, identical in all three modules: **declare the version once, derive what you

@@ -689,7 +689,11 @@ func readyWord(ok bool) string {
 // callers can still submit; their jobs get a NULL owner and are then readable by nobody over the
 // API (see GetJob). That is the fail-safe direction — "" must never be read as "match anything".
 func (s *Server) authenticate(r *http.Request, requirePerCaller bool) (callerID, ownerUserID string, ok bool) {
-	presented := trimBearer(r.Header.Get("Authorization"))
+	// bearerToken returns "" unless the scheme is present (fix-plan item 15b, canonical contract §1
+	// clause 1). A scheme-less credential therefore lands on the SAME path as no credential at all:
+	// presented == "" skips branch (1) and fails branch (2)'s non-empty guard, so it is 401 on every
+	// authenticated route rather than being compared against a secret.
+	presented := bearerToken(r.Header.Get("Authorization"))
 
 	// (1) Per-caller key (PN-13). A presented bearer that matches an active key wins on any endpoint.
 	if s.callerAuth != nil && presented != "" {
