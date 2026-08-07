@@ -25,6 +25,13 @@ The pool/queue/audit LOGIC is built and tested against simulated nodes + a contr
 | B7 | **2-box reputation isolation in the wild** | per-`verifier_ip` isolation proven on seeded LOG rows; node #2 = +1 config line proven (`TestLoad_NodeTwoIsConfigOnly_GAP31`) | needs two real IPs | one dirty real IP vs one clean real IP (P4 acceptance criterion 6) | two real boxes |
 | B8 | **DR-4 backup/PITR restore drill** | the at-rest ciphertext + transactional purge, proven locally (dump-the-row → ciphertext only) | a real snapshot restore-into-isolation | a real backup/PITR restore-into-isolation drill at go-live (ADR-0002 compliance test) | go-live infra |
 
+> **B8 got more load-bearing on 2026-08-07, so it should stop being the easy deferral.** The schema is
+> forward-only with **no** down-migration mechanism (measured: 0 `.down.sql`, no version-tracking
+> table), and the LOG tables are append-only with `cp_runtime` holding no `UPDATE`/`DELETE` on them by
+> construction. So for the LOG, **restore IS the only recovery path there is** — B8 is not one recovery
+> option among several, it is the whole set. Detail and the go-live checklist:
+> [`go-live-rollback-posture.md`](go-live-rollback-posture.md).
+
 **The one wiring gap (flagged loudly, not silently deferred):** `port25_open` can currently only be *set false* (boot registration); there is **no operator/env/admin command to flip it true** in a running system (no `TM_NODE_PORT25_OPEN`). Interim is a `cp_admin` break-glass `UPDATE nodes SET port25_open=true WHERE id=…`; its permanent home is the **DR-3 admin-audit-log egress-test-writer** (phase-3-cutover-runbook §4 step 1). Recorded in [`go-live-runbook.md`](go-live-runbook.md) Stage 1 step 1 + Stage 0 (DR-3) — the highest-value parallel build.
 
 ---

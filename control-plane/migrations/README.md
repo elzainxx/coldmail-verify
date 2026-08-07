@@ -143,6 +143,19 @@ All migrations use `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS`
 
 **Deliberate omission.** The LOG is append-only and becomes historical data; you **never roll back the LOG** (§3.2.1). If a migration fails, fix forward. Down-migrations are not provided because they would violate the append-only contract.
 
+**The scope of that reason, stated exactly (added 2026-08-07).** It explains the **LOG**, and it does
+not reach two other things these files carry. (a) **Grants** — 15 `REVOKE`s across 8 migrations. All 15
+revoke privileges granted by their *own* migration (least-privilege hardening in the same file), so
+none silently strips a privilege an earlier migration relied on — verified statement by statement. (b)
+**Constraints** — `0008` and `0012` each `DROP CONSTRAINT IF EXISTS` and recreate a widened version;
+reverting the file leaves the widened constraint live, so the code believes a narrower invariant than
+the database enforces. Neither is append-only data, and neither has a reverse path. Also note what
+`git revert` does *not* do: it deletes the file and executes nothing, so a database that already ran
+the migration keeps the DDL while a fresh one built from the reverted tree does not — measured on
+`0013` (two columns + an index present in one, absent in the other), with no tracking table to
+distinguish them. The go-live consequences and the checklist are in
+[`../../Docs/go-live-rollback-posture.md`](../../Docs/go-live-rollback-posture.md).
+
 ---
 
 ## Adding Partitions (verification_raw)

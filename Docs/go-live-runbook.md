@@ -2,6 +2,8 @@
 
 **Date:** 2026-07-19 · **Status:** the single ordered go-live path for the whole system. The seven phases are built + fail-verified locally; this is the sequence that turns that machine on, safely, in order. **Every step is config/flag or an owner action — zero brain code changes** (the Door-5 payoff, GAP-21/31). Each stage is independently reversible.
 
+> **QUALIFIED 2026-08-07 — "independently reversible" is about FLAGS, and the migration layer is the exception.** Every stage below really is a config flip, and the vendor and feed layers really do turn off by unsetting a variable. But the schema is **forward-only with no down-migration mechanism at all** (measured: zero `.down.sql`, no tracking table), and `git revert` of a migration deletes the file without touching any database that already ran it — leaving one tree and two divergent schemas with nothing recording which is which. Read [`go-live-rollback-posture.md`](go-live-rollback-posture.md) **before the second environment exists**; its item 1 (adopt version tracking) is cheap now and an archaeology exercise later.
+
 **The order is safety-critical and the stages are gated:** you cannot meaningfully do Stage 2 (vendor) before Stage 1 (a real box) is earning verdicts, and Stage 3 (the outcome feed) needs a system that has been sending long enough to have outcomes — and a sender that does not yet exist. Do them in order.
 
 **Two kinds of gate appear below:** ⚙️ **code/config** (mechanical, in this repo) and 🔴 **owner/non-code** (procurement, legal, a product decision, or a cross-project deliverable). The owner gates are consolidated in §4 — several can and should be worked **in parallel** with the local build.
@@ -99,6 +101,7 @@ Any switch missing ⇒ the layer stays off. `TM_FALLBACK_MODE=off` (global-fallb
 | **The sender ("Feature 2")** | cross-project build | Stage 3 (outcome feed) | separate project |
 | **mTLS trust anchor + client cred** | ops/security | Stage 3 live auth | with the sender |
 | **OQ-P7-8 disclosure** | product | Stage 3 (platform terms) | ✅ decide anytime |
+| **Migration version tracking** | build (parallel) | nothing yet — it gates *cheaply fixing* the schema-divergence hazard | ✅ **do it before the SECOND environment exists** ([`go-live-rollback-posture.md`](go-live-rollback-posture.md) item 1) |
 
 **The parallel track:** LICENSE, host vetting, the DR-3 audit log, and the two disclosure decisions can all proceed **before or alongside** the code work — none needs the local build finished. The DR-3 audit log is called out repeatedly as the single highest-value parallel build (it also unblocks the `port25_open` flip).
 
