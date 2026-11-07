@@ -4,6 +4,19 @@
 
 > **QUALIFIED 2026-08-07 — "independently reversible" is about FLAGS, and the migration layer is the exception.** Every stage below really is a config flip, and the vendor and feed layers really do turn off by unsetting a variable. But the schema is **forward-only with no down-migration mechanism at all** (measured: zero `.down.sql`, no tracking table), and `git revert` of a migration deletes the file without touching any database that already ran it — leaving one tree and two divergent schemas with nothing recording which is which. Read [`go-live-rollback-posture.md`](go-live-rollback-posture.md) **before the second environment exists**; its item 1 (adopt version tracking) is cheap now and an archaeology exercise later.
 
+> **Status as of 2026-11-07 (after the post-audit fixes).** Two things changed that this runbook's original
+> author could not have known, and both are Stage 0 items below:
+> 1. **A date-triggered defect was found and fixed** — the raw-sidecar table `verification_raw` had partitions
+>    for 2026-07..09 only, so from 2026-10-01 every SMTP verdict write failed (SQLSTATE 23514). It was invisible
+>    until the suite was re-run three months later. **Migration `0014` + the maintenance loop
+>    ([ADR-0017](adr/ADR-0017-raw-partition-maintenance.md)) close it; `0014` must be applied before any real verdict is written.**
+> 2. **`govulncheck` is clean** on go1.26.10, `x/net` v0.62.0, `x/text` v0.43.0 (it was **not** before: 17 live-call-path
+>    advisories). The advisory database moves, so this is a *re-run before the pilot*, not a one-time tick.
+>
+> Unchanged: all **20** rows in [`pending-ledger.md`](pending-ledger.md) are real-world-gated (a real port-25 box, a
+> vendor, a sender) and genuinely unclosable here, and the control-plane is still **not packaged** (no Dockerfile or
+> compose file for it; fix-plan item 15).
+
 **The order is safety-critical and the stages are gated:** you cannot meaningfully do Stage 2 (vendor) before Stage 1 (a real box) is earning verdicts, and Stage 3 (the outcome feed) needs a system that has been sending long enough to have outcomes — and a sender that does not yet exist. Do them in order.
 
 **Two kinds of gate appear below:** ⚙️ **code/config** (mechanical, in this repo) and 🔴 **owner/non-code** (procurement, legal, a product decision, or a cross-project deliverable). The owner gates are consolidated in §4 — several can and should be worked **in parallel** with the local build.
@@ -18,6 +31,10 @@ Companion: the deferred-proof detail is in [`pending-ledger.md`](pending-ledger.
 
 🔴 **DR-3 admin-audit log (gates P3 go-live; buildable now, in parallel).** Before any real go-live, every manual control-plane action (node disable, global-fallback-kill, pause, shadow-mode promotion, budget change, breaker/brake confirm, privacy opt-out flip) must write to an **append-only admin-audit log with per-actor identity**, distinct from the verdict LOG (reusing the `node_audits`/`work_item_attempts` pattern). **Its first slice is the `port25_open` egress-test-writer** (see Stage 1 step 1) — the highest-value parallel build, and the thing that resolves the one known wiring gap.
 
+
+🔴 **Migration `0014` applied, and the partition headroom verified (ADR-0017).** Without it, every SMTP verdict write fails once the last hard-coded partition's month ends (it already has). Apply `control-plane/migrations/0014_raw_partition_maintenance.sql`, start the control-plane (it creates `TM_RAW_PARTITION_MONTHS_AHEAD` future months at startup and every `TM_RAW_PARTITION_MAINTAIN_INTERVAL_SECONDS`), then confirm: `SELECT relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent = 'verification_raw'::regclass ORDER BY 1;` lists the current month plus the configured number ahead. **Watch the log for `raw-partitions: maintenance FAILED`** — a failing loop has about `TM_RAW_PARTITION_MONTHS_AHEAD` months of warning before a write fails. Retention (`DROP PARTITION`) is still a manual `cp_admin` action. See [`OPERATIONS.md`](OPERATIONS.md) §8.
+
+🔴 **Re-run `govulncheck ./...` in `control-plane/` immediately before the pilot.** Clean on 2026-11-07; any live call path blocks. Use a `golang:1.26` image at or above the patched floor (1.26.10 on that date) — CI's `setup-go '1.26'` tracks the latest patch, a pinned local image does not.
 ---
 
 ## Stage 1 — the real box (SMTP verification goes live)
