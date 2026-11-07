@@ -560,4 +560,15 @@ These are surfaced for owner attention — **flagged, not resolved.** None rewri
 
 ---
 
+## 9. POST-ARC FIX — `verification_raw` partition maintenance (ADR-0017)
+
+> Added 2026-11-07. The raw sidecar is RANGE-partitioned by month and a row dated in an uncovered month is rejected (SQLSTATE 23514); migration 0001 created only 2026-07..09, so every SMTP verdict write failed from 2026-10-01. These two dials drive the loop that keeps future months created. They are consumed by `cmd/control-plane/main.go` (`startRawPartitionMaintenance`).
+
+| name | type | default | effect if wrong | blast radius | source |
+|---|---|---|---|---|---|
+| **TM_RAW_PARTITION_MONTHS_AHEAD** | dial | 3 (range 1..120; 0 and >120 rejected at startup) | too low → little warning if the loop fails (the cliff is `months_ahead` months away from the last good tick); 0 → the cliff at every month boundary (rejected at startup); too high → empty partitions, harmless | brain-wide (SMTP verdict writes) | ADR-0017 |
+| **TM_RAW_PARTITION_MAINTAIN_INTERVAL_SECONDS** | dial | 21600 (6h; must be ≥ 1) | too long → slower recovery after an outage; the call is idempotent and cheap, so shorter is safe | brain-wide (partition headroom) | ADR-0017 |
+
+---
+
 *End of config manifest. Companion analysis of what these knobs imply for safety and rollout is in the four companion docs.*

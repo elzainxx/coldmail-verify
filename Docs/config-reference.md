@@ -15,9 +15,9 @@ Regenerate on any manifest change; CI verifies this file is up to date
 |---|---|
 | secrets | 9 |
 | feature-flags | 149 |
-| dials | 123 |
+| dials | 125 |
 | other/uncategorized | 2 |
-| **total knobs** | **283** |
+| **total knobs** | **285** |
 
 > One-way doors are **not** dials: the frozen contracts (response shape, LOG, hashing,
 > vocabulary, never-fork) live in code (`control-plane/internal/{vocab,hash,verdict,store,router}`),
@@ -192,7 +192,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | TM_FLYWHEEL_GATE_ENABLED | `false` (OFF — fresh-system invariant) | P7 §4.6, DR-2 |
 | TM_FLYWHEEL_CALIBRATION_ENABLED | `false` (OFF — P1 baseline stands) | P7 §5.4, DR-2 |
 
-## Dials (123)
+## Dials (125)
 
 | knob | default / state | source |
 |---|---|---|
@@ -319,6 +319,8 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | TM_RECAL_BRAKE_BUCKET_PCT | 50 (must be 1..99) | P7 §6.4 |
 | TM_RECAL_BRAKE_MIN_BUCKETS | 20 (denominator floor) | P7 §6.4 |
 | TM_RECAL_CADENCE_SECONDS | 86400 (daily rollup, OQ-P7-7) | P7 §5, OQ-P7-7 |
+| TM_RAW_PARTITION_MONTHS_AHEAD | 3 (range 1..120; 0 and >120 rejected at startup) | ADR-0017 |
+| TM_RAW_PARTITION_MAINTAIN_INTERVAL_SECONDS | 21600 (6h; must be ≥ 1) | ADR-0017 |
 
 ## Other / uncategorized (2)
 

@@ -115,6 +115,11 @@ func buildAPI(appCtx context.Context, cfg config.Config, sec *secrets.Secrets, h
 		log.Printf("verify: store unavailable (%v) — /v1/verify will report not-ready (503)", err)
 		return srv
 	}
+	// ADR-0017: keep verification_raw's future partitions created. Started HERE — as soon as the pool is
+	// up and before any of the early returns below — because the partition cliff is a property of the
+	// DATABASE, not of whether this process wired /v1/verify: a control-plane that came up half-wired
+	// must still heal the table. Rides appCtx, so it lives for the process and stops on shutdown.
+	startRawPartitionMaintenance(appCtx, cfg, pg)
 	def, err := policy.ColdEmailDefinition()
 	if err != nil {
 		log.Printf("verify: policy load failed (%v) — /v1/verify not wired", err)
@@ -496,6 +501,15 @@ func buildSMTP(ctx, appCtx context.Context, cfg config.Config, sec *secrets.Secr
 // trigger is recommend-only by default (DR-2) — zero live block-rate mutation until an owner
 // promotes A1 to auto. The client is the live HTTPClient (real /v1/audit + /healthcheck); on the
 // local build with no real box the audit fetch fails → no promotion (honest, harden-toward-unknown).
+// startRawPartitionMaintenance launches the ADR-0017 loop on ctx. It takes the narrow
+// store.RawPartitioner (not *store.PG) so the wiring is testable without a database, and it reads N and
+// the cadence from the config dials — nothing is hardcoded here.
+func startRawPartitionMaintenance(ctx context.Context, cfg config.Config, rp store.RawPartitioner) {
+	log.Printf("raw-partitions: maintenance starting (keep %d future month(s); re-check every %s)",
+		cfg.Dials.RawPartitionMonthsAhead, cfg.RawPartitionMaintainInterval())
+	go store.RunRawPartitionMaintenance(ctx, rp, cfg.Dials.RawPartitionMonthsAhead, cfg.RawPartitionMaintainInterval(), log.Printf)
+}
+
 func startHealthWatcher(ctx context.Context, cfg config.Config, client *node.HTTPClient, pg *store.PG, tokenFor func(string) string) {
 	pool := make([]health.WatchedNode, 0, len(cfg.Nodes))
 	for _, nd := range cfg.Nodes {

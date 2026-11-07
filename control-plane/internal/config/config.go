@@ -261,6 +261,13 @@ type Dials struct {
 	RecalBrakeBucketPct      int // §6.4 fraction of touched buckets at max-step across the window → hold; 50 (must be 1..99)
 	RecalBrakeMinBuckets     int // §6.4 denominator floor before the brake may trip (systemic-layer GAP-27); 20
 	RecalCadenceSeconds      int // §5/OQ-P7-7 recalibration cadence (batch, not per-outcome); 86400 (daily)
+
+	// ADR-0017 — verification_raw partition maintenance. The raw sidecar is RANGE-partitioned by month and
+	// a row dated in an uncovered month is rejected (SQLSTATE 23514); these two dials are what keep that
+	// from happening. MonthsAhead MUST be >= 1 (0 would re-create the cliff at every month boundary, so the
+	// loader rejects it) and <= 120 (the migration's own bound).
+	RawPartitionMonthsAhead             int // how many FUTURE months of partitions to keep created, beyond the current one; 3
+	RawPartitionMaintainIntervalSeconds int // how often the maintenance loop re-checks; 21600 (6h). Idempotent, so cheap.
 }
 
 // ── Policy / structural feature-flags (shape frozen, contents dial) ─────────────────
@@ -378,6 +385,11 @@ func (c Config) ExternalBreakerCooldown() time.Duration {
 func (c Config) HistoricalBounceTTL() time.Duration {
 	return time.Duration(c.Dials.HistoricalBounceTTLDays) * 24 * time.Hour
 }
+// RawPartitionMaintainInterval is the ADR-0017 maintenance-loop cadence as a duration.
+func (c Config) RawPartitionMaintainInterval() time.Duration {
+	return time.Duration(c.Dials.RawPartitionMaintainIntervalSeconds) * time.Second
+}
+
 func (c Config) RecalCadence() time.Duration {
 	return time.Duration(c.Dials.RecalCadenceSeconds) * time.Second
 }
@@ -551,6 +563,9 @@ func Defaults() Config {
 			RecalBrakeBucketPct:     50,  // §6.4 ≥50% of touched buckets at max-step across the window → hold
 			RecalBrakeMinBuckets:    20,  // §6.4 denominator floor (systemic-layer GAP-27)
 			RecalCadenceSeconds:     86400, // §5/OQ-P7-7 daily rollup (batch, not per-outcome)
+
+			RawPartitionMonthsAhead:             3,     // ADR-0017: three months of headroom; a failing loop has ~3 months of warning in its logs before any write fails
+			RawPartitionMaintainIntervalSeconds: 21600, // ADR-0017: 6h — the call is idempotent and cheap, so frequent is fine and shortens recovery after an outage
 		},
 		Policy: Policy{DefaultPolicyKey: "cold-email"},
 		Nodes:  nil, // node LIST, empty at P0. Door 5: a list even when length 0/1.
@@ -705,6 +720,10 @@ func Load(getenv func(string) string) (Config, error) {
 		{"TM_RECAL_BRAKE_BUCKET_PCT", &c.Dials.RecalBrakeBucketPct, false},
 		{"TM_RECAL_BRAKE_MIN_BUCKETS", &c.Dials.RecalBrakeMinBuckets, false},
 		{"TM_RECAL_CADENCE_SECONDS", &c.Dials.RecalCadenceSeconds, true},
+		// ADR-0017: verification_raw partition maintenance. Both must be > 0 (zero headroom IS the cliff;
+		// a zero interval would never re-check). MonthsAhead's upper bound is range-guarded in Validate.
+		{"TM_RAW_PARTITION_MONTHS_AHEAD", &c.Dials.RawPartitionMonthsAhead, false},
+		{"TM_RAW_PARTITION_MAINTAIN_INTERVAL_SECONDS", &c.Dials.RawPartitionMaintainIntervalSeconds, false},
 	} {
 		if v := getenv(d.env); v != "" {
 			n, err := strconv.Atoi(v)
@@ -799,6 +818,16 @@ func (c Config) Validate() error {
 		default:
 			return fmt.Errorf("config: invalid shadow-mode for %s: %q", name, m)
 		}
+	}
+	// ADR-0017: the headroom must be a real, bounded number. Checked here as well as in Load so a Config
+	// built any other way (tests, a future file source) cannot carry the cliff or an unbounded request
+	// past startup. 120 is the migration's own cap on ensure_verification_raw_partitions.
+	if c.Dials.RawPartitionMonthsAhead < 1 || c.Dials.RawPartitionMonthsAhead > 120 {
+		return fmt.Errorf("config: raw_partition_months_ahead (%d) must be in 1..120 (0 would re-create the partition cliff at every month boundary)",
+			c.Dials.RawPartitionMonthsAhead)
+	}
+	if c.Dials.RawPartitionMaintainIntervalSeconds < 1 {
+		return fmt.Errorf("config: raw_partition_maintain_interval_seconds (%d) must be >= 1", c.Dials.RawPartitionMaintainIntervalSeconds)
 	}
 	if c.Dials.RecommendationSend < c.Dials.RecommendationReview {
 		return fmt.Errorf("config: recommendation.send (%d) must be >= review (%d)",

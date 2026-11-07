@@ -294,3 +294,37 @@ that the brake did its job and a human decision is required.
 
 For the full ordered bring-up with every owner gate and verification command, work through
 [`go-live-runbook.md`](go-live-runbook.md).
+
+---
+
+## 8. Routine maintenance — `verification_raw` partitions
+
+`verification_raw` (the raw-engine-JSON sidecar of every SMTP verdict) is partitioned by month. **A row
+dated in a month with no partition is rejected** with `SQLSTATE 23514` ("no partition of relation
+`verification_raw` found for row"), and because that insert is atomic with the LOG row, **every SMTP
+verdict write fails.** Migration `0001` created only 2026-07..09; this is what keeps it from happening
+again ([ADR-0017](adr/ADR-0017-raw-partition-maintenance.md)).
+
+**What runs by itself.** The control-plane calls `ensure_verification_raw_partitions(n)` at startup and then
+every `TM_RAW_PARTITION_MAINTAIN_INTERVAL_SECONDS` (default 6 h), keeping the current month plus
+`TM_RAW_PARTITION_MONTHS_AHEAD` (default 3) future months. It is idempotent. Migration `0014` must be
+applied first: the runtime role gets the function from it and gains no other DDL.
+
+**What to watch.** One log line per failure, and it names the consequence:
+`raw-partitions: maintenance FAILED (...) — verification_raw will run out of partitions ...`. A failing
+loop has roughly `TM_RAW_PARTITION_MONTHS_AHEAD` months before any write fails, so this is a *fix this
+week* alert, not a page — unless the line appears together with `SQLSTATE 23514` write errors, in which
+case it is already a page. Created partitions log `raw-partitions: created N ...`.
+
+**If the cliff has already been hit** (writes failing with 23514): apply `0014` if it is not applied, then
+restart the control-plane (tick 0 creates the partitions within seconds of startup), or as `cp_admin` run
+`SELECT ensure_verification_raw_partitions_at(now(), 3);`. Verdicts whose write failed during the gap were not logged
+and callers should re-submit them (this document does not know what each caller received).
+
+**What does NOT run by itself: retention.** Dropping old partitions (`DROP PARTITION` after ~90 days,
+P1 §3.2.6) is still a manual `cp_admin` action. Nothing is dropped automatically.
+
+**A deployment whose database default time zone was not UTC when `0001` ran** should check that
+`verification_raw_2026_09` ends exactly at `2026-10-01 00:00:00+00` (`SELECT pg_get_expr(relpartbound, oid)
+FROM pg_class WHERE relname = 'verification_raw_2026_09'`) before trusting the first auto-created month;
+see the stated assumption in ADR-0017.

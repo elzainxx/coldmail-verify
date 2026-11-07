@@ -110,7 +110,8 @@ The prompt named four as outstanding. Each is surfaced with its blocking phase; 
 - [ ] Fork `truemail-rack`, pin the `truemail` gem, get the stock container hitting `/validate` locally (baseline).
 - [ ] Brain skeleton: token-auth front door, `/v1/verify` stub, node registry from config list, Strategy router, Supabase client.
 - [ ] Ship **one** policy (`cold-email`, cheapest-sufficient), structured as an open object so P4/P6/P7 keys slot in (OQ-25).
-- [ ] Retention plan for the LOG (biggest data grower) + `verification_raw` partition cadence.
+- [x] `verification_raw` partition **creation** is automated (ADR-0017, migration 0014; dial `TM_RAW_PARTITION_MONTHS_AHEAD`). Found 2026-11-07: until then only 2026-07..09 existed and every SMTP verdict write failed from 2026-10-01.
+- [ ] Retention plan for the LOG (biggest data grower) + `verification_raw` partition **drop** (retention). Creation is automated; `DROP PARTITION` after ~90 days is still a manual admin action.
 
 ---
 
