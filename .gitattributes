@@ -1,0 +1,18 @@
+# Line endings: LF in the working tree on EVERY platform, whatever anyone's core.autocrlf says.
+#
+# Why this file exists: git applies `clone -c core.autocrlf=...` to the TOP-LEVEL repository only, so a
+# `git clone --recurse-submodules` on a host with the common `core.autocrlf=true` checked every submodule
+# out with CRLF -- 13..21 shell scripts per repo. bash then reads a trailing \r as part of the line
+# ("bad interpreter", a value that no longer matches), gofmt reports every .go file as unformatted, and
+# the gate scripts that grep Docs/ and config files stop matching. The repos are developed and run
+# assuming LF, so they say so themselves rather than relying on each user's git config.
+* text=auto eol=lf
+*.sh text eol=lf
+
+# Files ALREADY STORED with CRLF (vendored upstream sources and frozen records): no conversion in
+# either direction, so their committed bytes never change. Do not widen this list to hide new CRLF.
+Docs/phase-3-readiness-assessment.md -text
+Docs/phase-4-readiness-assessment.md -text
+Docs/phase-5-readiness-assessment.md -text
+Docs/phase-6-readiness-assessment.md -text
+verifier-node/truemail-rack/** -text

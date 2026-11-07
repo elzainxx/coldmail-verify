@@ -172,6 +172,12 @@ Postgres CAS/lease/append semantics, so most logic is testable with zero externa
 > concurrent invocations. The reliable path is to compile a package's test binary and run it
 > directly: `go test -c -o /tmp/store.test.exe ./internal/store/ && /tmp/store.test.exe -test.v`.
 
+> **Line endings are forced to LF by `.gitattributes`** (added 2026-11-07), because `git clone -c core.autocrlf=false`
+> configures only the top-level repository: a `--recurse-submodules` clone of the parent repo on a host with
+> `core.autocrlf=true` used to check every submodule out with CRLF, which breaks the shell scripts and `gofmt`. You
+> no longer need to set anything. The vendored `verifier-node/truemail-rack/**` and four readiness docs are stored
+> with CRLF and are deliberately exempt (`-text`), so their committed bytes never change.
+
 ### Prerequisite on a TLS-interception host — refresh the proxy CA before every rebuild
 
 **Skip this on CI and on any host with no TLS-scanning AV/proxy.** It is a no-op there by design.
