@@ -1,0 +1,15 @@
+# Accepted gitleaks findings -- reviewed 2026-11-07 (publish-readiness secret sweep).
+#
+# EXACT FINGERPRINTS, deliberately -- not a path or rule ignore -- so a real secret added to this file
+# later is still caught. Format: <commit>:<file>:<rule>:<line>.
+#
+# All four are the same thing: the vendored UPSTREAM truemail-rack README (at commit d582ab4 it lived at
+# box/truemail-rack/README.md; it is now verifier-node/truemail-rack/README.md) contains the upstream
+# author's sample `rackup` / `curl` command lines, with placeholder UUID access tokens and the upstream
+# author's example domain (bestweb.com.ua). They are documentation, not credentials of this system: the
+# real node tokens are loaded from the environment (TM_NODE_TOKENS, see control-plane/config/secrets.example.env)
+# and never appear in the tree. The values were checked by pattern and context, not by contacting upstream.
+d582ab41eea5f47114c12934e456eb35d7d6bc7f:box/truemail-rack/README.md:generic-api-key:81
+d582ab41eea5f47114c12934e456eb35d7d6bc7f:box/truemail-rack/README.md:curl-auth-header:123
+d582ab41eea5f47114c12934e456eb35d7d6bc7f:box/truemail-rack/README.md:curl-auth-header:161
+d582ab41eea5f47114c12934e456eb35d7d6bc7f:box/truemail-rack/README.md:curl-auth-header:210
