@@ -53,3 +53,6 @@ Thumbs.db
 # Build / CI artifacts
 /artifacts/
 /.task-cache/
+
+# scratch dir of scripts/check-dns-search-domain.sh (removed on exit; ignored in case a run is killed)
+.dns-fixture-work/

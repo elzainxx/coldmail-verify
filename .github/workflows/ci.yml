@@ -126,6 +126,26 @@ jobs:
       - name: base-image-pinned SELF-TEST (the paired control)
         run: bash scripts/check-base-image-pinned-selftest.sh
 
+  # A SEPARATE job (ADR-0019). The control plane's DNS resolution must give the same answer on a host whose resolv.conf has a
+  # `search` domain as on one that has none: Go's resolver walks the search list and returns the LAST name's error, so a SERVFAIL
+  # for the user's domain used to be overwritten by the NXDOMAIN of the suffixed name, and our DNS outage was reported as
+  # `invalid / no_mx` — our failure stated as a fact about their address. The dev host has no search domain; a cloud VM does,
+  # which is the only reason this was ever possible to miss. Needs only Go and Docker (the DNS server is in the test binary).
+  dns-search-domain:
+    name: control-plane DNS (a SERVFAIL is unknown, never invalid — under a resolv.conf search domain)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: DNS tests pass inside a container whose resolv.conf has a search domain
+        run: bash scripts/check-dns-search-domain.sh
+      # Its PAIRED CONTROL: the same fixture against a build with name-rooting disabled must go RED on the SERVFAIL case, with the
+      # canary green. Keeps "this fixture reds without the fix" true on every run.
+      - name: dns-search-domain SELF-TEST (the fixture goes RED when name-rooting is disabled)
+        run: bash scripts/check-dns-search-domain-selftest.sh
+
   verifier-node-rspec:
     name: verifier-node (RSpec — stock + /v1 wrapper)
     runs-on: ubuntu-latest

@@ -124,6 +124,17 @@ Per PROJECT_RULES.md §7, every change runs (see [`../.github/workflows/ci.yml`]
     did. It surfaced the first time a real GitHub runner built the image from scratch (ADR-0018). The
     self-test builds a throwaway tree that trips each assertion in turn and checks the exit code AND the
     message, so the gate cannot be quietly broken into accepting everything.
+11. **a DNS failure of OURS is `unknown`, never `invalid`, on a host with a resolver search domain** — the layers'
+    DNS tests run against a real-protocol, in-process DNS server inside a container whose `resolv.conf` carries a
+    `search` line (`scripts/check-dns-search-domain.sh`, plus its paired self-test
+    `scripts/check-dns-search-domain-selftest.sh`). The defect: Go's resolver walks the search list and returns the
+    LAST name's error, so a SERVFAIL for the user's domain was overwritten by the NXDOMAIN of the suffixed name, the MX
+    layer reported `invalid / no_mx`, and a DNS outage became a fact about someone's address. A dev host has no search
+    domain, so no local run could see it (ADR-0019; module 3's From-gate had the same bug, found by its first GitHub
+    Actions run). `TestSearchDomainCanary` makes the fixture self-proving (it asserts the unrooted lookup really does
+    collapse under the search list), and the self-test builds a MUTANT with name-rooting disabled and requires the
+    SERVFAIL case to go red with the collapse signature, canary green — so "reds without the fix" is checked on every
+    run and not asserted once.
 
 **This list is checked, not trusted.** It stood at five items while CI ran nine, which is the same
 count-drift this project has already found twice (a gate count below CI's; 53 documented config keys

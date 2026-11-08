@@ -4,7 +4,7 @@
 
 > **QUALIFIED 2026-08-07 — "independently reversible" is about FLAGS, and the migration layer is the exception.** Every stage below really is a config flip, and the vendor and feed layers really do turn off by unsetting a variable. But the schema is **forward-only with no down-migration mechanism at all** (measured: zero `.down.sql`, no tracking table), and `git revert` of a migration deletes the file without touching any database that already ran it — leaving one tree and two divergent schemas with nothing recording which is which. Read [`go-live-rollback-posture.md`](go-live-rollback-posture.md) **before the second environment exists**; its item 1 (adopt version tracking) is cheap now and an archaeology exercise later.
 
-> **Status as of 2026-11-08 (after the post-audit fixes and the first real-runner CI).** Three things changed that
+> **Status as of 2026-11-08 (after the post-audit fixes and the first real-runner CI).** Four things changed that
 > this runbook's original author could not have known, and each is a Stage 0 item below:
 > 1. **A date-triggered defect was found and fixed** — the raw-sidecar table `verification_raw` had partitions
 >    for 2026-07..09 only, so from 2026-10-01 every SMTP verdict write failed (SQLSTATE 23514). It was invisible
@@ -21,6 +21,13 @@
 >    Ruby 3.2 reached end-of-life on 2026-04-01, so the interpreter in this image no longer receives security fixes;
 >    ADR-0018 reports what leaving it would take (not yet measured) and recommends scheduling it before a pilot.
 >    Separately, there is no committed `Gemfile.lock`, so transitive gems float on every build.
+> 4. **Updated 2026-11-08 — a DNS outage of ours could be reported as an `invalid` verdict on a host with a resolver search
+>    domain.** Go's resolver walks the `resolv.conf` search list and returns the *last* name's error, so a SERVFAIL for the
+>    user's domain was overwritten by the NXDOMAIN of the suffixed name, and the MX layer said `invalid / no_mx` — our failure
+>    stated as a fact about their address. Every lookup is now rooted, "does not exist" is a narrow door, and a permanent CI
+>    fixture runs under an injected search domain with a mutant control that proves it goes red without the fix
+>    ([ADR-0019](adr/ADR-0019-dns-names-are-rooted-and-failure-is-unknown.md)). **Two Stage 0 consequences follow** — the
+>    node's resolver hygiene, and a ruling on A-only domains — both below. Door 5 is unchanged.
 >
 > Unchanged: all **20** rows in [`pending-ledger.md`](pending-ledger.md) are real-world-gated (a real port-25 box, a
 > vendor, a sender) and genuinely unclosable here, and the control-plane is still **not packaged** (no Dockerfile or
@@ -46,6 +53,10 @@ Companion: the deferred-proof detail is in [`pending-ledger.md`](pending-ledger.
 🔴 **Re-run `govulncheck ./...` in `control-plane/` immediately before the pilot.** Clean on 2026-11-07; any live call path blocks. Use a `golang:1.26` image at or above the patched floor (1.26.10 on that date) — CI's `setup-go '1.26'` tracks the latest patch, a pinned local image does not.
 
 🔴 **Decide the Ruby end-of-life question for the verifier-node image (ADR-0018).** The image now builds from scratch (digest-pinned `ruby:3.2.11-slim-bookworm`, `--pull --no-cache` in CI, gate `check-base-image-pinned.sh`), but **Ruby 3.2 reached end-of-life on 2026-04-01**: the interpreter receives no further security fixes, on a service that takes network input. Owner decision: schedule the move to Ruby 3.3/3.4 before a pilot (ADR-0018 lists what to re-prove; the build experiment has **not yet been run**), or accept and record the exposure. Do it together with committing a `Gemfile.lock` — today only `truemail 3.3.1` and `net-smtp` are pinned and every other gem floats on each build. Door 5 is not the obstacle: the gem pin does not change.
+
+🔴 **Verifier-node resolver hygiene (ADR-0019).** The node's `truemail` resolves with Ruby's `Resolv`, which uses the system search list — and, when only `dns:` servers are configured, **derives one from the container's hostname** (measured). Unlike the control plane, the gem cannot be changed (Door 5), and a nonexistent name followed by a wildcard under a search domain made it resolve **another domain's MX** (measured). A node-side DNS failure can never become an `invalid` (no SMTP transcript → `unknown / connection_failed`), so this is narrow — but it is a one-line deployment rule: **run the node with no search domain in `resolv.conf` and without a dotted container hostname.** Verify on the real box; a fork-owned startup guard that warns or refuses to boot is available if the owner wants it (not implemented).
+
+🔴 **Rule on A-only domains (found by the ADR-0019 audit; NOT fixed).** An address at a domain with an A record and **no MX** is reported `invalid / no_mx`, because `resolveMX` stops at the first not-found MX and never reaches the A/AAAA fallback that its own comments describe (RFC 5321 §5.1, implicit MX). Go reports NODATA on an MX query as a not-found error, so that fallback is dead code against real DNS (measured through the production layers). It changes which real domains are called invalid, so it needs a ruling before a pilot, not a quiet fix.
 ---
 
 ## Stage 1 — the real box (SMTP verification goes live)
