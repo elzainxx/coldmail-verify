@@ -126,6 +126,19 @@ jobs:
       - name: base-image-pinned SELF-TEST (the paired control)
         run: bash scripts/check-base-image-pinned-selftest.sh
 
+  # The image installs EXACTLY the gems in a committed Gemfile.lock (ADR-0018 addendum). The Dockerfile used to run `bundle lock`
+  # on every build, so only truemail and net-smtp were pinned and every transitive gem floated: a digest-pinned base made the OS
+  # layer reproducible while the gems above it were not. Static; needs no Ruby, Docker or network.
+  gemfile-lock:
+    name: verifier-node gems (committed Gemfile.lock, installed frozen, agrees with the Door 5 pin)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: lock tracked, image installs it frozen, truemail/net-smtp/bundler/Ruby agree with the Gemfile
+        run: bash scripts/check-gemfile-lock.sh
+      - name: gemfile-lock SELF-TEST (the paired control)
+        run: bash scripts/check-gemfile-lock-selftest.sh
+
   # A SEPARATE job (ADR-0019). The control plane's DNS resolution must give the same answer on a host whose resolv.conf has a
   # `search` domain as on one that has none: Go's resolver walks the search list and returns the LAST name's error, so a SERVFAIL
   # for the user's domain used to be overwritten by the NXDOMAIN of the suffixed name, and our DNS outage was reported as

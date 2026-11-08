@@ -61,12 +61,11 @@ No `ruby:3.2.0-*` image exists on bookworm. The newest 3.2 patch there is **3.2.
   resolves `truemail (3.3.1)`; the fork's RSpec suite is the evidence that the engine behaves the same on 3.2.11.
 - **Moving the base is now a deliberate act with a checklist:** pull the new image, take its digest, change the FROM line
   and `.ruby-version` together, run CI. The gate refuses a half-done move.
-- **What this does NOT make reproducible, stated so it is not mistaken for coverage:** there is **no committed
-  `Gemfile.lock`**. The Dockerfile runs `bundle lock` on every build, so only `truemail` (`3.3.1`) and `net-smtp` are
-  pinned; every other gem floats to whatever resolves that day. A digest-pinned base makes the OS layer reproducible;
-  it does not make the image reproducible. That is the same hidden-variable shape one layer up, and it is registered
-  here as an open item rather than fixed under this ADR, because committing a lockfile is a change to the fork's
-  dependency posture that the brief did not ask for.
+- **What the base pin alone did NOT make reproducible, and the addendum below that does:** at the time of this ADR there was
+  **no committed `Gemfile.lock`**. The Dockerfile ran `bundle lock` on every build, so only `truemail` (`3.3.1`) and
+  `net-smtp` were pinned and every other gem floated to whatever resolved that day. A digest-pinned base makes the OS layer
+  reproducible; it did not make the image reproducible. That was the same hidden-variable shape one layer up. It was
+  registered as an open item here and **closed 2026-11-08 by the addendum below**.
 - `check-test-enumeration.sh` requires every `check-*.sh` to be wired in `ci.yml` and named in
   `Docs/test-strategy.md` §5 (item 10); both are done.
 
@@ -94,7 +93,8 @@ measured** — see the last paragraph):
 3. *Where it could break:* the Gemfile's own comment records that `truemail 3.3.1` needs `net-smtp ~> 0.5.0` on
    Ruby ≥ 3.1; Ruby 3.4 moves several more default gems to bundled gems (an unlisted `require` then fails at load); and
    `thin`/`eventmachine` are native extensions that must compile against the new interpreter. None of these is known to
-   fail; none is known to pass. Because there is no lockfile (above), the transitive gem set would also move.
+   fail; none is known to pass. With the lock committed (addendum), a Ruby move also means regenerating the lock under the
+   new interpreter and reviewing the diff — the transitive gem set moves only when someone moves it.
 4. *Moving the engine itself* (`truemail` 3.3.1 → 4.0.0, the current release on rubygems, which declares
    `required_ruby_version >= 2.5.0`) is a different and larger decision: it changes Door 5's pin, ADR-0003's agreement
    and the scoring evidence, and needs its own ADR and owner ruling. It is not needed to leave Ruby 3.2.
@@ -118,3 +118,26 @@ image is reproducible. Do not read the digest pin as having closed the end-of-li
   (`tools/ci-replica.sh`, `door5-gem-unmodified` job): `apt-get` fetched from `bookworm-security`, Door 5's assertion
   passed, `bundle list` resolved `truemail (3.3.1)`. **Green means green on the runner:** the GitHub Actions run for
   this change is recorded in `coldmail-platform/verification-runs.md`, and that, not the rehearsal, is the result.
+
+## Addendum (2026-11-08) — the gems are pinned too: a committed `Gemfile.lock`, installed frozen
+
+The base-image pin left the layer above it floating. The Dockerfile ran `bundle lock` on every build, so only `truemail`
+(`3.3.1`) and `net-smtp` (`0.5.1`) were pinned and every other gem — `rack`, `thin`, `eventmachine`, the `dry-*` family — resolved to
+whatever the index served that day: a cold build on a CI runner and a warm one on a developer's machine could install different
+code under the same Gemfile. This is the same defect class as the dead base (a result that depends on when and where the build
+ran), one layer up. Ruled by the owner (C3 of the same brief) and done:
+
+1. **`verifier-node/truemail-rack/Gemfile.lock` is committed**, generated in the image's own Ruby (3.2.11) with the Dockerfile's
+   own bundler constraint, platforms `ruby` and `x86_64-linux`. It resolves `truemail (3.3.1)` and `net-smtp (0.5.1)` exactly as the
+   Gemfile pins them, and includes the development/test groups so the RSpec job's `bundle install` does not re-resolve.
+2. **The Dockerfile installs the lock, frozen:** `COPY Gemfile Gemfile.lock`, no `bundle lock`, `bundle config set --local frozen
+   true` (bundler fails if the Gemfile and lock disagree instead of re-resolving), and bundler pinned to the exact version the lock
+   was written by (`2.7.2`, its `BUNDLED WITH`), not a `~>` range that could change the reader of the lock.
+3. **Door 5 is unchanged and now checked against what is installed.** `assert-gem-unmodified.sh` still passes byte-identical (it
+   reads the Gemfile); the new gate additionally asserts the lock's `truemail` equals the Gemfile's exact pin.
+4. **Gate and control:** `scripts/check-gemfile-lock.sh` (lock tracked; image copies it, runs no `bundle lock`/`update`, sets
+   `frozen`; `truemail`/`net-smtp` match the Gemfile pins; bundler equals `BUNDLED WITH`; the lock's Ruby is `.ruby-version`'s;
+   dev/test gems present) and its paired `check-gemfile-lock-selftest.sh` (14 cases, each matched on the failure message —
+   including the original defect, a `bundle lock` in the image).
+
+To change a gem from now on: edit the Gemfile, run `bundle lock` in this image's Ruby, commit both, let CI rebuild.

@@ -46,12 +46,19 @@ RUN if ls /tmp/proxy-certs/*.crt >/dev/null 2>&1; then \
 
 WORKDIR /app
 
-# Resolve gems against the PINNED Gemfile. --jobs 1: under a TLS-interception proxy,
-# parallel fetches intermittently fail the compact-index protocol; serial is reliable.
-COPY Gemfile .ruby-version ./
-RUN gem install bundler -v '~> 2.4' \
+# Install EXACTLY the gems in the committed Gemfile.lock (ADR-0018 addendum). This used to run `bundle lock` here, which
+# re-resolved every transitive gem on every build: only truemail (3.3.1) and net-smtp were pinned, so everything else —
+# rack, thin, eventmachine, dry-* — floated to whatever resolved that day, and a digest-pinned base made the OS layer
+# reproducible while the gems above it were not. Now the lock is the source of truth and `frozen` makes bundler FAIL
+# if the Gemfile and the lock ever disagree, instead of quietly re-resolving. bundler itself is pinned to the version the
+# lock was written by (its BUNDLED WITH line; scripts/check-gemfile-lock.sh asserts they match). The lock covers the
+# development/test groups too, so the RSpec job's `bundle config unset --local without && bundle install` still works.
+# To change a gem: edit the Gemfile, run `bundle lock` in this image's Ruby, commit both, re-run CI.
+# --jobs 1: under a TLS-interception proxy, parallel fetches intermittently fail the compact-index protocol; serial is reliable.
+COPY Gemfile Gemfile.lock .ruby-version ./
+RUN gem install bundler -v '2.7.2' \
+    && bundle config set --local frozen true \
     && bundle config set --local without 'development test' \
-    && bundle lock \
     && bundle install --jobs 1 --retry 5
 
 # App code (stock fork).

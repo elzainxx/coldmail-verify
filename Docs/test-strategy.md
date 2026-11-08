@@ -135,6 +135,14 @@ Per PROJECT_RULES.md §7, every change runs (see [`../.github/workflows/ci.yml`]
     collapse under the search list), and the self-test builds a MUTANT with name-rooting disabled and requires the
     SERVFAIL case to go red with the collapse signature, canary green — so "reds without the fix" is checked on every
     run and not asserted once.
+12. **the verifier-node image installs exactly the gems in a committed `Gemfile.lock`** — the lock is tracked; the Dockerfile
+    COPYs it, runs no `bundle lock`/`bundle update`, and sets `frozen` so bundler fails instead of re-resolving; the lock's
+    `truemail` and `net-smtp` equal the Gemfile's exact pins (so Door 5's pin cannot drift from what is installed); bundler is
+    installed at the exact version in `BUNDLED WITH`; the lock's Ruby is the patch `.ruby-version` names; and the dev/test
+    gems are in it so the RSpec job does not re-resolve (`scripts/check-gemfile-lock.sh`, plus its paired self-test
+    `scripts/check-gemfile-lock-selftest.sh`, 14 cases each matched on the failure message). The defect: the Dockerfile ran
+    `bundle lock` on every build, so only two gems were pinned and every transitive gem floated — a digest-pinned base
+    (item 10) made the OS layer reproducible while the gems above it were not (ADR-0018 addendum).
 
 **This list is checked, not trusted.** It stood at five items while CI ran nine, which is the same
 count-drift this project has already found twice (a gate count below CI's; 53 documented config keys
