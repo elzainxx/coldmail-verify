@@ -106,10 +106,25 @@ jobs:
       # The REAL resolution (not stubbed): build the node and assert bundle resolved 3.3.1.
       - name: Docker build resolves the pinned gem to 3.3.1
         run: |
-          docker build -t truemail-verifier-node:ci verifier-node/truemail-rack
+          docker build --pull --no-cache -t truemail-verifier-node:ci verifier-node/truemail-rack
           v="$(docker run --rm truemail-verifier-node:ci bundle list | grep -oE 'truemail \(3\.3\.1\)' || true)"
           test -n "$v" || { echo "FAIL: resolved truemail != 3.3.1 (got '$v')"; exit 1; }
           echo "OK: verifier-node resolved truemail 3.3.1"
+
+  # A SEPARATE, static job (no Docker build): the image's BASE must be digest-pinned, on a supported Debian, at the Ruby
+  # patch .ruby-version names, and every `docker build` in this file must pass `--pull --no-cache`. The first from-scratch
+  # build on a real runner found that the base (ruby:3.2.0-slim = Debian 11) could no longer `apt-get install` — it had been
+  # buildable only from a warm cache for months (ADR-0018). A red HERE reads as "the base-image pin regressed", not as a
+  # build failure somewhere inside a 380-test run. The selftest is its paired control: it proves each assertion can FAIL.
+  base-image-pinned:
+    name: verifier-node base image (digest-pinned, supported Debian, built without a cache)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: base image pinned by digest, on supported Debian, matches .ruby-version, CI builds uncached
+        run: bash scripts/check-base-image-pinned.sh
+      - name: base-image-pinned SELF-TEST (the paired control)
+        run: bash scripts/check-base-image-pinned-selftest.sh
 
   verifier-node-rspec:
     name: verifier-node (RSpec — stock + /v1 wrapper)
@@ -124,7 +139,7 @@ jobs:
       # what fails this job, never the wrapper lowering the ratio.
       - name: rspec in the built node image
         run: |
-          docker build -t truemail-verifier-node:ci verifier-node/truemail-rack
+          docker build --pull --no-cache -t truemail-verifier-node:ci verifier-node/truemail-rack
           docker run --rm -e VERIFIER_EMAIL=verifier@example.test -e ACCESS_TOKENS=token -e COVERAGE=0 \
             truemail-verifier-node:ci sh -c 'cd /app && bundle config unset --local without && bundle install --jobs 2 --retry 3 >/dev/null 2>&1 && bundle exec rspec --no-color'
 

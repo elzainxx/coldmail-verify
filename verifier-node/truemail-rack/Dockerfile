@@ -6,11 +6,20 @@
 # Gemfile.lock is (re)generated here because the host has no Ruby and the exact
 # pin invalidated the upstream lock — the resolved lock is the build artifact.
 #
-# Base pinned to ruby:3.2.0-slim to MATCH the fork's own `.ruby-version` (ruby-3.2.0):
-# the fork's Gemfile reads .ruby-version and pins ruby EXACTLY, so a floating 3.2-slim
-# (currently 3.2.11) makes bundler refuse ("Gemfile specified 3.2.0"). Matching the base
-# to the fork's declared version honors the fork rather than editing its .ruby-version.
-FROM ruby:3.2.0-slim
+# Base: the latest Ruby 3.2 patch on Debian 12 (bookworm), PINNED BY DIGEST (ADR-0018).
+#
+# WHY NOT ruby:3.2.0-slim any more. That image is Debian 11 (bullseye); Debian removed bullseye's `debian-security`
+# repository, so `apt-get install` returns 404 on any build that does not hit a cached layer. It stayed invisible on a
+# developer machine (Docker reused cached layers) and was found the first time GitHub Actions built the image from
+# scratch. No 3.2.0 image exists on bookworm, so the base moves to the last 3.2 patch there (3.2.11) and the fork's
+# `.ruby-version` — which the Gemfile reads and pins Ruby to EXACTLY — moves with it (FORK.md row 14). Same minor
+# version. Door 5 is unaffected: it protects the truemail GEM (pinned 3.3.1, asserted unmodified), not the OS image.
+#
+# WHY A DIGEST. A tag is a moving target; a digest is a content address. `ruby:3.2.11-slim-bookworm` and the digest
+# below are the same image TODAY; only the digest stays the same image tomorrow. CI builds with `--pull --no-cache`
+# (and scripts/check-base-image-pinned.sh enforces both), so a dead or changed base can never hide behind a cache again.
+# To move to a newer base: pull it, take its digest, change this line and `.ruby-version` together, re-run CI.
+FROM ruby:3.2.11-slim-bookworm@sha256:84140472007d27c7ec641dbc606a47ff9c0aa5f358445947b7350392fa5115e5
 
 # thin/eventmachine need a compiler; net-smtp is pure Ruby. ca-certificates lets us
 # trust an optional corporate/AV TLS-interception proxy CA (see below). Kept minimal.

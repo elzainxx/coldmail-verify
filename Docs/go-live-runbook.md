@@ -4,14 +4,23 @@
 
 > **QUALIFIED 2026-08-07 — "independently reversible" is about FLAGS, and the migration layer is the exception.** Every stage below really is a config flip, and the vendor and feed layers really do turn off by unsetting a variable. But the schema is **forward-only with no down-migration mechanism at all** (measured: zero `.down.sql`, no tracking table), and `git revert` of a migration deletes the file without touching any database that already ran it — leaving one tree and two divergent schemas with nothing recording which is which. Read [`go-live-rollback-posture.md`](go-live-rollback-posture.md) **before the second environment exists**; its item 1 (adopt version tracking) is cheap now and an archaeology exercise later.
 
-> **Status as of 2026-11-07 (after the post-audit fixes).** Two things changed that this runbook's original
-> author could not have known, and both are Stage 0 items below:
+> **Status as of 2026-11-08 (after the post-audit fixes and the first real-runner CI).** Three things changed that
+> this runbook's original author could not have known, and each is a Stage 0 item below:
 > 1. **A date-triggered defect was found and fixed** — the raw-sidecar table `verification_raw` had partitions
 >    for 2026-07..09 only, so from 2026-10-01 every SMTP verdict write failed (SQLSTATE 23514). It was invisible
 >    until the suite was re-run three months later. **Migration `0014` + the maintenance loop
 >    ([ADR-0017](adr/ADR-0017-raw-partition-maintenance.md)) close it; `0014` must be applied before any real verdict is written.**
 > 2. **`govulncheck` is clean** on go1.26.10, `x/net` v0.62.0, `x/text` v0.43.0 (it was **not** before: 17 live-call-path
 >    advisories). The advisory database moves, so this is a *re-run before the pilot*, not a one-time tick.
+> 3. **Updated 2026-11-08 — the verifier-node image could not be built from scratch, and nobody had noticed.** Its base,
+>    `ruby:3.2.0-slim`, is Debian 11, whose security repository is gone, so `apt-get` returned 404 on any build with
+>    no cached layer; every local build had hit a cache. It surfaced the first time GitHub Actions built it cold. The
+>    base is now `ruby:3.2.11-slim-bookworm` **pinned by digest**, CI builds with `--pull --no-cache`, and a blocking
+>    gate enforces both ([ADR-0018](adr/ADR-0018-verifier-node-base-image.md)). **Door 5 is unchanged** (the gem is
+>    still `truemail 3.3.1`, asserted unmodified). **Stage 0 consequence — a decision for the owner, not a tick:**
+>    Ruby 3.2 reached end-of-life on 2026-04-01, so the interpreter in this image no longer receives security fixes;
+>    ADR-0018 reports what leaving it would take (not yet measured) and recommends scheduling it before a pilot.
+>    Separately, there is no committed `Gemfile.lock`, so transitive gems float on every build.
 >
 > Unchanged: all **20** rows in [`pending-ledger.md`](pending-ledger.md) are real-world-gated (a real port-25 box, a
 > vendor, a sender) and genuinely unclosable here, and the control-plane is still **not packaged** (no Dockerfile or
@@ -35,6 +44,8 @@ Companion: the deferred-proof detail is in [`pending-ledger.md`](pending-ledger.
 🔴 **Migration `0014` applied, and the partition headroom verified (ADR-0017).** Without it, every SMTP verdict write fails once the last hard-coded partition's month ends (it already has). Apply `control-plane/migrations/0014_raw_partition_maintenance.sql`, start the control-plane (it creates `TM_RAW_PARTITION_MONTHS_AHEAD` future months at startup and every `TM_RAW_PARTITION_MAINTAIN_INTERVAL_SECONDS`), then confirm: `SELECT relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent = 'verification_raw'::regclass ORDER BY 1;` lists the current month plus the configured number ahead. **Watch the log for `raw-partitions: maintenance FAILED`** — a failing loop has about `TM_RAW_PARTITION_MONTHS_AHEAD` months of warning before a write fails. Retention (`DROP PARTITION`) is still a manual `cp_admin` action. See [`OPERATIONS.md`](OPERATIONS.md) §8.
 
 🔴 **Re-run `govulncheck ./...` in `control-plane/` immediately before the pilot.** Clean on 2026-11-07; any live call path blocks. Use a `golang:1.26` image at or above the patched floor (1.26.10 on that date) — CI's `setup-go '1.26'` tracks the latest patch, a pinned local image does not.
+
+🔴 **Decide the Ruby end-of-life question for the verifier-node image (ADR-0018).** The image now builds from scratch (digest-pinned `ruby:3.2.11-slim-bookworm`, `--pull --no-cache` in CI, gate `check-base-image-pinned.sh`), but **Ruby 3.2 reached end-of-life on 2026-04-01**: the interpreter receives no further security fixes, on a service that takes network input. Owner decision: schedule the move to Ruby 3.3/3.4 before a pilot (ADR-0018 lists what to re-prove; the build experiment has **not yet been run**), or accept and record the exposure. Do it together with committing a `Gemfile.lock` — today only `truemail 3.3.1` and `net-smtp` are pinned and every other gem floats on each build. Door 5 is not the obstacle: the gem pin does not change.
 ---
 
 ## Stage 1 — the real box (SMTP verification goes live)

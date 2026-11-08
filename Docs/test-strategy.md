@@ -114,6 +114,16 @@ Per PROJECT_RULES.md §7, every change runs (see [`../.github/workflows/ci.yml`]
    test file, RSpec's glob unnarrowed, every `check-*.sh` named in the workflow, every §7 job present,
    and every gate named in THIS list (`scripts/check-test-enumeration.sh`, plus its paired self-test)
 9. **the code-reviewer gate** — on every change, docs included
+10. **the verifier-node base image can never again be a cache-only build** — the Dockerfile's `FROM` is
+    pinned by DIGEST, names a supported Debian (bookworm/trixie, never bullseye or older), carries the
+    Ruby patch `.ruby-version` names, and every `docker build` in the workflow passes `--pull --no-cache`
+    (`scripts/check-base-image-pinned.sh`, plus its paired self-test
+    `scripts/check-base-image-pinned-selftest.sh`). The defect it guards was invisible for months: the
+    base was `ruby:3.2.0-slim` (Debian 11), whose `debian-security` repository was removed, so
+    `apt-get install` 404s — but only on a build that does not reuse a cached layer, and every local build
+    did. It surfaced the first time a real GitHub runner built the image from scratch (ADR-0018). The
+    self-test builds a throwaway tree that trips each assertion in turn and checks the exit code AND the
+    message, so the gate cannot be quietly broken into accepting everything.
 
 **This list is checked, not trusted.** It stood at five items while CI ran nine, which is the same
 count-drift this project has already found twice (a gate count below CI's; 53 documented config keys

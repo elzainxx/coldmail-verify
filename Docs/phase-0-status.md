@@ -36,7 +36,7 @@ daemon, no host Ruby, and a blocked registry) are now **closed by an actual live
 with Docker available:
 
 ### G-1 (was: live build/run PENDING) → **RESOLVED**
-The fork was **built and executed**: `truemail-verifier-node:p0` (664MB) on `ruby:3.2.0-slim`; `bundle`
+The fork was **built and executed**: `truemail-verifier-node:p0` (664MB) on `ruby:3.2.0-slim` *(historical: that Debian 11 base could not be rebuilt from scratch and was replaced on 2026-11-08 — [ADR-0018](adr/ADR-0018-verifier-node-base-image.md))*; `bundle`
 resolved + installed **truemail 3.3.1** + **net-smtp 0.5.1** + native thin/eventmachine; the stock rack
 ran and answered `/version`, `/healthcheck`, `/` on :3000. **Door 5 proven at runtime:**
 `Truemail::VERSION = 3.3.1`. We are extending the fork, not rewriting it.
@@ -46,7 +46,8 @@ ran and answered `/version`, `/healthcheck`, `/` on :3000. **Door 5 proven at ru
 > `gem`/`bundle` cert verification. Fixed by **trusting** that CA in the image
 > (`verifier-node/truemail-rack/certs/` — machine-local, gitignored — installed via
 > `update-ca-certificates`); TLS verification is **never disabled**. Also: base pinned to
-> `ruby:3.2.0-slim` to match the fork's `.ruby-version` (its Gemfile pins ruby exactly). A clean CI has
+> `ruby:3.2.0-slim` to match the fork's `.ruby-version` (its Gemfile pins ruby exactly; *superseded 2026-11-08 by
+> `ruby:3.2.11-slim-bookworm@sha256:…` — ADR-0018*). A clean CI has
 > no such cert → the trust step is a no-op. Details in the Dockerfile + FORK.md.
 
 ### G-2 (was: ground-truth rows PENDING) → **RESOLVED**

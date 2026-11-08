@@ -24,7 +24,7 @@ There are **two** grades of evidence in this document, and they are **never** co
 | **`LIVE ✓`** | **Captured from the actually-running forked verifier-node** (`docker build` → `docker run` of `truemail-verifier-node:p0`, image 664MB), 2026-07-17. | Reality-confirmed — the strongest grade. |
 
 **The live run is DONE (Phase-0 closeout).** The fork was built and executed:
-- **`docker build` succeeded** on `ruby:3.2.0-slim` (matched to the fork's `.ruby-version`); `bundle`
+- **`docker build` succeeded** on `ruby:3.2.0-slim` (matched to the fork's `.ruby-version`; *historical — that base was replaced on 2026-11-08, ADR-0018*); `bundle`
   resolved and installed **truemail 3.3.1**, **net-smtp 0.5.1**, thin/eventmachine (native), 20 gems —
   `Bundle complete!`. Door 5 proven at runtime: `Truemail::VERSION = 3.3.1`.
 - **The stock rack ran** and answered on `:3000`; all endpoint/JSON/host_audit shapes below are its

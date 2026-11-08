@@ -12,7 +12,7 @@ we fork** (Door 5: the `truemail` *engine* gem is pinned, never forked). See
 | Tag | `v0.9.0` |
 | Commit | `9ecbbbdc45001d971a7d477e35136540c1477d11` |
 | Vendored on | 2026-07-17 |
-| Ruby | `3.2` (from `.ruby-version`) |
+| Ruby | `3.2` (from `.ruby-version`; patch moved 3.2.0 → 3.2.11 on 2026-11-08, row 14 below) |
 | Nested `.git` | removed (vendored into this monorepo, not a submodule) |
 
 ## Modifications from upstream v0.9.0 (exhaustive — keep this list complete)
@@ -46,6 +46,7 @@ verdict (all interpretation is control-plane-side).
 | 11 | `config/initializers/engine_configurator.rb` (new) + `config/initializers/truemail.rb` | factored the inline `Truemail.configure` into `EngineConfigurator.configure!`/`reload!` | So `POST /v1/config/reload` can PULL-reload (OQ-P2-2). Boot behaviour identical; only the gem's public `Truemail.configure` is called. |
 | 12 | `spec/requests/wrapper_spec.rb` (new) + `spec/support/helpers/request_helpers_spec.rb` (1 line) | wrapper request specs; relaxed the `#app` helper assertion (URLMap, not the bare `Application`) | Test the wrapper; the stock request specs pass verbatim. |
 | 13 | `test/p2/` (new) | socket-level proof harness (`socket_proof.rb`, `Dockerfile`, `README.md`) | The §3.5/Appendix B end-to-end wire proof against real `smtp_mock`/`dns_mock`. A **test harness, not a deployable** — production image has none of it. |
+| 14 | `.ruby-version` | `ruby-3.2.0` → **`ruby-3.2.11`** (CRLF kept) | **Forced, not cosmetic:** the Gemfile reads this file and pins Ruby EXACTLY, and the only base the Dockerfile could use was `ruby:3.2.0-slim` — a Debian 11 image whose `debian-security` repository has been removed, so a from-scratch build can no longer `apt-get install` (found 2026-11-08 by GitHub Actions; local builds had hidden it behind cached layers). No `3.2.0` image exists on Debian 12, so the base moved to the latest Ruby 3.2 patch on bookworm and this pin follows it. Same minor version; the `truemail` engine pin (Door 5) is untouched. See [ADR-0018](../../Docs/adr/ADR-0018-verifier-node-base-image.md). |
 
 | — | everything else | **unchanged** | Stock fork. **No gem patch** — the engine is the pinned `truemail 3.3.1`, byte-identical. |
 
