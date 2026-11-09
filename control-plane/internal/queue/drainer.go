@@ -74,7 +74,7 @@ type Deps struct {
 
 	// Paused reports whether verdict production is paused — kill-switch Rung 4 accept-and-defer,
 	// whose definition IS "the drainer is stopped: work sits durably in work_items, nothing is
-	// processed" (kill-switch-ladder.md Rung 4). Satisfied in production by
+	// processed" (history/kill-switch-ladder.md Rung 4). Satisfied in production by
 	// cfg.KillSwitch.VerdictProductionPaused; nil => never paused (the Rung-0..3 default).
 	//
 	// It is a FUNC, not a bool, for two reasons. First, it keeps the queue package free of an

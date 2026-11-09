@@ -3,7 +3,7 @@
 - **Status:** ACCEPTED (owner sign-off 2026-07-17 — Phase-0 sign-off sheet §B) · **RESOLVED at Phase 1** (NFC/IDNA wired — see "Phase-1 resolution" below)
 - **Kind:** door-referencing — a **tightening** that **affirms** Door 3. Refuses (does not mint, change, or reverse) a hash scheme. Does **not** reopen or modify the frozen `norm/v1+hmac-sha256/v1` scheme.
 - **Deciders:** owner (Phase-0 closeout sign-off, "accept all + record")
-- **Source finding:** Phase-0 code-review pass (inline adversarial sweep) · [`phase-0-signoff-sheet.md`](../phase-0-signoff-sheet.md) §B · [`phase-0-status.md`](../phase-0-status.md) "Code-review gate — outcome"
+- **Source finding:** Phase-0 code-review pass (inline adversarial sweep) · [`history/phase-0-signoff-sheet.md`](../history/phase-0-signoff-sheet.md) §B · [`history/phase-0-status.md`](../history/phase-0-status.md) "Code-review gate — outcome"
 
 ## Context
 

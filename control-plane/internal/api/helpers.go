@@ -14,7 +14,7 @@ import (
 // bearerToken extracts the token from `Authorization: Bearer <t>` on the FRONT DOOR, and returns ""
 // for anything else. The scheme is MANDATORY: a bare token is rejected (canonical-module-contract §1
 // clause 1, "a bare token MUST be rejected", which names M1's old laxness by name; the ruling itself
-// is P1 OQ-13, resolved "Bearer for /v1/verify" at phase-1-foundations-spec.md:774).
+// is P1 OQ-13, resolved "Bearer for /v1/verify" at history/phase-1-foundations-spec.md:774).
 //
 // WHY THE OLD trimBearer's JUSTIFICATION WAS STALE, which is why the laxness survived a full audit.
 // Its comment read "the front door is bearer; the verifier-node token is raw — kept distinct per P1

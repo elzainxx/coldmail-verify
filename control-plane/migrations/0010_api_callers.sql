@@ -1,5 +1,5 @@
 -- Migration 0010: api_callers (PN-13 / F-20 — per-caller front-door keys + rotation)
--- Implements: DECISIONS.md PN-13 (DR-5 batch), pre-takeoff-checklist §3.8, Phase-5 spec §7.5.
+-- Implements: open-decisions.md PN-13 (DR-5 batch), pre-takeoff-checklist §3.8, Phase-5 spec §7.5.
 --
 -- WHY THIS IS NOT A FROZEN-DOOR CHANGE (additive-only against all five doors):
 --   * api_callers is a NEW operational table. It touches NO frozen schema (verifications/cache/

@@ -414,5 +414,5 @@ func (o *Orchestrator) persistCatchAll(ctx context.Context, domain string, res s
 }
 
 // catchAllTTL is the re-probe cadence DIAL (§5.6 SEAM → P4). A conservative default; the
-// re-probe LOOP that reads expires_at is a later-phase owner call (FLAG-C, DECISIONS §5).
+// re-probe LOOP that reads expires_at is a later-phase owner call (FLAG-C, open-decisions §5).
 const catchAllTTL = 30 * 24 * time.Hour

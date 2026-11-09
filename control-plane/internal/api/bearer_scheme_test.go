@@ -3,7 +3,7 @@ package api
 // FIX-PLAN ITEM 15b — THE AUTH SCHEME IS MANDATORY, AND THE CONTROL FOR IT.
 //
 // THE RULING, which predates this fix twice over and is why no ADR is owed here:
-//   - phase-1-foundations-spec.md:774 (OQ-13, RESOLVED): "Bearer for /v1/verify".
+//   - history/phase-1-foundations-spec.md:774 (OQ-13, RESOLVED): "Bearer for /v1/verify".
 //   - canonical-module-contract.md §1 clause 1: "`Authorization: Bearer <token>`. The scheme is
 //     MANDATORY — a bare token MUST be rejected. (M1 accepts a bare token today; that is a laxness
 //     to close, not a variation to accommodate.)"

@@ -21,7 +21,7 @@ A row dated in a month with no partition is **rejected** (`SQLSTATE 23514`, *no 
 "verification_raw" found for row*). The raw sidecar is written atomically with the LOG row of every SMTP
 verdict (§6.4), so **from 2026-10-01 every SMTP verdict write failed**. It was invisible in August: the
 suite was green, and only turned red when `TestPGAppendWithRawSidecar` was re-run in November and `now()`
-was no longer inside the hard-coded window. `Docs/pre-takeoff-checklist.md` carried the gap as an
+was no longer inside the hard-coded window. `Docs/history/pre-takeoff-checklist.md` carried the gap as an
 unchecked line — *"`verification_raw` partition cadence"* — which is a warning comment, not a control.
 
 ## Decision
@@ -96,5 +96,5 @@ unchecked line — *"`verification_raw` partition cadence"* — which is a warni
   while every store test stays green — which is why the wiring needs its own test.
 - Config: `TestRawPartitionDialsRejectTheCliffAndGarbage` (0, negatives, garbage and >120 are refused).
 
-- **Recorded:** this ADR; the ADR index; `config-manifest.md` §9; `OPERATIONS.md` §8;
-  `pre-takeoff-checklist.md`; `migrations/README.md`.
+- **Recorded:** this ADR; the ADR index; `config-manifest.md` §9; `operator-runbook.md` §8;
+  `history/pre-takeoff-checklist.md`; `migrations/README.md`.

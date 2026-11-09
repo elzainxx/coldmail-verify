@@ -1,9 +1,9 @@
 # ADR-0008 — The verification_raw blob redacts the plaintext address (Door 3); the P2 "store verbatim" text is narrowed, not the door
 
-- **Status:** ACCEPTED · **OWNER-RATIFIED 2026-07-17** (P2→P3 readiness pass — the owner explicitly authorized ratifying this ADR and applying the spec-text amendment; recorded in [`DECISIONS.md`](../DECISIONS.md) §6.2). The P2-spec *instruction* (§4.1/§6.4/OQ-P2-5 "store the entire object verbatim") is narrowed to "verbatim except the redacted address identity" because that instruction, taken literally, would violate the frozen **Door 3**. The door wins; the spec is additive-only and cannot override a frozen contract. The spec text is now amended to agree with the code.
+- **Status:** ACCEPTED · **OWNER-RATIFIED 2026-07-17** (P2→P3 readiness pass — the owner explicitly authorized ratifying this ADR and applying the spec-text amendment; recorded in [`open-decisions.md`](../open-decisions.md) §6.2). The P2-spec *instruction* (§4.1/§6.4/OQ-P2-5 "store the entire object verbatim") is narrowed to "verbatim except the redacted address identity" because that instruction, taken literally, would violate the frozen **Door 3**. The door wins; the spec is additive-only and cannot override a frozen contract. The spec text is now amended to agree with the code.
 - **Kind:** door-referencing — a **tightening that AFFIRMS Door 3** (the raw full email is NEVER persisted). It changes no hashing, no response shape, no vocab. It redacts one leak the P2 spec's own sensitivity analysis missed.
 - **Deciders:** Phase-2 adversarial review (CRITICAL finding, dimension = doors) + build; **owner ratified 2026-07-17**.
-- **Source:** the Phase-2 review's confirmed CRITICAL finding; [`PROJECT_RULES.md`](../../PROJECT_RULES.md) Door 3; [`phase-2-smtp-mocks-spec.md`](../phase-2-smtp-mocks-spec.md) §4.1, §6.4, OQ-P2-5.
+- **Source:** the Phase-2 review's confirmed CRITICAL finding; [`PROJECT_RULES.md`](../../PROJECT_RULES.md) Door 3; [`history/phase-2-smtp-mocks-spec.md`](../history/phase-2-smtp-mocks-spec.md) §4.1, §6.4, OQ-P2-5.
 
 ## Context
 
@@ -102,7 +102,7 @@ BEFORE it is written to `verification_raw`.** (`control-plane/internal/orchestra
   local-parts are still scrubbed. The redaction is O(blob size), negligible.
 - **Owner ratification — DONE (2026-07-17).** The P2 spec text (§4.1/§6.4/OQ-P2-5 + Appendix D) is
   amended to "verbatim except the redacted address identity," so spec and code now agree (a spec still
-  instructing a door violation is a latent trap). Recorded in [`DECISIONS.md`](../DECISIONS.md) §6.2.
+  instructing a door violation is a latent trap). Recorded in [`open-decisions.md`](../open-decisions.md) §6.2.
 
 ## Compliance / how it's checked
 

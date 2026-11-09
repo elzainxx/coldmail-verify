@@ -44,6 +44,6 @@ Project's own code
 --------------------------------------------------------------------------------
   The project's own code (control-plane/, verifier-node/ wrapper additions, and Docs/) is licensed
   under the top-level LICENSE file — PROPRIETARY / all-rights-reserved (resolved 2026-07-19; see
-  README.md "License posture" and Docs/DECISIONS.md §6.1). This NOTICE records ONLY the third-party
+  README.md "License posture" and Docs/open-decisions.md §6.1). This NOTICE records ONLY the third-party
   components the project must respect; nothing here grants rights over the owner's own code, and
   nothing in the top-level LICENSE alters or relicenses the third-party MIT terms recorded above.

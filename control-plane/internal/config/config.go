@@ -8,7 +8,7 @@
 //     A "flag" that would let you turn a frozen door off does not exist here by design.
 //   - DIALs and feature-flags from the manifest are fields here, each with the manifest's
 //     documented default (or explicitly Unset when the manifest says "owner OQ").
-//   - The kill-switch ladder (kill-switch-ladder.md) and shadow-mode (shadow-mode.md)
+//   - The kill-switch ladder (history/kill-switch-ladder.md) and shadow-mode (history/shadow-mode.md)
 //     are first-class config: every rung / mode is a readable setting with a SAFE default,
 //     so the "cheap-layers-only" rung actually works at Phase 0 (the only rung reachable
 //     without SMTP).
@@ -29,7 +29,7 @@ import (
 	"time"
 )
 
-// ── Kill-switch ladder (kill-switch-ladder.md) ──────────────────────────────────────
+// ── Kill-switch ladder (history/kill-switch-ladder.md) ──────────────────────────────────────
 // Each rung is a readable flag. Defaults put the system at FULL capability EXCEPT that,
 // at Phase 0, no SMTP infrastructure exists — so the effective reachable state is
 // CHEAP-LAYERS-ONLY (Rung 3), which the manifest calls "Phase 1's steady state". The
@@ -76,12 +76,12 @@ func (k KillSwitch) CheapLayersOnly() bool {
 }
 
 // FrontDoorRejecting reports whether Rung 4's HARD sub-mode is pulled: nothing is accepted, every
-// request-path surface returns an explicit unavailable envelope (kill-switch-ladder.md Rung 4).
+// request-path surface returns an explicit unavailable envelope (history/kill-switch-ladder.md Rung 4).
 func (k KillSwitch) FrontDoorRejecting() bool { return k.FrontDoor == FrontDoorReject }
 
 // FrontDoorDeferring reports whether Rung 4's SOFT sub-mode is pulled: accept-and-defer, i.e.
 // "the front door accepts submissions and returns a job handle (P5 §7), but the drainer is stopped —
-// work sits durably in work_items, nothing is processed" (kill-switch-ladder.md Rung 4).
+// work sits durably in work_items, nothing is processed" (history/kill-switch-ladder.md Rung 4).
 //
 // This predicate exists because the value used to have NO consumer (fix-plan item 4 / D2): both
 // readers of KillSwitch.FrontDoor compared only against FrontDoorReject, so TM_FRONTDOOR_MODE=
@@ -113,7 +113,7 @@ func (k KillSwitch) VerdictProductionPaused() bool {
 	return k.FrontDoorRejecting() || k.FrontDoorDeferring()
 }
 
-// ── Shadow-mode (shadow-mode.md, DR-2) ──────────────────────────────────────────────
+// ── Shadow-mode (history/shadow-mode.md, DR-2) ──────────────────────────────────────────────
 // Every data-driven mutator carries a mode; the four day-one mutators DEFAULT to
 // recommend-only (never auto-mutate routing/confidence/spend without a human). This is
 // a config surface at Phase 0; the mechanisms themselves are later-phase stubs.

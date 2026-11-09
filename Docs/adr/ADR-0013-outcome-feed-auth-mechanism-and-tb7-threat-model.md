@@ -1,10 +1,10 @@
 # ADR-0013 — The Phase-7 outcome-feed authentication MECHANISM + the TB-7 malicious-sender threat model
 
 - **Status:** ACCEPTED (mechanism decided 2026-07-19, on the owner's "finish all of it" authorization for the Phase-7 build; recommendation-led, and structurally reversible — see §Reversibility)
-- **Kind:** door-touching — resolves the **OQ-P7-1 *mechanism* sub-decision** that [ADR-0001](ADR-0001-outcome-feed-authentication.md) deliberately left open and [`DECISIONS.md`](../DECISIONS.md) §5 parked. It **discharges the pre-P7 hard gate** ([pre-takeoff-checklist](../pre-takeoff-checklist.md) §3.4): *"no P7 code until TB-7 authentication + threat model are designed."* Does **not** reopen any of the five frozen doors.
+- **Kind:** door-touching — resolves the **OQ-P7-1 *mechanism* sub-decision** that [ADR-0001](ADR-0001-outcome-feed-authentication.md) deliberately left open and [`open-decisions.md`](../open-decisions.md) §5 parked. It **discharges the pre-P7 hard gate** ([pre-takeoff-checklist](../history/pre-takeoff-checklist.md) §3.4): *"no P7 code until TB-7 authentication + threat model are designed."* Does **not** reopen any of the five frozen doors.
 - **Deciders:** owner (P7-build authorization) — the P7-time choice ADR-0001 §Consequences reserved.
 - **Extends / builds on:** [ADR-0001](ADR-0001-outcome-feed-authentication.md) (*that* the feed is authenticated + threat-modelled — the principle, already ACCEPTED 2026-07-17). ADR-0001 fixed the **what**; this ADR fixes the **how** (the mechanism) and produces the **threat model** ADR-0001 required.
-- **Source finding:** cross-phase consistency report §0/§1 **F-15** (feed poisoning) · **DR-1** · **PN-2** · the P6→P7 [`phase-7-readiness-assessment.md`](../phase-7-readiness-assessment.md) §2.1 (which named this the single hard door blocking live P7).
+- **Source finding:** cross-phase consistency report §0/§1 **F-15** (feed poisoning) · **DR-1** · **PN-2** · the P6→P7 [`history/phase-7-readiness-assessment.md`](../history/phase-7-readiness-assessment.md) §2.1 (which named this the single hard door blocking live P7).
 
 ---
 
@@ -99,7 +99,7 @@ This is why deciding the mechanism now does **not** over-commit: the owner can v
 
 ## Why this is door-touching but reopens no frozen door
 
-- It **resolves** the OQ-P7-1 mechanism sub-decision (parked in DECISIONS §5) and **discharges** the pre-P7 gate — a one-way architectural commitment about P7's input trust model. That is why it earns an ADR (extending ADR-0001).
+- It **resolves** the OQ-P7-1 mechanism sub-decision (parked in open-decisions §5) and **discharges** the pre-P7 gate — a one-way architectural commitment about P7's input trust model. That is why it earns an ADR (extending ADR-0001).
 - It **touches none of the five frozen doors.** Door 1 (`/verify` shape), Door 2 (append-only LOG), Door 3 (hashing / no-plaintext), Door 4 (`status`/`reason`/`recommendation` vocab), Door 5 (never-fork / node-list) are all unchanged. TB-7 is a *trust boundary*, not one of the five doors; authenticating it is purely additive.
 - The `OutcomeSource` interface + the ingestion path add **new brain-side code and new tables** (`send_outcomes` is filled — it was created empty in P1 §4.7 for exactly this; a new `calibration` store). **Zero** frozen `verifications` column is touched; **zero** new `status`/`reason`/`recommendation` is minted (the historical-bounce gate uses the P1-reserved `historical_bounce`). Door 4 intact.
 
@@ -110,7 +110,7 @@ This is why deciding the mechanism now does **not** over-commit: the owner can v
 - **Positive.** The pre-P7 hard gate is discharged with a real threat model and a concrete, defensible mechanism. The flywheel's most dangerous input gains an integrity boundary that closes the poisoning class (F-15/16/17) *before* any calibration trusts a byte. The brain opens **no** new inbound attack surface. The choice is reversible (adapter).
 - **Cost.** Live P7 still cannot run until the **sender ("Feature 2") exists and implements its half** of the mTLS feed (a cross-project dependency, GAP-48). This is deliberate and was already true — this ADR does not remove that gate, it removes the *design* gate. Local build proceeds now against `SimulatedSource`.
 - **Left as DIALs (owner/P7-time, not blockers):** the per-provider ingestion rate-limit values; the pull cadence (OQ-P7-7); the F-17 **N** value (PN-11); the mTLS trust-anchor + credential provisioning (an operational secret, mirrors node-token / vendor-key custody — a new secret class loaded like the others, never committed).
-- **Recorded:** this ADR; the ADR index (ADR-0013); [`DECISIONS.md`](../DECISIONS.md) §5 (the parked mechanism line is now RESOLVED with a pointer here) + §6 register; [pre-takeoff-checklist](../pre-takeoff-checklist.md) §3.4 (the gate is ticked "designed", with the live-sender dependency still open).
+- **Recorded:** this ADR; the ADR index (ADR-0013); [`open-decisions.md`](../open-decisions.md) §5 (the parked mechanism line is now RESOLVED with a pointer here) + §6 register; [pre-takeoff-checklist](../history/pre-takeoff-checklist.md) §3.4 (the gate is ticked "designed", with the live-sender dependency still open).
 
 ## Compliance / how it's checked
 

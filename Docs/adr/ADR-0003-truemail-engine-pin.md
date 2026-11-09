@@ -3,7 +3,7 @@
 **Status:** ACCEPTED — 2026-07-17 (Phase 0)
 **Door:** Door 5 (never fork the engine; node-list discipline)
 **Deciders:** owner (build discipline); recorded by the Phase-0 scaffolding pass
-**Companions:** [`../../PROJECT_RULES.md`](../../PROJECT_RULES.md) · [`../../verifier-node/truemail-rack/FORK.md`](../../verifier-node/truemail-rack/FORK.md) · [`../truemail-ground-truth.md`](../truemail-ground-truth.md) · [`DECISIONS.md`](../DECISIONS.md)
+**Companions:** [`../../PROJECT_RULES.md`](../../PROJECT_RULES.md) · [`../../verifier-node/truemail-rack/FORK.md`](../../verifier-node/truemail-rack/FORK.md) · [`../history/truemail-ground-truth.md`](../history/truemail-ground-truth.md) · [`open-decisions.md`](../open-decisions.md)
 
 ---
 
@@ -32,7 +32,7 @@ closed control-plane-side or in the rack wrapper (Phase 2+), never by editing th
 - The phase specs' appendices cite `gem@3.3.0` / `rack@0.10.0` as **illustrative example
   strings** (README captures), not frozen contracts. The real fork base is **rack `v0.9.0`**
   (no `0.10.0` tag exists) embedding **gem `3.3.1`**. Logged as ground-truth deltas
-  ([`../truemail-ground-truth.md`](../truemail-ground-truth.md)); they touch no frozen door.
+  ([`../history/truemail-ground-truth.md`](../history/truemail-ground-truth.md)); they touch no frozen door.
 
 ### The engine stays verifier-node-side (not pulled into the control-plane)
 
@@ -53,7 +53,7 @@ is what we fork; **not** a gem patch). Recorded in `FORK.md` modification #2. Th
 `0.5.1`** (the version the built image actually resolved), not the range `~> 0.5.0` — a range let
 a rebuild drift within `0.5.x`. `0.5.1` satisfies `~> 0.5.0`, so nothing frozen moved (the engine
 `truemail 3.3.1` is byte-identical — Door 5 intact); this only makes the rack build reproducible.
-Recorded in `FORK.md` #2 and `truemail-ground-truth.md` GT-3.
+Recorded in `FORK.md` #2 and `history/truemail-ground-truth.md` GT-3.
 
 ## Consequences
 

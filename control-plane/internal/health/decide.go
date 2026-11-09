@@ -14,7 +14,7 @@
 //   - the three GUARDS on the block-rate trigger (§5.3): the sample-size gate (GAP-27), hysteresis
 //     (quick to quarantine, slow to trust), and redistribution-awareness (the fleet brake).
 //
-// SHADOW-MODE (DR-2 / shadow-mode.md): the BLOCK-RATE (statistical, A1) quarantine trigger DEFAULTS
+// SHADOW-MODE (DR-2 / history/shadow-mode.md): the BLOCK-RATE (statistical, A1) quarantine trigger DEFAULTS
 // to recommend-only — it emits a RECOMMENDATION, never an auto-mutation, until an owner promotes it.
 // The AUDIT-RED (A2, deterministic binary) and the CANARY recovery (A3, conservative) stay AUTO.
 // This file returns BOTH the decided transitions AND the recommendations; the caller applies the

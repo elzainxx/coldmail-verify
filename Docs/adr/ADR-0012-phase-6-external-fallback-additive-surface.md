@@ -15,11 +15,11 @@ providers, retry-exhausted greylisted, gave-up rate-limited). It makes the syste
 consumer/catch-all lists immediately, at bounded cost, while the P7 data moat grows underneath.
 
 This is the **first deliberate egress of plaintext PII to a third party**, and it carries **two
-irreversible correctness surfaces** the design spec (phase-6-fallback-spec.md, APPROVED v1.0) marks
+irreversible correctness surfaces** the design spec (history/phase-6-fallback-spec.md, APPROVED v1.0) marks
 as load-bearing: **anti-laundering** (§3.4) and **spend-once** (§5.4/GAP-42). The build is local-only
 against a **mock vendor**; the real vendor is not enabled this phase (the DPA gates enablement, not
 the build). OQ-P6-3 (asymmetric vendor-invalid) and OQ-P6-6 (disclose + opt-out) were DECIDED
-pre-build (DECISIONS §6).
+pre-build (open-decisions §6).
 
 ## Decision
 

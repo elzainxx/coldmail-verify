@@ -107,4 +107,4 @@ ruling adds one more way to the same place (the domain's own A record) and no ne
 exposure is bounded to port 25, but the SMTP transcript is persisted verbatim in the raw sidecar (§6.4), so an internal SMTP banner would be
 recorded. Because Door 5 forbids touching the gem, the control belongs at the network edge (an egress policy on the verifier box denying
 non-public destinations on 25) or in a fork-owned pre-flight; either is a deployment/design decision. Recorded as a 🔴 item in
-`go-live-runbook.md` Stage 0.
+`go-live-checklist.md` Stage 0.

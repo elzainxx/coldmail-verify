@@ -5,11 +5,11 @@
 and *the operational doctrine that keeps the system honest* — **without reading all seven phase specs.**
 **What this is NOT:** a design spec or a decision log. It **invents nothing.** Every rule here is
 *restated* from an authority that already decided it: the seven approved phase specs, the
-[build plan](Docs/truemail-build-plan.md), [`Docs/DECISIONS.md`](Docs/DECISIONS.md), the
+[build plan](Docs/history/truemail-build-plan.md), [`Docs/open-decisions.md`](Docs/open-decisions.md), the
 [ADRs](Docs/adr/), and the five revision-pass docs
-([config-manifest](Docs/config-manifest.md) · [kill-switch-ladder](Docs/kill-switch-ladder.md) ·
-[shadow-mode](Docs/shadow-mode.md) · [cross-phase-consistency-report](Docs/cross-phase-consistency-report.md) ·
-[pre-takeoff-checklist](Docs/pre-takeoff-checklist.md)). Where a rule cites a source, the source wins if
+([config-manifest](Docs/config-manifest.md) · [kill-switch-ladder](Docs/history/kill-switch-ladder.md) ·
+[shadow-mode](Docs/history/shadow-mode.md) · [cross-phase-consistency-report](Docs/history/cross-phase-consistency-report.md) ·
+[pre-takeoff-checklist](Docs/history/pre-takeoff-checklist.md)). Where a rule cites a source, the source wins if
 they ever disagree — this file is a faithful synthesis, not a new authority.
 
 > **The one rule that governs everything** (build plan):
@@ -64,7 +64,7 @@ suggestion.
   redundant + geo-separate + access-audited backups, recovery **drilled before P1 ships**, rotation
   additive-only. The control-plane holds it in memory → host-hardening + core-dump suppression are part of
   custody (F-9/F-19). See [`control-plane/internal/secrets`](control-plane/internal/secrets/secrets.go) and
-  [pre-takeoff-checklist §1.1](Docs/pre-takeoff-checklist.md).
+  [pre-takeoff-checklist §1.1](Docs/history/pre-takeoff-checklist.md).
 - **The one bounded exception** (P5, DR-4/ADR-0002): the queue (`work_items`) holds *plaintext for
   work-not-yet-done only*, purged transactionally on settle, and its backup copy must be
   excluded/protected. Every *other* durable store holds only `email_hash`.
@@ -139,7 +139,7 @@ There are **two** distinct vocabularies, and they must not bleed into each other
 
 Anything that autonomously changes **routing, confidence, provider eligibility, or spend** from data
 carries a `mode ∈ {shadow, recommend-only, auto}` and **defaults to `recommend-only`** — compute +
-alert, never auto-change, until a human deliberately promotes it (DR-2, [shadow-mode.md](Docs/shadow-mode.md)).
+alert, never auto-change, until a human deliberately promotes it (DR-2, [shadow-mode.md](Docs/history/shadow-mode.md)).
 
 - **The four day-one mutators default to `recommend-only`:** A1 (P4 block-rate quarantine, statistical
   trigger), A6 (P7 confidence recalibration — the sharpest), A8 (P7 provider auto-promotion), A9 (P7
@@ -163,7 +163,7 @@ alert, never auto-change, until a human deliberately promotes it (DR-2, [shadow-
 The documented degradation hierarchy (full → SMTP-off → fallback-off → cheap-only → paused). **Every
 rung returns a real, correctly-labelled verdict — degradation lowers *confidence*, never *honesty*.**
 No rung ever fabricates `valid`/`invalid`. Every rung is reachable by **config/flag, not code** (Door
-5). Full detail: [kill-switch-ladder.md](Docs/kill-switch-ladder.md). Wired as real config in
+5). Full detail: [kill-switch-ladder.md](Docs/history/kill-switch-ladder.md). Wired as real config in
 `control-plane/internal/config` (`KillSwitch`).
 
 | Rung | Disables | Still returns | Scope |
@@ -207,7 +207,7 @@ No rung ever fabricates `valid`/`invalid`. Every rung is reachable by **config/f
 - **Match the surrounding code.** Go is stdlib-first at Phase 0 (external deps arrive with the features
   that need them). Ruby fork stays stock (no gem patch, minimal rack-side edits, all listed in FORK.md).
 - **Flag, don't fix, a spec-vs-reality mismatch.** A mismatch that touches a frozen door is an owner
-  decision — surface it (as in [truemail-ground-truth.md](Docs/truemail-ground-truth.md)), never
+  decision — surface it (as in [truemail-ground-truth.md](Docs/history/truemail-ground-truth.md)), never
   silently "correct" the door.
 
 ---
@@ -230,7 +230,7 @@ No rung ever fabricates `valid`/`invalid`. Every rung is reachable by **config/f
   `verifier-node/`) that does not also touch a doc/ADR fails the docs-updated CI check
   ([`scripts/check-docs-updated.sh`](scripts/check-docs-updated.sh)).
 - **One-way-door decisions and owner-OQ rulings become ADRs** ([`Docs/adr/`](Docs/adr/)). Cross-phase
-  rulings live in [`Docs/DECISIONS.md`](Docs/DECISIONS.md); parked sub-decisions stay parked in §5 there
+  rulings live in [`Docs/open-decisions.md`](Docs/open-decisions.md); parked sub-decisions stay parked in §5 there
   until an owner resolves them (this Phase 0 did **not** resolve them).
 - **The config reference is generated from the manifest and checked in**
   ([`Docs/config-reference.md`](Docs/config-reference.md)) so "what's toggleable" is always current;

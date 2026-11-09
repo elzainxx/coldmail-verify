@@ -203,7 +203,7 @@ jobs:
       - uses: actions/checkout@v4
       # Run the fork's own RSpec suite (stock specs + the P2 /v1 wrapper specs). The gem is
       # STUBBED here (fast, no socket) — the socket-level wire proof (test/p2) is a separate,
-      # Docker-heavy harness run out of band (Docs/phase-2-status.md). The fork's SimpleCov 100%
+      # Docker-heavy harness run out of band (Docs/history/phase-2-status.md). The fork's SimpleCov 100%
       # line-coverage config is a pre-existing threshold; we assert on TEST FAILURES (behavior),
       # not that threshold — COVERAGE=0 disables the SimpleCov exit-2 so a real spec failure is
       # what fails this job, never the wrapper lowering the ratio.

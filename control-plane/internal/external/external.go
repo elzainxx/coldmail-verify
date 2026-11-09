@@ -1,4 +1,4 @@
-// Package external is the Phase-6 third-party fallback layer (spec phase-6-fallback-spec.md):
+// Package external is the Phase-6 third-party fallback layer (spec history/phase-6-fallback-spec.md):
 // the brain-side call to a paid external verifier, routed ONLY the residue every prior phase
 // structurally could not answer (catch-all, :mx-routed big providers, retry-exhausted greylisted,
 // gave-up rate-limited). It is the FIRST deliberate egress of plaintext PII to a third party, and

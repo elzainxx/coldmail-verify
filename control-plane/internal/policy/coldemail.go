@@ -20,7 +20,7 @@ const (
 // BEFORE mx. The spec's §7.2 illustrative order lists mx first, but with mx first the
 // general mx:fail gate (no_mx) fires on a null-MX domain and MASKS the more specific
 // null_mx:pass gate, making it unreachable. Checking the explicit RFC-7505 signal first
-// yields the correct, specific reason. This is a dial choice (surfaced in phase-1-status.md),
+// yields the correct, specific reason. This is a dial choice (surfaced in history/phase-1-status.md),
 // not a frozen-door change. All four cases verified: good / no-mx / null-mx / transient.
 // Phase-2 additive change (§7.3): `smtp` is appended to `order` and SMTP gates + confidence
 // baselines are added. This is ADDITIVE — the action grammar, the open-object shape, and every

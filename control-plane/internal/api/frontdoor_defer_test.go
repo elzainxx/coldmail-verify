@@ -25,7 +25,7 @@ import (
 // incident kept producing verdicts, with no error and no warning. "A silently inert safety control
 // is worse than an absent one" (fix plan item 4), because an absent one at least fails loudly.
 //
-// WHAT THE RUNG PROMISES, split by surface (kill-switch-ladder.md Rung 4, PROJECT_RULES.md §4·PAUSED):
+// WHAT THE RUNG PROMISES, split by surface (history/kill-switch-ladder.md Rung 4, PROJECT_RULES.md §4·PAUSED):
 //
 //	/v1/verify (SYNC)  → the explicit unavailable envelope. There is no deferred form of a
 //	                     synchronous answer: no handle to return, no queue row to defer into. Serving

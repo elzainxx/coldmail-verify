@@ -3,7 +3,7 @@
 // (normalization, scoring, policy) is control-plane-side; the verifier-node decides nothing.
 //
 // Phase 0: the contract only. No live verifier-node is contacted (none exists). The parse target
-// is the stock rack's lean body (Docs/truemail-ground-truth.md §2): the verifier-node returns raw
+// is the stock rack's lean body (Docs/history/truemail-ground-truth.md §2): the verifier-node returns raw
 // engine facts, never a status/reason/confidence.
 package node
 

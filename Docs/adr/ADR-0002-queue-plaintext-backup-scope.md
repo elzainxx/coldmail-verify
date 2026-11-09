@@ -3,7 +3,7 @@
 - **Status:** ACCEPTED (owner batch sign-off 2026-07-17)
 - **Kind:** door-referencing — **affirms** Door 3 and the P5 bounded exception; adds a phase-gate. Does **not** reopen or modify Door 3.
 - **Deciders:** owner (cross-phase revision-pass acceptance)
-- **Source finding:** cross-phase consistency report §0 finding 3 / §1 **F-7** · [`DECISIONS.md`](../DECISIONS.md) **DR-4** · **PN-3**
+- **Source finding:** cross-phase consistency report §0 finding 3 / §1 **F-7** · [`open-decisions.md`](../open-decisions.md) **DR-4** · **PN-3**
 
 ## Context
 
@@ -26,7 +26,7 @@ Neither phase is wrong on its own. P1 said "no plaintext" about *its* stores. P5
   3. **Short snapshot-retention** — bound how long any snapshot containing plaintext is retained, so the backup window can't exceed the intended live window by much.
 - The choice, and any residual it leaves, is documented in the P5 data-handling runbook alongside the existing OQ-P5-9 exception and the P2 §6.4 verifier-identity note.
 
-**This pass records the gate, not the mechanism.** No backup tooling or column encryption is built or chosen now — that is P5's call. Recorded in [`pre-takeoff-checklist.md`](../pre-takeoff-checklist.md) §3.7.
+**This pass records the gate, not the mechanism.** No backup tooling or column encryption is built or chosen now — that is P5's call. Recorded in [`history/pre-takeoff-checklist.md`](../history/pre-takeoff-checklist.md) §3.7.
 
 ## Why Door 3 is NOT reopened
 

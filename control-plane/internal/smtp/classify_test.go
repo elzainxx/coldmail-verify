@@ -8,7 +8,7 @@ import (
 )
 
 // These tests anchor the §6.1 classifier and §6.2 parser on the REAL transcript shapes captured
-// in Docs/truemail-ground-truth.md (§3.4 live smtpmock v2.5.4, §6.2 live gmail timeout). The
+// in Docs/history/truemail-ground-truth.md (§3.4 live smtpmock v2.5.4, §6.2 live gmail timeout). The
 // fixtures are verbatim-shaped so a spec-vs-reality drift fails here, not in production.
 
 // parseWrapper decodes a raw /v1/verify JSON body the way the brain will, then parses the target.

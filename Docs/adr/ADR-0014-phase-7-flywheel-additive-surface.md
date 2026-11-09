@@ -3,7 +3,7 @@
 - **Status:** ACCEPTED (Phase-7 local build, 2026-07-19)
 - **Kind:** door-touching **only** in that it fills reserved seams and adds operational state — it **reopens none of the five frozen doors**. Records the P7 build's surface so the additive claim is auditable (mirrors ADR-0010/0011/0012 for P4/P5/P6).
 - **Deciders:** owner (P7 build authorization: "finish all of it")
-- **Builds on:** [ADR-0013](ADR-0013-outcome-feed-auth-mechanism-and-tb7-threat-model.md) (the feed-auth mechanism + TB-7 threat model — the pre-P7 gate, discharged first). The spec authority is [`phase-7-flywheel-spec.md`](../phase-7-flywheel-spec.md) (APPROVED v1.0).
+- **Builds on:** [ADR-0013](ADR-0013-outcome-feed-auth-mechanism-and-tb7-threat-model.md) (the feed-auth mechanism + TB-7 threat model — the pre-P7 gate, discharged first). The spec authority is [`history/phase-7-flywheel-spec.md`](../history/phase-7-flywheel-spec.md) (APPROVED v1.0).
 
 ## Context
 
@@ -58,7 +58,7 @@ Both proven on the Mem fake AND real Postgres 16 (fresh migrations 0001–0012).
 - **Positive.** The loop is closed: verdicts can be measured against reality and calibrated, inside the frozen doors, additive throughout. Both irreversible surfaces are fail-verified. Recommend-only defaults + the fresh-system invariant mean a fresh P7 system performs **zero live mutation** (behavior identical to end-of-P6). The transport is a swappable adapter (reversible mechanism choice).
 - **Cold-start honesty is structural, not disclaimed** (§14.2 / GAP-52): uncalibrated buckets use the P1 baseline (`GetEffectiveCalibration` cold-start), promotion/weaning start at zero (sample-gated), and accuracy is unreportable without coverage (`Accuracy.Reportable`). No code path claims a moat at ship time.
 - **PENDING-REAL-SENDER (never faked green):** real accuracy numbers, live authentication, the agreed `send_outcome` contract, and any promotion/weaning firing all require the real sender ("Feature 2", GAP-48) — un-mockable pre-integration, exactly as P6's vendor accuracy was PENDING-REAL-VENDOR. The apparatus is fail-verified; the accuracy is not asserted.
-- **Recorded:** this ADR; the ADR index (ADR-0014); `phase-7-status.md`; the manifest §7.5 concrete env rows + regenerated `config-reference.md`; DECISIONS §6 register (OQ-P7-1 mechanism resolved via ADR-0013).
+- **Recorded:** this ADR; the ADR index (ADR-0014); `history/phase-7-status.md`; the manifest §7.5 concrete env rows + regenerated `config-reference.md`; open-decisions §6 register (OQ-P7-1 mechanism resolved via ADR-0013).
 
 ## Compliance / how it's checked
 

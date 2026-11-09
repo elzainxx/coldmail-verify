@@ -3,7 +3,7 @@
 - **Status:** ACCEPTED (owner batch sign-off 2026-07-17)
 - **Kind:** door-touching — creates a new one-way architectural commitment about P7's input trust model. Does **not** reopen any of the five frozen doors.
 - **Deciders:** owner (cross-phase revision-pass acceptance)
-- **Source finding:** cross-phase consistency report §0 headline / §1 **F-15** (+ F-16 promotion amplifier, F-17 gate poisoning) · [`DECISIONS.md`](../DECISIONS.md) **DR-1** · **PN-2**
+- **Source finding:** cross-phase consistency report §0 headline / §1 **F-15** (+ F-16 promotion amplifier, F-17 gate poisoning) · [`open-decisions.md`](../open-decisions.md) **DR-1** · **PN-2**
 - **Supersedes:** the P7 §3.2 / §13 framing of OQ-P7-1 as a `DECISION REQUIRED` *transport* choice. Transport-mechanism is still open; **authentication is no longer optional.**
 
 ## Context
@@ -30,7 +30,7 @@ This is a "get the door right before it accrues history or a consumer" decision.
 4. Ingestion is **rate-limited per-provider**, and the P7 §10 classifier-distribution monitor is elevated to a **security** signal (an anomaly there is a possible poisoning event, not just a data-quality blip).
 5. **Recommend-only (shadow-mode, DR-2) is a mitigation, not a substitute.** A human seeing a proposal before routing/confidence changes reduces blast radius; it does **not** authenticate the signal. Both are required; neither replaces the other.
 
-**This is a phase-gate, not an implementation task in this pass.** No feed-auth code is written now — P7 is not being built. The gate is recorded in [`pre-takeoff-checklist.md`](../pre-takeoff-checklist.md) §3.4.
+**This is a phase-gate, not an implementation task in this pass.** No feed-auth code is written now — P7 is not being built. The gate is recorded in [`history/pre-takeoff-checklist.md`](../history/pre-takeoff-checklist.md) §3.4.
 
 ## Why this is door-touching but reopens no frozen door
 
@@ -42,7 +42,7 @@ This is a "get the door right before it accrues history or a consumer" decision.
 
 - **Positive.** The flywheel's most dangerous input gains an integrity boundary before it is ever built. The poisoning class (F-15/16/17) is closed at the door rather than papered over with statistics. Recommend-only + authentication + ≥N-gate is layered defense.
 - **Cost.** P7 cannot ship until the sender side can authenticate (a cross-project dependency — the sender is a separate project, GAP-48). This is deliberate: it is cheaper to discover the dependency now than after calibration has trusted forged data.
-- **Left to P7-time / owner (flagged, not decided — see [`DECISIONS.md`](../DECISIONS.md) §5).**
+- **Left to P7-time / owner (flagged, not decided — see [`open-decisions.md`](../open-decisions.md) §5).**
   - Signed-webhooks **vs.** mutually-authenticated pull.
   - The value of **N** for the ≥N-invalid-signal gate, and whether ≥N is always-on or only-when-unauthenticated (with authentication now mandatory, ≥N is defense-in-depth).
   - Per-provider ingestion rate-limit values.

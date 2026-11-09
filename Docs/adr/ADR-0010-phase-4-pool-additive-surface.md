@@ -3,7 +3,7 @@
 **Status:** ACCEPTED (2026-07-18) — Phase-4 (resilience & pool) local build.
 **Door touched:** the **Door-1/Door-4 additive-only** guarantees (one new `signals` enum value) and
 **Door-2** operational state (one new table). No frozen door is mutated (see the reopen check).
-**Sources:** [`../phase-4-resilience-pool-spec.md`](../phase-4-resilience-pool-spec.md) §3–§9, §13; [`../DECISIONS.md`](../DECISIONS.md) DR-2; [`../shadow-mode.md`](../shadow-mode.md) §2.4/§7; GAP-27/28/30, OQ-P4-1/3/6/7/9.
+**Sources:** [`../history/phase-4-resilience-pool-spec.md`](../history/phase-4-resilience-pool-spec.md) §3–§9, §13; [`../open-decisions.md`](../open-decisions.md) DR-2; [`../history/shadow-mode.md`](../history/shadow-mode.md) §2.4/§7; GAP-27/28/30, OQ-P4-1/3/6/7/9.
 
 ---
 

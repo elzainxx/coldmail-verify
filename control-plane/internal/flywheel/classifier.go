@@ -1,4 +1,4 @@
-// Package flywheel is the Phase-7 close-the-loop layer (spec phase-7-flywheel-spec.md): it joins a
+// Package flywheel is the Phase-7 close-the-loop layer (spec history/phase-7-flywheel-spec.md): it joins a
 // real send OUTCOME back to the verdict that authorized the send, classifies what that outcome PROVES
 // about the address, and — for real-signal outcomes only — recalibrates confidence, promotes
 // providers, measures accuracy, and weans off the P6 fallback. It is ENTIRELY brain-side and additive

@@ -12,8 +12,8 @@ Everything else — the architecture, the frozen contracts, the safe-degradation
 from that.
 
 > **New here?** Read the guide for your role:
-> **[developer](Docs/ONBOARDING.md)** · **[operator](Docs/OPERATIONS.md)** ·
-> **[end user](Docs/USER_GUIDE.md)**. The full doc map is [`Docs/README.md`](Docs/README.md).
+> **[developer](Docs/install-and-deploy.md)** · **[operator](Docs/operator-runbook.md)** ·
+> **[end user](Docs/history/USER_GUIDE.md)**. The full doc map is [`Docs/README.md`](Docs/README.md).
 
 ---
 
@@ -58,7 +58,7 @@ coldmail-verify/
 The brain holds every secret and all accumulated data; the box does one thing — attempt an SMTP
 conversation from a reputation-bearing IP and report the raw facts, rendering no verdict. Because
 the box is stateless, adding a second one is a config line and a compromised box leaks nothing but
-itself. Full detail: [`Docs/ONBOARDING.md`](Docs/ONBOARDING.md).
+itself. Full detail: [`Docs/install-and-deploy.md`](Docs/install-and-deploy.md).
 
 ### The five frozen contracts ("one-way doors")
 
@@ -104,8 +104,8 @@ The brain runs cheap-verification-only with just a database and a pepper. Each f
 is switched on when its prerequisite is in place — an operator action, config, or (for the vendor
 and outcome-feed tiers) a pluggable adapter dropped into an existing interface seam; the brain's
 decision code is never touched. Satisfy them in order (each is detailed, with verification
-commands, in the [operations guide](Docs/OPERATIONS.md) and the
-[go-live runbook](Docs/go-live-runbook.md)):
+commands, in the [operations guide](Docs/operator-runbook.md) and the
+[go-live runbook](Docs/go-live-checklist.md)):
 
 | Capability | Prerequisite | Switched on with |
 |---|---|---|
@@ -122,13 +122,13 @@ system simply returns its honest verdict from the layers it *can* run.
 
 | You want to… | Read |
 |---|---|
-| Become productive as a developer | [`Docs/ONBOARDING.md`](Docs/ONBOARDING.md) |
-| Deploy and operate the system | [`Docs/OPERATIONS.md`](Docs/OPERATIONS.md) |
-| Understand what a verdict means | [`Docs/USER_GUIDE.md`](Docs/USER_GUIDE.md) |
+| Become productive as a developer | [`Docs/install-and-deploy.md`](Docs/install-and-deploy.md) |
+| Deploy and operate the system | [`Docs/operator-runbook.md`](Docs/operator-runbook.md) |
+| Understand what a verdict means | [`Docs/history/USER_GUIDE.md`](Docs/history/USER_GUIDE.md) |
 | Know the rules that never change | [`PROJECT_RULES.md`](PROJECT_RULES.md) |
 | See every toggle/flag/secret/dial | [`Docs/config-reference.md`](Docs/config-reference.md) (generated) |
-| See the binding decisions and ADRs | [`Docs/DECISIONS.md`](Docs/DECISIONS.md) · [`Docs/adr/`](Docs/adr/) |
-| Follow the ordered go-live path | [`Docs/go-live-runbook.md`](Docs/go-live-runbook.md) |
+| See the binding decisions and ADRs | [`Docs/open-decisions.md`](Docs/open-decisions.md) · [`Docs/adr/`](Docs/adr/) |
+| Follow the ordered go-live path | [`Docs/go-live-checklist.md`](Docs/go-live-checklist.md) |
 | See the full documentation map | [`Docs/README.md`](Docs/README.md) |
 
 ## License

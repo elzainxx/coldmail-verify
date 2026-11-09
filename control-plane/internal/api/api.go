@@ -287,7 +287,7 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	// by Doors 1 and 2). So it returns the explicit unavailable envelope, and the bulk surface —
 	// which DOES have somewhere to defer to — keeps accepting. That asymmetry is the rung working as
 	// specified, not an inconsistency: "either a job handle + paused job status (accept-and-defer),
-	// or an explicit unavailable response (reject)" (kill-switch-ladder.md Rung 4).
+	// or an explicit unavailable response (reject)" (history/kill-switch-ladder.md Rung 4).
 	//
 	// Before fix-plan item 4 this compared only against FrontDoorReject, so accept_and_defer served
 	// verdicts at full capability (D2).
@@ -494,7 +494,7 @@ func (s *Server) handleJobStatus(w http.ResponseWriter, r *http.Request) {
 	if complete && status != "complete" && status != "complete_with_unknowns" {
 		status = "complete" // authoritative completion overrides a stale stored 'running'
 	}
-	// Rung 4 promises "a job handle + 'processing paused' job status" (kill-switch-ladder.md). It is
+	// Rung 4 promises "a job handle + 'processing paused' job status" (history/kill-switch-ladder.md). It is
 	// reported as an ADDITIVE BOOLEAN, deliberately NOT as a new `status` value: the job-status
 	// vocabulary is a closed set with a DB CHECK constraint (0009: submitted|running|complete|
 	// complete_with_unknowns), and minting a fifth value would change a persisted vocabulary — a
@@ -616,7 +616,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 //
 // EVERY PRE-EXISTING FIELD IS STILL HERE, unchanged, at the top level. That is PROJECT_RULES'
 // additive-only discipline applied to an operator surface: `config` in particular is grepped by a
-// documented runbook step (OPERATIONS.md's `grep -o 'frontdoor=[^ "]*'`) and by
+// documented runbook step (operator-runbook.md's `grep -o 'frontdoor=[^ "]*'`) and by
 // TestFrontDoorDefer_SummaryNamesTheRung, so removing or nesting it would break a procedure an
 // operator runs during an incident. `ready` stays as the boolean it always was, and `status` is its
 // word form — a monitor reading either gets the same answer, which is the property the test pins.

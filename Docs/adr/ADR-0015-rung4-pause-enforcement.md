@@ -4,7 +4,7 @@
 - **Kind:** door-referencing — a **tightening** that makes an existing operational control real. Additive on Door 1 (one new boolean field on two bulk envelopes), zero change to Door 4 vocabulary, zero change to the persisted job-status set. No frozen door is mutated (see the reopen check).
 - **Deciders:** owner (alignment-plan ruling, Tier 0 = "wrong today, independent of any alignment goal").
 - **Source finding:** cross-module audit finding **D2** → [`alignment-fix-plan.md`](../../../coldmail-platform/alignment-fix-plan.md) item 4; canonical contract §1.11.1, §1.11.5.
-- **Governs:** [`../kill-switch-ladder.md`](../kill-switch-ladder.md) Rung 4 · [`../OPERATIONS.md`](../OPERATIONS.md) §3 · `PROJECT_RULES.md` §4 (PAUSED).
+- **Governs:** [`../history/kill-switch-ladder.md`](../history/kill-switch-ladder.md) Rung 4 · [`../operator-runbook.md`](../operator-runbook.md) §3 · `PROJECT_RULES.md` §4 (PAUSED).
 
 ---
 
@@ -54,7 +54,7 @@ the record of those three.
 | `VerdictProductionPaused()` | either | sync verify, the drainer gate, the disclosure flag |
 
 The rung cannot be half-pulled. The earlier shape — separate "stop the drainer" and "front-door
-mode" levers, as OPERATIONS.md described it — is exactly how one half stays running.
+mode" levers, as operator-runbook.md described it — is exactly how one half stays running.
 
 ### 2. The SYNC endpoint refuses at BOTH sub-modes
 
@@ -145,10 +145,10 @@ and `main.go` logs at boot if the process starts already paused.
   with no behaviour — fail on the day a fourth mode is added.
 - **Cost / limits.**
   - **Config is read at boot; there is no reload.** Pulling or releasing Rung 4 requires a restart.
-    That is pre-existing (no SIGHUP path exists in M1) and is now stated in OPERATIONS.md rather
+    That is pre-existing (no SIGHUP path exists in M1) and is now stated in operator-runbook.md rather
     than left for an operator to discover mid-incident. A hot-reloadable kill switch is future work.
   - **A long soft pause accumulates rows.** Backlog is bounded only by `work_items` growth and the
-    §7.5 per-submission cap. OPERATIONS.md says to watch the `ready` count and drop to `reject` if
+    §7.5 per-submission cap. operator-runbook.md says to watch the `ready` count and drop to `reject` if
     the queue grows faster than it will be drained.
   - **`accept_and_defer` does nothing for sync callers**, by decision §2. An operator who needs the
     sync surface to keep answering must not be at Rung 4 at all.

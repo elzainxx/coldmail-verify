@@ -19,7 +19,7 @@ import (
 // accept_and_defer validated and then behaved EXACTLY like serving. An operator reaching for the
 // middle rung during a data-integrity incident got full serving, with no error and no warning.
 //
-// WHAT THE RUNG MEANS, from its own definition (kill-switch-ladder.md Rung 4): "the front door
+// WHAT THE RUNG MEANS, from its own definition (history/kill-switch-ladder.md Rung 4): "the front door
 // accepts submissions and returns a job handle (P5 §7), but the drainer is stopped — work sits
 // durably in work_items, nothing is processed. Restart resumes with zero loss." So the rung has
 // exactly two testable halves, and this file owns the second:

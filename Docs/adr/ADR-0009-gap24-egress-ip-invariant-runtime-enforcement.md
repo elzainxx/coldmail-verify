@@ -3,7 +3,7 @@
 **Status:** ACCEPTED (2026-07-17) — Phase-3 (first real box) local build.
 **Door touched:** **Door 2** (LOG provenance — `verifier_ip`) in spirit, and the **Door-1/Door-4
 additive-only** guarantees. No frozen door is mutated (see the reopen check).
-**Sources:** [`../phase-3-first-real-box-spec.md`](../phase-3-first-real-box-spec.md) §4.4, §5.4, §6.6/§6.6.1, §8, Appendix B row 14; [`../DECISIONS.md`](../DECISIONS.md) DR-3; GAP-15, GAP-24, OQ-P3-6/8/11.
+**Sources:** [`../history/phase-3-first-real-box-spec.md`](../history/phase-3-first-real-box-spec.md) §4.4, §5.4, §6.6/§6.6.1, §8, Appendix B row 14; [`../open-decisions.md`](../open-decisions.md) DR-3; GAP-15, GAP-24, OQ-P3-6/8/11.
 
 ---
 
@@ -84,7 +84,7 @@ the additive surface genuinely additive against the five frozen doors?
 - On the local machine the whole SMTP path is built and tested but **inert** for real traffic (no
   eligible node, because `port25_open=false` and `PublicEgressIP` empty) — the honest state. The
   cutover to a real box is config-only (set `TM_NODE_PUBLIC_EGRESS_IP`, prove egress-25 →
-  `port25_open=true`, audit green). See [`../phase-3-cutover-runbook.md`](../phase-3-cutover-runbook.md).
+  `port25_open=true`, audit green). See [`../history/phase-3-cutover-runbook.md`](../history/phase-3-cutover-runbook.md).
 - `provider_mx_routed` verdicts stay cacheable; capacity-gap verdicts don't — a deliberate
   discriminator (PB1) that keeps a recovered node's better verdict from being suppressed by a stale
   cache entry.

@@ -17,7 +17,7 @@ import (
 // REAL orchestrator + MemStore + a controllable mock vendor through the full compute→settle path.
 // Real behavioral tests, not mocks-asserting-mocks. The GAP-47 honesty holds: we test the MECHANICS
 // (routing, anti-laundering, spend-once, breaker, cache-no-rebill, global-kill, privacy) against the
-// mock — the vendor's real ACCURACY on the residue is PENDING-REAL-VENDOR (phase-6-status.md).
+// mock — the vendor's real ACCURACY on the residue is PENDING-REAL-VENDOR (history/phase-6-status.md).
 
 // gmailResolver routes gmail.com to Google's MX so the cheap path settles risky/provider_no_smtp — a
 // TERMINAL residue class (b) escalatable inline WITHOUT an SMTP node (the cleanest end-to-end residue

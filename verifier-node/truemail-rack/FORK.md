@@ -65,7 +65,7 @@ verdict (all interpretation is control-plane-side).
 - **The fork `Gemfile` is not extended** for the mock substrate — `smtp_mock`/`dns_mock` and the
   `smtpmock` binary live only in the throwaway `test/p2` image, never the production image.
 
-## Spec-vs-reality notes surfaced by the fork (flagged, see Docs/truemail-ground-truth.md)
+## Spec-vs-reality notes surfaced by the fork (flagged, see Docs/history/truemail-ground-truth.md)
 
 - The phase specs' appendices cite `rack@0.10.0` and `gem@3.3.0` illustratively. The real
   latest release tags are **rack v0.9.0** and **gem v3.3.1** — no `0.10.0` rack tag exists.

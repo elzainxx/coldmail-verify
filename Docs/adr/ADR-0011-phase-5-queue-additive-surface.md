@@ -5,7 +5,7 @@
 new bulk sibling endpoint returning the SAME shape), **Door-2** operational state (three new tables),
 and the **Door-3 bounded plaintext exception** (now encrypted at rest + transactionally purged). No
 frozen door is mutated (see the reopen check).
-**Sources:** [`../phase-5-queue-spec.md`](../phase-5-queue-spec.md) §3–§10, §14; [`../DECISIONS.md`](../DECISIONS.md) DR-4 (PN-3/ADR-0002), PN-13/F-20; [`../pre-takeoff-checklist.md`](../pre-takeoff-checklist.md) §3.7/§3.8; GAP-32/32b/33/34/35/36/37/38, OQ-P5-1…12; [[truemail-lease-cas-exactly-once-settlement]].
+**Sources:** [`../history/phase-5-queue-spec.md`](../history/phase-5-queue-spec.md) §3–§10, §14; [`../open-decisions.md`](../open-decisions.md) DR-4 (PN-3/ADR-0002), PN-13/F-20; [`../history/pre-takeoff-checklist.md`](../history/pre-takeoff-checklist.md) §3.7/§3.8; GAP-32/32b/33/34/35/36/37/38, OQ-P5-1…12; [[truemail-lease-cas-exactly-once-settlement]].
 
 ---
 

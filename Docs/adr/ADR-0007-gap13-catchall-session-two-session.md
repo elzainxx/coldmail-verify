@@ -1,9 +1,9 @@
 # ADR-0007 — Catch-all probe runs as TWO sessions (Option B); the gem is not patched to get same-session
 
-- **Status:** ACCEPTED (owner sign-off carried in [`phase-2-smtp-mocks-spec.md`](../phase-2-smtp-mocks-spec.md) Appendix D — OQ-P2-4 *conditioned on this spike*; OQ-P2-11 *run early*) · **RESOLVED at Phase 2** by running the spike
+- **Status:** ACCEPTED (owner sign-off carried in [`history/phase-2-smtp-mocks-spec.md`](../history/phase-2-smtp-mocks-spec.md) Appendix D — OQ-P2-4 *conditioned on this spike*; OQ-P2-11 *run early*) · **RESOLVED at Phase 2** by running the spike
 - **Kind:** door-referencing — a decision that **affirms Door 5** (never fork/patch the engine gem). It chooses the wrapper-side design that keeps the gem 100% unmodified. It does **not** change any of the five frozen contracts.
 - **Deciders:** owner (P2 Appendix D: "Door 5 outranks same-session elegance … never patch the gem"); spike run by the P2 build (2026-07-17)
-- **Source:** [`phase-2-smtp-mocks-spec.md`](../phase-2-smtp-mocks-spec.md) §5.4 / §6.3 (GAP-13, OQ-P2-4, OQ-P2-11); handoff [`phase-1-to-2-handoff.md`](../phase-1-to-2-handoff.md) ("the one thing P2 should run first"); memory [[truemail-never-fork-engine-door5]]
+- **Source:** [`history/phase-2-smtp-mocks-spec.md`](../history/phase-2-smtp-mocks-spec.md) §5.4 / §6.3 (GAP-13, OQ-P2-4, OQ-P2-11); handoff [`history/phase-1-to-2-handoff.md`](../history/phase-1-to-2-handoff.md) ("the one thing P2 should run first"); memory [[truemail-never-fork-engine-door5]]
 
 ## Context
 
@@ -79,7 +79,7 @@ certainly-nonexistent local-part at the same domain), then combines the two engi
 - **Positive.** The gem stays pinned and unpatched (Door 5 intact, CI-asserted). The probe is simple,
   testable, and honest. The known weakness is one-directional and safe (can only under-claim, never
   over-claim `valid`). Two RCPTs is the substrate-confirmed shape — the live `smtpmock` v2.5.4 run
-  ([`truemail-ground-truth.md`](../truemail-ground-truth.md) §3.4) showed a seeded probe genuinely
+  ([`history/truemail-ground-truth.md`](../history/truemail-ground-truth.md) §3.4) showed a seeded probe genuinely
   returns `550`, so target-`250` + seeded-probe-`550` = `valid` is reachable with two calls.
 - **Cost.** Two SMTP connections per probed address instead of one → more connections (a reputation
   cost **only on a real box**, P3+, and a pacing concern for P4 — noted as a SEAM, not solved here)

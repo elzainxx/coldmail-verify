@@ -11,8 +11,8 @@
 
 # Files ALREADY STORED with CRLF (vendored upstream sources and frozen records): no conversion in
 # either direction, so their committed bytes never change. Do not widen this list to hide new CRLF.
-Docs/phase-3-readiness-assessment.md -text
-Docs/phase-4-readiness-assessment.md -text
-Docs/phase-5-readiness-assessment.md -text
-Docs/phase-6-readiness-assessment.md -text
+Docs/history/phase-3-readiness-assessment.md -text
+Docs/history/phase-4-readiness-assessment.md -text
+Docs/history/phase-5-readiness-assessment.md -text
+Docs/history/phase-6-readiness-assessment.md -text
 verifier-node/truemail-rack/** -text

@@ -5,7 +5,7 @@
 // interpretation is here). Nothing in this package opens a socket — the verifier-node does the
 // SMTP; this parses what the wrapper serialized.
 //
-// The parse target is the REAL shape captured in Docs/truemail-ground-truth.md §6.2 and served
+// The parse target is the REAL shape captured in Docs/history/truemail-ground-truth.md §6.2 and served
 // by the fork wrapper's /v1/verify (verifier-node .../wrapper/serializer.rb): smtp_debug is
 // null on a clean success, else an array of per-host objects; a stage success is {status,string},
 // a failure is `false`/nil with the detail in errors{stage} as a RAW STRING (there is no numeric

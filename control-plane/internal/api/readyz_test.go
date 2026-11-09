@@ -54,7 +54,7 @@ import (
 //	   the diagnostic names what was actually served.
 //	F. drop `at` from /readyz → 1, CarriesTheContractEnvelope, on all three of its `at` assertions.
 //	G. drop `config` → 2, and the second is the one that matters: TestFrontDoorDefer_SummaryNamesTheRung
-//	   — a PRE-EXISTING test asserting the documented runbook grep (OPERATIONS.md's
+//	   — a PRE-EXISTING test asserting the documented runbook grep (operator-runbook.md's
 //	   `grep -o 'frontdoor=[^ "]*'`). Removing an operator field breaks a procedure someone runs
 //	   during an incident, and that test is what says so.
 //
@@ -384,7 +384,7 @@ func TestHealthz_CarriesAtToo(t *testing.T) {
 
 // TestReadyz_PreExistingFieldsAreStillThere is the additive-only assertion (PROJECT_RULES: "a rename
 // or removal is a break, never allowed"). Item 10 adds an envelope AROUND an operator surface that
-// is already in use: `config` is grepped by a documented runbook step (OPERATIONS.md's
+// is already in use: `config` is grepped by a documented runbook step (operator-runbook.md's
 // `grep -o 'frontdoor=[^ "]*'`) during an incident, and `ready`/`pepper`/`supabaseKey` are what the
 // existing tests and phase-0 status doc describe. Adding fields is free; moving these is not.
 func TestReadyz_PreExistingFieldsAreStillThere(t *testing.T) {
@@ -396,12 +396,12 @@ func TestReadyz_PreExistingFieldsAreStillThere(t *testing.T) {
 	}
 	cfgSummary, ok := body["config"].(string)
 	if !ok || cfgSummary == "" {
-		t.Fatalf("`config` must still be a top-level non-empty string — OPERATIONS.md greps it: %T %v", body["config"], body["config"])
+		t.Fatalf("`config` must still be a top-level non-empty string — operator-runbook.md greps it: %T %v", body["config"], body["config"])
 	}
 	// Not just present: it must still be the SUMMARY, i.e. still contain the rung an operator looks
 	// for. A `config` reduced to "ok" would satisfy a presence check and break the runbook.
 	if !strings.Contains(cfgSummary, "frontdoor=") {
-		t.Errorf("`config` must still be cfg.Summary() (it must contain frontdoor=…, which OPERATIONS.md greps): %q", cfgSummary)
+		t.Errorf("`config` must still be cfg.Summary() (it must contain frontdoor=…, which operator-runbook.md greps): %q", cfgSummary)
 	}
 	// Presence-only secret reporting, unchanged: the WORDS "set"/"unset", never a value.
 	if body["pepper"] != "set" {

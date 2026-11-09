@@ -157,7 +157,7 @@ the database enforces. Neither is append-only data, and neither has a reverse pa
 the migration keeps the DDL while a fresh one built from the reverted tree does not — measured on
 `0013` (two columns + an index present in one, absent in the other), with no tracking table to
 distinguish them. The go-live consequences and the checklist are in
-[`../../Docs/go-live-rollback-posture.md`](../../Docs/go-live-rollback-posture.md).
+[`../../Docs/history/go-live-rollback-posture.md`](../../Docs/history/go-live-rollback-posture.md).
 
 ---
 
@@ -216,9 +216,9 @@ All 25 open questions signed off (Appendix C). Key findings already resolved:
 
 ## References
 
-- Phase-1 spec: `Docs/phase-1-foundations-spec.md`
+- Phase-1 spec: `Docs/history/phase-1-foundations-spec.md`
 - Project rules (Doors 1–5): `PROJECT_RULES.md`
-- Decision log: `Docs/DECISIONS.md`
+- Decision log: `Docs/open-decisions.md`
 
 ---
 

@@ -60,7 +60,7 @@ conforming request. Closing the laxness and fixing that strictness were the same
 case-sensitive fix would have swapped one cross-module divergence for another.
 
 The ruling predates the fix twice: **OQ-13**, resolved "Bearer for `/v1/verify`"
-(`phase-1-foundations-spec.md:774`), and `canonical-module-contract.md` §1 clause 1, which names M1's
+(`history/phase-1-foundations-spec.md:774`), and `canonical-module-contract.md` §1 clause 1, which names M1's
 laxness explicitly. No ADR is owed.
 
 **Why it survived a full audit — the comment, not the code.** The old `trimBearer` fell through to

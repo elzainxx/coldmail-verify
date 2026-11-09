@@ -14,7 +14,7 @@ import (
 // greylist (GAP-12/GAP-35). So we do NOT fake accuracy; we test the MECHANICS (routing, gates,
 // anti-laundering, spend-once, breaker, normalization, idempotency) against a fake that returns
 // valid/invalid/unknown/error/timeout/rate-limited ON COMMAND. Anything needing a real vendor stays
-// PENDING-REAL-VENDOR (phase-6-status.md), never faked green.
+// PENDING-REAL-VENDOR (history/phase-6-status.md), never faked green.
 //
 // The mock also COUNTS calls and records the idempotency keys it saw — that count is what the
 // spend-once fail-verify test asserts (a P5-reclaim double-attempt must call the vendor at most once

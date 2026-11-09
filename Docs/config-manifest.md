@@ -2,7 +2,7 @@
 
 **Status:** DRAFT v0.1 — cross-phase consolidation pass (planning, not code)
 **Purpose:** the single exhaustive registry of every toggle, flag, threshold, secret, and dial defined across the seven approved phase specs. If a phase mentioned a knob, it appears here.
-**Companion docs:** [`kill-switch-ladder.md`](kill-switch-ladder.md) · [`shadow-mode.md`](shadow-mode.md) · [`cross-phase-consistency-report.md`](cross-phase-consistency-report.md) · [`pre-takeoff-checklist.md`](pre-takeoff-checklist.md)
+**Companion docs:** [`history/kill-switch-ladder.md`](history/kill-switch-ladder.md) · [`history/shadow-mode.md`](history/shadow-mode.md) · [`history/cross-phase-consistency-report.md`](history/cross-phase-consistency-report.md) · [`history/pre-takeoff-checklist.md`](history/pre-takeoff-checklist.md)
 
 ---
 
@@ -23,7 +23,7 @@ Every row is classified so the one-way doors (response shape, LOG, hashing, stat
 - **default** — the spec's value/range, or `UNSET — owner OQ` where the spec deliberately leaves it open, or `LOCKED` where the spec froze it.
 
 ### 0.4 What this manifest is NOT
-It does not resolve open questions or set UNSET values — those are owner decisions, surfaced in [`pre-takeoff-checklist.md`](pre-takeoff-checklist.md). It flags divergence between phases; it does not rewrite any frozen spec.
+It does not resolve open questions or set UNSET values — those are owner decisions, surfaced in [`history/pre-takeoff-checklist.md`](history/pre-takeoff-checklist.md). It flags divergence between phases; it does not rewrite any frozen spec.
 
 ---
 
@@ -455,7 +455,7 @@ Rung-2 dial (see §1 kill-switch); `TM_VENDOR_KEYS` is the pre-existing vendor-k
 
 ## 7. PHASE 7 — The flywheel
 
-> **All three P7 automated actions (recalibration apply, provider auto-promotion, fallback weaning) default to recommend-only.** See [`shadow-mode.md`](shadow-mode.md). The dials below set *what* they compute; shadow-mode governs *whether they act*.
+> **All three P7 automated actions (recalibration apply, provider auto-promotion, fallback weaning) default to recommend-only.** See [`history/shadow-mode.md`](history/shadow-mode.md). The dials below set *what* they compute; shadow-mode governs *whether they act*.
 
 ### 7.1 Ingestion & join integrity (LOCKED — data-integrity heart)
 | name | type | default | mis-setting effect | blast radius | source |
