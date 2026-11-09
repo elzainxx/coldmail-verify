@@ -7,6 +7,7 @@ require_relative 'serializer'
 require_relative 'config_view'
 require_relative 'counters'
 require_relative 'catchall_probe'
+require_relative 'resolver_hygiene'
 
 # FORK EDIT (Phase 2): the wrapper app — the fork's own /v1/* endpoints (§4). Mounted at /v1 by
 # config.ru's URLMap, so the STOCK rack (/,  /version, /healthcheck via TruemailServer::Application)
@@ -99,11 +100,16 @@ module TruemailServer
         json(200, payload)
       end
 
-      # ── GET /v1/audit (§4.2) SEAM → P3. host_audit shape; read/log only, no gate here. ──
+      # ── GET /v1/audit (§4.2) SEAM → P3. host_audit shape; the GATE is the brain's (green iff warnings == {}). ──
+      # ADR-0019 addendum: the node's resolver hygiene is part of that audit. The gem's own warnings (ptr/dns) are passed through
+      # untouched; if the resolver is not clean (search/domain line, ndots > 1, dotted hostname) ONE more warning, `resolver`, is
+      # added. Nothing else changes: the brain already treats any non-empty warnings map as red and a red node as never :smtp-eligible.
       def audit(_request)
         auditor = ::Truemail.host_audit
         result = auditor.result
-        warnings = result.warnings || {}
+        warnings = (result.warnings || {}).dup
+        resolver_problem = TruemailServer::Wrapper::ResolverHygiene.check
+        warnings[TruemailServer::Wrapper::ResolverHygiene::WARNING_KEY] = resolver_problem if resolver_problem
         json(200,
               wrapper_api_version: WRAPPER_API_VERSION,
               current_host_ip: result.current_host_ip,

@@ -153,6 +153,18 @@ Per PROJECT_RULES.md §7, every change runs (see [`../.github/workflows/ci.yml`]
     address follow-up removed, and an AAAA failure counted as "absent" (Go's own combined A+AAAA lookup keeps whichever error arrives last) —
     and requires each to go red in the right test with the right signature while the no-records/NXDOMAIN/null-MX controls stay green.
 
+14. **a verifier node whose resolver is not clean does no SMTP** — the fork's `GET /v1/audit` adds a `resolver` warning (so the audit is red,
+    the node is quarantined, and the brain routes it nothing) when `/etc/resolv.conf` has a `search` or `domain` line or `ndots` > 1, or the
+    hostname contains a dot (`scripts/check-resolver-hygiene.sh`, plus its paired self-test `scripts/check-resolver-hygiene-selftest.sh`).
+    The gate runs the real fork module under the node image's own digest-pinned Ruby in containers whose resolv.conf and hostname are the
+    fixture's, asserts 8 expected verdicts, and checks SOUNDNESS against an oracle — wherever Ruby's own `Resolv::DNS` would use a search
+    domain (in either of truemail's two modes) the check must be red. The self-test builds three mutants (search/domain rule off, hostname rule
+    off, ndots rule off) and requires each to go red for that rule only. The defect: the rule "no search domain, no dotted hostname" was a
+    sentence in a runbook ("a documented deployment rule is not a control"), and a resolv.conf-only check would have missed the hostname half,
+    which Ruby turns into a search domain even when resolv.conf is clean (ADR-0019 addendum). Also pinned in Go on the exact wrapper JSON
+    (`internal/audit/resolver_warning_test.go`: red even when the box claims green) and end to end (`internal/orchestrator/resolver_hygiene_test.go`:
+    real scheduler, real store, the node is never called, the verdict is `risky/plausible`, with a clean-audit control that does run the probe).
+
 **This list is checked, not trusted.** It stood at five items while CI ran nine, which is the same
 count-drift this project has already found twice (a gate count below CI's; 53 documented config keys
 against 89 in the database). `check-test-enumeration.sh` rule 7 fails if any `check-*.sh` wired into

@@ -98,6 +98,40 @@ This is independent of the search list and was true before this change. It chang
 only a not-found *there* is `mxNone`) and the existing fixtures and the layer's detail text already assume it. Owner ruling needed.
 Null-MX detection was probed in the same way and works against real DNS (`nullmx.test` → `mx=fail`, `null_mx=pass`).
 
+## Addendum 2026-11-09 — the node's resolver rule is now a control, not a sentence
+
+The residual exposure above was left as a deployment rule ("no search domain, no dotted container hostname") with a startup guard
+offered but not built. The owner ruled that **a documented deployment rule is not a control**, and the rule is now enforced by the
+mechanism that already decides whether a node may do SMTP: the host audit.
+
+- **Where.** The fork's `GET /v1/audit` (`TruemailServer::Wrapper::ResolverHygiene`, FORK.md row 16) adds one warning, `resolver`, to the
+  gem's own `ptr`/`dns` warnings when the node's resolver is not clean. The brain needed **no change**: green has always been
+  "warnings == {}", the brain re-derives it (never trusting the box's `audit_status`), the first red quarantines, and a node that is not
+  active and green is never `:smtp`-eligible. Pinned on the exact wrapper JSON by `internal/audit/resolver_warning_test.go`, and end to
+  end — real scheduler, real store, `Verify` — by `internal/orchestrator/resolver_hygiene_test.go` (the node is never called; the verdict is
+  the cheap `risky/plausible`, never `invalid`; the control, a clean audit, does run the probe).
+- **What turns the audit red.** A `search` line; a `domain` line; `options ndots:N` with N > 1 (all in `/etc/resolv.conf`, as ruled) —
+  **and a hostname containing a dot, which the ruling did not list and which is added on purpose.** Read in the image's Ruby 3.2.11,
+  `Resolv::DNS::Config` derives a search domain from the hostname's domain part whenever no explicit one is in effect: on every box
+  whose resolv.conf is clean, and on *every* box where truemail is given `dns:` servers (the worker then hands Resolv a Hash and
+  resolv.conf is never read). A PTR-compliant mail box very often has an FQDN hostname, so a resolv.conf-only check would pass exactly
+  the boxes most likely to be affected. ADR-0019's own rule already said "without a dotted container hostname"; the control covers the
+  whole rule. A resolv.conf that exists but cannot be read is red as well (the gate does not guess); a missing one is not (no
+  configuration, nothing to flag).
+- **Deliberately over-approximate.** A `search` line is flagged even when `dns:` servers are set (and resolv.conf is therefore unused), and
+  `ndots` > 1 is flagged although it only bites together with a search domain: the gate refuses on *not provably clean*, never on
+  *provably harmful*.
+- **Proof, against the real thing.** `scripts/check-resolver-hygiene.sh` runs the real fork module under the node image's own digest-pinned
+  Ruby, in containers whose `/etc/resolv.conf` and hostname are the fixture's. It asserts the expected verdict for 8 cases **and** that the
+  check is *sound against an oracle*: wherever Ruby's own `Resolv::DNS` (asked, in both truemail modes, which names it would try for a
+  relative name) would use a search domain, the check is red. Its self-test builds three mutants — search/domain rule off, hostname rule
+  off, ndots rule off — and requires each to go red, for that rule only (the search and hostname mutants are also caught by the oracle).
+  The RSpec examples inject their inputs, because a GitHub runner's container has a `search` line and a spec that read the machine would
+  be red there and green on a developer's PC.
+- **What an operator will see.** A box whose hostname is an FQDN (`verifier.example.com`) now audits red. Give it a short hostname; the
+  PTR and the A record carry the FQDN, the hostname does not need to. Runbook Stage 0/1.
+- **Door 5 untouched:** the gem is not patched; the wrapper only adds a fact to a map it already returns.
+
 ## Consequences
 
 - A SERVFAIL, a timeout and an unreachable resolver reach the policy as `mx:unknown → unknown:dns_error`, on every host.

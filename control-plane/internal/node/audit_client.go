@@ -141,6 +141,17 @@ func SimDNSWarning(hostIP, auditedAt string) AuditResult {
 	}
 }
 
+// SimResolverWarning models a red audit whose host passed the gem's own PTR/DNS checks but whose RESOLVER is not clean (a search
+// or domain line, ndots > 1, or a dotted hostname — ADR-0019 addendum). The key and the message shape are what the fork's
+// GET /v1/audit emits (TruemailServer::Wrapper::ResolverHygiene, warnings[:resolver]); the brain treats any non-empty warnings map as red.
+func SimResolverWarning(hostIP, auditedAt string) AuditResult {
+	return AuditResult{
+		CurrentHostIP: hostIP,
+		Warnings:      map[string]string{"resolver": "node resolver is not clean: resolv.conf has a `search` line (corp.example). The node must run with no search domain, no `domain` line, ndots <= 1 and a hostname with no dot (ADR-0019), or it does no SMTP."},
+		AuditStatus:   "red", AuditedAt: auditedAt,
+	}
+}
+
 // SimMultiHomedMismatch models the GAP-24 trap (§6.6.1): the audit went GREEN, but it self-detected
 // the PRIVATE ingress IP — NOT the public egress IP the node routes SMTP through. A naive "green ==
 // ready" reading would run :smtp on an unaudited public IP; the brain's four-way cross-check

@@ -167,6 +167,21 @@ jobs:
       - name: implicit-mx SELF-TEST (the gate goes RED with the address follow-up removed, and with an AAAA failure counted as absent)
         run: bash scripts/check-implicit-mx-selftest.sh
 
+  # ADR-0019 addendum — "a documented deployment rule is not a control". The verifier node's host audit goes RED (so the brain routes it no
+  # SMTP) when its resolver is not clean: a `search`/`domain` line, `ndots` > 1, or a dotted hostname (which Ruby turns into a search
+  # domain even when resolv.conf is clean). Runs the REAL fork module under the node image's own digest-pinned Ruby against a real mounted
+  # resolv.conf and hostname, with Ruby's own resolver as an oracle, and proves the check can fail with one mutant per rule. Needs only
+  # Docker; the gem is not involved (stdlib only), so this does not build the node image.
+  verifier-node-resolver-hygiene:
+    name: verifier-node resolver hygiene (a dirty resolver turns the audit red — real Ruby, real resolv.conf)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: resolver hygiene against the real Ruby, with Ruby's own resolver as the oracle
+        run: bash scripts/check-resolver-hygiene.sh
+      - name: resolver-hygiene SELF-TEST (the gate goes RED with the search, hostname or ndots rule disabled)
+        run: bash scripts/check-resolver-hygiene-selftest.sh
+
   verifier-node-rspec:
     name: verifier-node (RSpec — stock + /v1 wrapper)
     runs-on: ubuntu-latest

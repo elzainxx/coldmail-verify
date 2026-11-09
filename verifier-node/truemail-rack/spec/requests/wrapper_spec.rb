@@ -98,12 +98,59 @@ RSpec.describe 'Wrapper /v1', type: :request do
   end
 
   describe 'GET /v1/audit' do
-    it 'returns audit_status green when warnings are empty' do
+    let(:hygiene) { TruemailServer::Wrapper::ResolverHygiene }
+
+    def stub_gem_audit(warnings:)
       allow(Truemail).to receive(:host_audit)
-        .and_return(double(result: double(current_host_ip: '127.0.0.1', warnings: {})))
-      get('/v1/audit')
-      expect(response).to be_ok
-      expect(JSON.parse(response.body)['audit_status']).to eq('green')
+        .and_return(double(result: double(current_host_ip: '127.0.0.1', warnings: warnings)))
+    end
+
+    # The resolver check is INJECTED here. Left to read the machine, this example would pass on a developer's PC and fail on a CI
+    # runner, whose container resolv.conf carries a `search` line — the real-machine run is scripts/check-resolver-hygiene.sh.
+    context 'with a clean resolver' do
+      before { allow(hygiene).to receive(:check).and_return(nil) }
+
+      it 'returns audit_status green when warnings are empty' do
+        stub_gem_audit(warnings: {})
+        get('/v1/audit')
+        expect(response).to be_ok
+        expect(JSON.parse(response.body)['audit_status']).to eq('green')
+        expect(JSON.parse(response.body)['warnings']).to eq({})
+      end
+
+      it 'is still red when the GEM warns — the resolver check adds nothing and takes nothing away' do
+        stub_gem_audit(warnings: { ptr: 'PTR does not match' })
+        get('/v1/audit')
+        body = JSON.parse(response.body)
+        expect(body['audit_status']).to eq('red')
+        expect(body['warnings']).to eq('ptr' => 'PTR does not match')
+      end
+    end
+
+    context 'with a resolver that is not clean (search/domain line, ndots > 1, dotted hostname)' do
+      before { allow(hygiene).to receive(:check).and_return('node resolver is not clean: resolv.conf has a `search` line (corp.example)') }
+
+      it 'turns an otherwise-green audit RED, with the reason under warnings.resolver — so the brain routes no SMTP here' do
+        stub_gem_audit(warnings: {})
+        get('/v1/audit')
+        body = JSON.parse(response.body)
+        expect(body['audit_status']).to eq('red')
+        expect(body['warnings'].keys).to eq(['resolver'])
+        expect(body['warnings']['resolver']).to include('`search` line')
+      end
+
+      it 'keeps the gem\'s own warnings alongside it' do
+        stub_gem_audit(warnings: { dns: 'dns lookup failed' })
+        get('/v1/audit')
+        expect(JSON.parse(response.body)['warnings'].keys).to contain_exactly('dns', 'resolver')
+      end
+
+      it 'does not mutate the warnings hash the gem returned' do
+        gem_warnings = { dns: 'dns lookup failed' }
+        stub_gem_audit(warnings: gem_warnings)
+        get('/v1/audit')
+        expect(gem_warnings).to eq(dns: 'dns lookup failed')
+      end
     end
   end
 end
