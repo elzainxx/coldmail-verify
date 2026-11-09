@@ -28,6 +28,13 @@
 >    fixture runs under an injected search domain with a mutant control that proves it goes red without the fix
 >    ([ADR-0019](adr/ADR-0019-dns-names-are-rooted-and-failure-is-unknown.md)). **Two Stage 0 consequences follow** — the
 >    node's resolver hygiene, and a ruling on A-only domains — both below. Door 5 is unchanged.
+> 5. **Updated 2026-11-09 — a domain with an A/AAAA record and no MX is no longer `invalid / no_mx` (RFC 5321 §5.1).** The
+>    owner ruled the A-only question: the domain's own address is its mail host and the SMTP probe goes there; if the probe cannot
+>    run the verdict is `risky`, never `invalid`; null MX and "no MX and no A/AAAA" stay `invalid`; an outage of ours is `unknown`.
+>    The old fallback had been dead code (Go reports NODATA as an *error*; every fixture was a fake that returned an impossible
+>    empty list), so this is proved against the real DNS protocol, with mutant controls, in CI
+>    ([ADR-0020](adr/ADR-0020-implicit-mx-rfc5321.md)). One new Stage 0 item came out of it — the probe's destination is not
+>    filtered (below). Nothing is deployed, so no historical verdict changes.
 >
 > Unchanged: all **20** rows in [`pending-ledger.md`](pending-ledger.md) are real-world-gated (a real port-25 box, a
 > vendor, a sender) and genuinely unclosable here, and the control-plane is still **not packaged** (no Dockerfile or
@@ -56,7 +63,9 @@ Companion: the deferred-proof detail is in [`pending-ledger.md`](pending-ledger.
 
 🔴 **Verifier-node resolver hygiene (ADR-0019).** The node's `truemail` resolves with Ruby's `Resolv`, which uses the system search list — and, when only `dns:` servers are configured, **derives one from the container's hostname** (measured). Unlike the control plane, the gem cannot be changed (Door 5), and a nonexistent name followed by a wildcard under a search domain made it resolve **another domain's MX** (measured). A node-side DNS failure can never become an `invalid` (no SMTP transcript → `unknown / connection_failed`), so this is narrow — but it is a one-line deployment rule: **run the node with no search domain in `resolv.conf` and without a dotted container hostname.** Verify on the real box; a fork-owned startup guard that warns or refuses to boot is available if the owner wants it (not implemented).
 
-🔴 **Rule on A-only domains (found by the ADR-0019 audit; NOT fixed).** An address at a domain with an A record and **no MX** is reported `invalid / no_mx`, because `resolveMX` stops at the first not-found MX and never reaches the A/AAAA fallback that its own comments describe (RFC 5321 §5.1, implicit MX). Go reports NODATA on an MX query as a not-found error, so that fallback is dead code against real DNS (measured through the production layers). It changes which real domains are called invalid, so it needs a ruling before a pilot, not a quiet fix.
+✅ **A-only domains — RULED and FIXED (2026-11-09, [ADR-0020](adr/ADR-0020-implicit-mx-rfc5321.md)).** (Found by the ADR-0019 audit.) A domain with an A/AAAA record and no MX is now treated as receiving mail at that host (RFC 5321 §5.1): the cheap layers pass it and the SMTP probe runs; if the probe cannot run the verdict is `risky`, never `invalid`. Null MX, and "no MX and no A/AAAA", stay `invalid`; an outage of ours at any step is `unknown`. Gate: `scripts/check-implicit-mx.sh` + its self-test (two mutant controls). Cost to know about: a not-found MX now costs three DNS queries (MX, A, AAAA), because Go cannot tell NXDOMAIN from NODATA.
+
+🔴 **The SMTP probe's destination is not filtered (found by the ADR-0020 audit; NOT changed).** The node connects to whatever address the mail host resolves to — loopback, RFC 1918, link-local, a cloud metadata address — on port 25, for any domain a user submits. No filter exists in the control plane, the fork, the compose file or the pinned gem (searched). Not new (a user can already publish `MX 10 evil.example.` with an `A 10.0.0.5`; the implicit-MX ruling adds one more path to the same place), and bounded to port 25, but the SMTP transcript is persisted verbatim in the raw sidecar, so an internal SMTP banner would be recorded. Door 5 forbids touching the gem, so the control is either an **egress policy on the verifier box** (deny non-public destinations on 25 — a Stage 1 deployment item) or a **fork-owned pre-flight** that resolves the target and refuses non-public addresses. Owner decision; do it before the first real probe, not after.
 ---
 
 ## Stage 1 — the real box (SMTP verification goes live)

@@ -143,6 +143,15 @@ Per PROJECT_RULES.md §7, every change runs (see [`../.github/workflows/ci.yml`]
     `scripts/check-gemfile-lock-selftest.sh`, 14 cases each matched on the failure message). The defect: the Dockerfile ran
     `bundle lock` on every build, so only two gems were pinned and every transitive gem floated — a digest-pinned base
     (item 10) made the OS layer reproducible while the gems above it were not (ADR-0018 addendum).
+13. **a domain with no MX but an A/AAAA record is not `invalid` (RFC 5321 §5.1), proved against REAL DNS shapes** — the layers' MX
+    tests and the orchestrator's whole `Verify` path run the production resolver over the real DNS protocol against an in-process
+    authoritative server (`internal/dnsfixture`) inside a container whose `resolv.conf` has a `search` line
+    (`scripts/check-implicit-mx.sh`, plus its paired self-test `scripts/check-implicit-mx-selftest.sh`). Pairs: A-only → reaches the SMTP
+    probe, and is `risky` if the probe cannot run; truly no records, NXDOMAIN and null MX (with or without an A record) → still `invalid`;
+    every partial failure of the A/AAAA follow-up → `unknown`. The defect: the old fallback was dead code, because Go reports NODATA as a
+    not-found *error* and every fixture was a fake that returned an empty list instead (ADR-0020). The self-test builds two MUTANTS — the
+    address follow-up removed, and an AAAA failure counted as "absent" (Go's own combined A+AAAA lookup keeps whichever error arrives last) —
+    and requires each to go red in the right test with the right signature while the no-records/NXDOMAIN/null-MX controls stay green.
 
 **This list is checked, not trusted.** It stood at five items while CI ran nine, which is the same
 count-drift this project has already found twice (a gate count below CI's; 53 documented config keys

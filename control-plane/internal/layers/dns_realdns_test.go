@@ -1,169 +1,61 @@
 package layers
 
-// Real-protocol tests for the production resolver (ADR-0019). A small authoritative DNS server runs IN-PROCESS on
-// loopback (golang.org/x/net/dns/dnsmessage, already a dependency), and the PRODUCTION NetResolver is pointed at it
-// with NewNetResolverAt — so what runs is Go's real DNS client over the real DNS protocol, through the real layers.
-// Nothing here skips and nothing needs Docker, so `go test ./...` executes it everywhere; the search-domain CI
-// fixture (scripts/check-dns-search-domain.sh) runs this same compiled test binary inside a container whose
-// resolv.conf carries a `search` line, which is what makes the search-list hazard bite.
+// Real-protocol tests for the production resolver (ADR-0019, ADR-0020). A small authoritative DNS server runs IN-PROCESS on
+// loopback (internal/dnsfixture, golang.org/x/net/dns/dnsmessage), and the PRODUCTION NetResolver is pointed at it with
+// NewNetResolverAt — so what runs is Go's real DNS client over the real DNS protocol, through the real layers. Nothing
+// here skips and nothing needs Docker, so `go test ./...` executes it everywhere; the search-domain CI fixture
+// (scripts/check-dns-search-domain.sh) runs this same compiled test binary inside a container whose resolv.conf carries a
+// `search` line, which is what makes the search-list hazard bite.
 //
-// THE PROPERTY (the module's founding one, restated for DNS): an outage of OUR resolution is `unknown`, never
-// `invalid`. Two assertions per case, independently: the VERDICT (SERVFAIL → Unknown, never Fail) and the WIRE
-// (the only name ever asked for is the rooted one — a search-suffixed query is the defect itself).
+// THE PROPERTY (the module's founding one, restated for DNS): an outage of OUR resolution is `unknown`, never `invalid`;
+// and `invalid` for a missing route is stated only when non-existence is PROVABLE — no MX, no A, no AAAA, all three
+// definitively absent. Two assertions per case, independently: the VERDICT and the WIRE (the only name ever asked for is
+// the rooted one — a search-suffixed query is the defect itself — and the follow-up address queries happen only when
+// they should).
 
 import (
 	"context"
 	"net"
 	"os"
+	"sort"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	"golang.org/x/net/dns/dnsmessage"
+	"github.com/coldmail-verify/control-plane/internal/dnsfixture"
 )
-
-type fixtureDNS struct {
-	pc    net.PacketConn
-	mu    sync.Mutex
-	asked []string // "TYPE name" in arrival order
-}
-
-func startFixtureDNS(t *testing.T) *fixtureDNS {
-	t.Helper()
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("fixture DNS: cannot listen on loopback: %v", err)
-	}
-	f := &fixtureDNS{pc: pc}
-	t.Cleanup(func() { _ = pc.Close() })
-	go f.serve()
-	return f
-}
-
-func (f *fixtureDNS) addr() string { return f.pc.LocalAddr().String() }
-
-func (f *fixtureDNS) reset() {
-	f.mu.Lock()
-	f.asked = nil
-	f.mu.Unlock()
-}
-
-func (f *fixtureDNS) queries() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]string(nil), f.asked...)
-}
-
-func typeName(t dnsmessage.Type) string {
-	switch t {
-	case dnsmessage.TypeA:
-		return "A"
-	case dnsmessage.TypeAAAA:
-		return "AAAA"
-	case dnsmessage.TypeMX:
-		return "MX"
-	case dnsmessage.TypeTXT:
-		return "TXT"
-	}
-	return t.String()
-}
-
-func (f *fixtureDNS) serve() {
-	buf := make([]byte, 1500)
-	for {
-		n, from, err := f.pc.ReadFrom(buf)
-		if err != nil {
-			return
-		}
-		var p dnsmessage.Parser
-		h, err := p.Start(buf[:n])
-		if err != nil {
-			continue
-		}
-		q, err := p.Question()
-		if err != nil {
-			continue
-		}
-		f.mu.Lock()
-		f.asked = append(f.asked, typeName(q.Type)+" "+strings.ToLower(q.Name.String()))
-		f.mu.Unlock()
-		if msg, ok := fixtureReply(h.ID, q); ok {
-			_, _ = f.pc.WriteTo(msg, from)
-		} // else: deliberately NO reply — a server that never answers
-	}
-}
-
-// fixtureReply is the zone. Anything not listed is NXDOMAIN — including every search-suffixed name, which is what
-// makes the collapse reproducible: servfail.test. SERVFAILs, servfail.test.search-domain.test. is NXDOMAIN.
-func fixtureReply(id uint16, q dnsmessage.Question) ([]byte, bool) {
-	name := strings.ToLower(q.Name.String())
-	rr := func(typ dnsmessage.Type, body dnsmessage.ResourceBody) dnsmessage.Resource {
-		return dnsmessage.Resource{
-			Header: dnsmessage.ResourceHeader{Name: q.Name, Type: typ, Class: dnsmessage.ClassINET, TTL: 60},
-			Body:   body,
-		}
-	}
-	build := func(rcode dnsmessage.RCode, answers ...dnsmessage.Resource) ([]byte, bool) {
-		b := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: id, Response: true, Authoritative: true, RecursionAvailable: true, RCode: rcode})
-		_ = b.StartQuestions()
-		_ = b.Question(q)
-		_ = b.StartAnswers()
-		for _, a := range answers {
-			switch body := a.Body.(type) {
-			case *dnsmessage.MXResource:
-				_ = b.MXResource(a.Header, *body)
-			case *dnsmessage.AResource:
-				_ = b.AResource(a.Header, *body)
-			}
-		}
-		msg, err := b.Finish()
-		return msg, err == nil
-	}
-	mx := func(pref uint16, host string) dnsmessage.Resource {
-		return rr(dnsmessage.TypeMX, &dnsmessage.MXResource{Pref: pref, MX: dnsmessage.MustNewName(host)})
-	}
-	a := func(ip [4]byte) dnsmessage.Resource { return rr(dnsmessage.TypeA, &dnsmessage.AResource{A: ip}) }
-
-	switch name {
-	case "blackhole.test.":
-		return nil, false // never answers
-	case "servfail.test.":
-		return build(dnsmessage.RCodeServerFailure)
-	case "mxservfail.test.": // the MX query fails; the name itself has an A record
-		switch q.Type {
-		case dnsmessage.TypeMX:
-			return build(dnsmessage.RCodeServerFailure)
-		case dnsmessage.TypeA:
-			return build(dnsmessage.RCodeSuccess, a([4]byte{192, 0, 2, 30}))
-		}
-		return build(dnsmessage.RCodeSuccess)
-	case "hasmx.test.":
-		if q.Type == dnsmessage.TypeMX {
-			return build(dnsmessage.RCodeSuccess, mx(10, "mx.hasmx.test."))
-		}
-		return build(dnsmessage.RCodeSuccess) // NODATA for A/AAAA
-	case "mx.hasmx.test.":
-		if q.Type == dnsmessage.TypeA {
-			return build(dnsmessage.RCodeSuccess, a([4]byte{192, 0, 2, 10}))
-		}
-		return build(dnsmessage.RCodeSuccess)
-	case "nullmx.test.": // RFC 7505
-		if q.Type == dnsmessage.TypeMX {
-			return build(dnsmessage.RCodeSuccess, mx(0, "."))
-		}
-		return build(dnsmessage.RCodeSuccess)
-	}
-	return build(dnsmessage.RCodeNameError) // NXDOMAIN
-}
 
 func evidenceFor(domain string, r Resolver) *Evidence {
 	return NewEvidence("x@"+domain, "x@"+domain, "x", domain, r, nil)
 }
 
+// queryTypes returns the sorted record types the server was asked about, failing if any query was for a name other than the
+// rooted domain (a search-suffixed name is the ADR-0019 defect) — the wire half of every case below.
+func queryTypes(t *testing.T, srv *dnsfixture.Server, caseName, domain string) []string {
+	t.Helper()
+	var types []string
+	for _, q := range srv.Queries() {
+		f := strings.Fields(q)
+		if len(f) != 2 || f[1] != domain+"." {
+			t.Errorf("%s: the resolver asked %q; only the rooted name %q may ever be asked (a search-suffixed query is the defect)", caseName, q, domain+".")
+			continue
+		}
+		types = append(types, f[0])
+	}
+	// A SET of record types, not a count: Go's client retries a SERVFAIL (attempts=2), which is its business, not ours.
+	sort.Strings(types)
+	uniq := types[:0]
+	for i, ty := range types {
+		if i == 0 || ty != types[i-1] {
+			uniq = append(uniq, ty)
+		}
+	}
+	return uniq
+}
+
 // The headline, through the PRODUCTION layers. Each row asserts the verdict-bearing layer result AND the wire.
 func TestMXLayer_RealDNS_FailureIsUnknownNeverInvalid_AndOnlyTheRootedNameIsAsked(t *testing.T) {
-	srv := startFixtureDNS(t)
+	srv := dnsfixture.Start(t)
 	for _, tc := range []struct {
 		name        string
 		domain      string
@@ -177,11 +69,13 @@ func TestMXLayer_RealDNS_FailureIsUnknownNeverInvalid_AndOnlyTheRootedNameIsAske
 		// The defect: with a search domain this became NXDOMAIN → Fail → invalid/no_mx for a valid address.
 		{"SERVFAIL is unknown, never invalid", "servfail.test", Unknown, mxError, 3 * time.Second},
 		{"an MX query that SERVFAILs is unknown even though the name has an A record", "mxservfail.test", Unknown, mxError, 3 * time.Second},
+		// The row the search-domain gate's mutant must turn into `Fail`: only here does a search-list collapse still reach the verdict.
+		{"an MX query that SERVFAILs on a name with no address is unknown", "mxservfail-noaddr.test", Unknown, mxError, 3 * time.Second},
 		{"a server that never answers (timeout) is unknown", "blackhole.test", Unknown, mxError, 1200 * time.Millisecond},
 	} {
-		srv.reset()
+		srv.Reset()
 		ctx, cancel := context.WithTimeout(context.Background(), tc.budget)
-		ev := evidenceFor(tc.domain, NewNetResolverAt(srv.addr()))
+		ev := evidenceFor(tc.domain, NewNetResolverAt(srv.Addr()))
 		out := MXLayer{}.Run(ctx, ev)
 		_, outcome := ev.mx(ctx)
 		cancel()
@@ -190,38 +84,239 @@ func TestMXLayer_RealDNS_FailureIsUnknownNeverInvalid_AndOnlyTheRootedNameIsAske
 			t.Errorf("%s: MXLayer result=%q outcome=%d, want result=%q outcome=%d — a DNS failure of ours must never be stated as a fact about the address",
 				tc.name, out.Result, outcome, tc.want, tc.wantOutcome)
 		}
-		if len(srv.queries()) == 0 {
+		if len(srv.Queries()) == 0 {
 			t.Errorf("%s: the server saw no query at all — the resolver is not reaching the fixture, so this case proves nothing", tc.name)
 		}
-		for _, q := range srv.queries() {
-			if f := strings.Fields(q); len(f) != 2 || f[1] != tc.domain+"." {
-				t.Errorf("%s: the resolver asked %q; only the rooted name %q may ever be asked (a search-suffixed query is the defect)", tc.name, q, tc.domain+".")
+		queryTypes(t, srv, tc.name, tc.domain)
+	}
+}
+
+// ADR-0020 — RFC 5321 §5.1 implicit MX, against REAL DNS shapes. A domain with no MX but an A/AAAA record receives its
+// mail at that host; calling it `invalid / no_mx` breaks the founding rule (invalid only when non-existence is provable).
+// The pairs: A-only → NOT invalid; truly no records → invalid; null MX → invalid (even with an A record). Plus every
+// partial failure of the follow-up, which must be `unknown`.
+func TestMXLayer_RealDNS_ImplicitMX(t *testing.T) {
+	srv := dnsfixture.Start(t)
+	host := func(d string) []MXHost { return []MXHost{{Host: d, Pref: 0}} }
+	const reps = 40 // the partial-failure cases raced two goroutines; repeat so a regression to a combined lookup cannot hide
+	for _, tc := range []struct {
+		name        string
+		domain      string
+		want        Result
+		wantOutcome mxOutcome
+		wantHosts   []MXHost
+		wantTypes   []string // sorted record types the server must have been asked, for the rooted name only
+		budget      time.Duration
+		reps        int
+	}{
+		// ── the ruling: an address and no MX is a mail host ──
+		{"A-only: NODATA for MX, an A record → implicit MX, passes", "aonly.test", Pass, mxFound, host("aonly.test"), []string{"A", "AAAA", "MX"}, 3 * time.Second, 1},
+		{"AAAA-only: passes", "aaaaonly.test", Pass, mxFound, host("aaaaonly.test"), []string{"A", "AAAA", "MX"}, 3 * time.Second, 1},
+		{"dual-stack, no MX: passes", "dualstack.test", Pass, mxFound, host("dualstack.test"), []string{"A", "AAAA", "MX"}, 3 * time.Second, 1},
+		{"an alias (CNAME chain to an address) is followed: passes", "aliased.test", Pass, mxFound, host("aliased.test"), []string{"A", "AAAA", "MX"}, 3 * time.Second, 1},
+		{"a published MX needs no follow-up: nothing but the MX is asked", "hasmx.test", Pass, mxFound, []MXHost{{Host: "mx.hasmx.test", Pref: 10}}, []string{"MX"}, 3 * time.Second, 1},
+
+		// ── the controls that keep the rule honest: it must not become "everything passes" ──
+		{"CONTROL truly no records: the name exists (TXT only), no MX, no A, no AAAA → invalid", "norecords.test", Fail, mxNone, nil, []string{"A", "AAAA", "MX"}, 3 * time.Second, 1},
+		{"CONTROL NXDOMAIN → invalid", "no-such-domain-xyz.test", Fail, mxNone, nil, []string{"A", "AAAA", "MX"}, 3 * time.Second, 1},
+		{"CONTROL null MX (RFC 7505) → invalid, and the A record is never even asked for", "nullmx.test", Fail, mxNullMX, nil, []string{"MX"}, 3 * time.Second, 1},
+		{"CONTROL null MX that ALSO has an A record is still null MX — the A record must not rescue it", "nullmx-with-a.test", Fail, mxNullMX, nil, []string{"MX"}, 3 * time.Second, 1},
+
+		// ── a failure of ours at any step is unknown, never invalid ──
+		{"MX SERVFAIL (the name has an A record) → unknown; the A record is not consulted", "mxservfail.test", Unknown, mxError, nil, []string{"MX"}, 3 * time.Second, 1},
+		{"A = NODATA, AAAA = SERVFAIL → unknown (Go's combined lookup answered 'not found' or 'SERVFAIL' at random)", "aaaa-servfail.test", Unknown, mxError, nil, []string{"A", "AAAA", "MX"}, 3 * time.Second, reps},
+		{"A = SERVFAIL, AAAA = NODATA → unknown", "a-servfail.test", Unknown, mxError, nil, []string{"A", "AAAA", "MX"}, 3 * time.Second, reps},
+		{"A never answers (timeout), AAAA = NODATA → unknown", "a-timeout.test", Unknown, mxError, nil, []string{"A", "AAAA", "MX"}, 1200 * time.Millisecond, 1},
+
+		// ── an address that exists outweighs the other family's failure: the host is real ──
+		{"A present, AAAA = SERVFAIL → passes", "a-ok-aaaa-servfail.test", Pass, mxFound, host("a-ok-aaaa-servfail.test"), []string{"A", "AAAA", "MX"}, 3 * time.Second, reps},
+		{"AAAA present, A = SERVFAIL → passes", "aaaa-ok-a-servfail.test", Pass, mxFound, host("aaaa-ok-a-servfail.test"), []string{"A", "AAAA", "MX"}, 3 * time.Second, reps},
+	} {
+		for i := 0; i < tc.reps; i++ {
+			srv.Reset()
+			ctx, cancel := context.WithTimeout(context.Background(), tc.budget)
+			ev := evidenceFor(tc.domain, NewNetResolverAt(srv.Addr()))
+			out := MXLayer{}.Run(ctx, ev)
+			hosts, outcome := ev.mx(ctx)
+			cancel()
+
+			if out.Result != tc.want || outcome != tc.wantOutcome {
+				t.Errorf("%s [run %d]: MXLayer result=%q outcome=%d, want result=%q outcome=%d", tc.name, i, out.Result, outcome, tc.want, tc.wantOutcome)
+			}
+			if out.Result == Fail && tc.want != Fail {
+				t.Errorf("%s [run %d]: reported Fail (invalid) for a domain that is not provably without a mail route", tc.name, i)
+			}
+			if len(hosts) != len(tc.wantHosts) || (len(hosts) > 0 && hosts[0] != tc.wantHosts[0]) {
+				t.Errorf("%s [run %d]: mail hosts = %v, want %v", tc.name, i, hosts, tc.wantHosts)
+			}
+			if got := queryTypes(t, srv, tc.name, tc.domain); strings.Join(got, ",") != strings.Join(tc.wantTypes, ",") {
+				t.Errorf("%s [run %d]: record types asked = %v, want %v", tc.name, i, got, tc.wantTypes)
 			}
 		}
 	}
 }
 
-// Every name reaching the DNS client is rooted — the unit-level pin, no network and no resolv.conf involved.
-type recordingLookuper struct{ names []string }
+// The CONTROL that makes the test above mean something. legacyResolveMX is a frozen copy of resolveMX from before ADR-0020:
+// a not-found MX returned mxNone on the spot, so the A/AAAA fallback below it ran only when LookupMX returned an EMPTY LIST
+// with no error — a shape the real Go resolver never produces. Run against the real protocol it must (1) call the A-only
+// domains invalid, and (2) never ask for an address at all. If it ever does not, the fixture has stopped reproducing the
+// defect and the green above would be vacuous. (scripts/check-implicit-mx.sh --mutant is the same control on the REAL code.)
+func legacyResolveMX(ctx context.Context, r Resolver, domain string) ([]MXHost, mxOutcome) {
+	mxs, err := r.LookupMX(ctx, domain)
+	if err != nil {
+		var dnsErr *net.DNSError
+		if ok := asDNSNotFound(err, &dnsErr); ok {
+			return nil, mxNone
+		}
+		return nil, mxError
+	}
+	if len(mxs) == 1 && isNullMXTarget(mxs[0].Host) {
+		return nil, mxNullMX
+	}
+	real := mxs[:0]
+	for _, m := range mxs {
+		if !isNullMXTarget(m.Host) {
+			real = append(real, m)
+		}
+	}
+	if len(real) > 0 {
+		return real, mxFound
+	}
+	ips, ipErr := r.LookupIP(ctx, domain)
+	if ipErr != nil {
+		var dnsErr *net.DNSError
+		if ok := asDNSNotFound(ipErr, &dnsErr); ok {
+			return nil, mxNone
+		}
+		return nil, mxError
+	}
+	if len(ips) > 0 {
+		return []MXHost{{Host: domain, Pref: 0}}, mxFound
+	}
+	return nil, mxNone
+}
+
+func TestMXLayer_RealDNS_ImplicitMX_LegacyLogicFailsTheFixture(t *testing.T) {
+	srv := dnsfixture.Start(t)
+	for _, d := range []string{"aonly.test", "aaaaonly.test", "dualstack.test", "aliased.test"} {
+		srv.Reset()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_, outcome := legacyResolveMX(ctx, NewNetResolverAt(srv.Addr()), d)
+		cancel()
+		if outcome != mxNone {
+			t.Errorf("legacy logic on %s = outcome %d, want mxNone (invalid/no_mx): the fixture no longer reproduces the defect, so TestMXLayer_RealDNS_ImplicitMX proves nothing", d, outcome)
+		}
+		if got := queryTypes(t, srv, "legacy "+d, d); strings.Join(got, ",") != "MX" {
+			t.Errorf("legacy logic on %s asked %v; it should have stopped at the MX query — its A/AAAA fallback was unreachable against real DNS", d, got)
+		}
+	}
+}
+
+// ── NetResolver.LookupIP: the A/AAAA combination rule, exhaustively, with no network ───────────────────────────────────────
+
+type stubLookuper struct {
+	v4, v6 func() ([]net.IP, error)
+}
+
+func (s *stubLookuper) LookupMX(context.Context, string) ([]*net.MX, error) {
+	return nil, notFoundErr()
+}
+func (s *stubLookuper) LookupIP(_ context.Context, network, host string) ([]net.IP, error) {
+	switch network {
+	case "ip4":
+		return s.v4()
+	case "ip6":
+		return s.v6()
+	}
+	return nil, &net.DNSError{Err: "unexpected network " + network, IsTemporary: true}
+}
+
+func TestNetResolver_LookupIP_CombinesTheTwoFamiliesExplicitly(t *testing.T) {
+	addr4 := func() ([]net.IP, error) { return []net.IP{net.ParseIP("192.0.2.1")}, nil }
+	addr6 := func() ([]net.IP, error) { return []net.IP{net.ParseIP("2001:db8::1")}, nil }
+	nf := func() ([]net.IP, error) { return nil, notFoundErr() }
+	sf := func() ([]net.IP, error) { return nil, servfailErr() }
+	to := func() ([]net.IP, error) { return nil, timeoutErr() }
+	empty := func() ([]net.IP, error) { return nil, nil }
+
+	type outcome int
+	const (
+		gotAddrs outcome = iota
+		gotNotFound
+		gotFailure // an error that is NOT a definitive not-found → the caller keeps it as unknown
+		gotNothing // answered, nothing there, no error
+	)
+	for _, tc := range []struct {
+		name   string
+		v4, v6 func() ([]net.IP, error)
+		want   outcome
+	}{
+		{"A and AAAA", addr4, addr6, gotAddrs},
+		{"A only (AAAA not found)", addr4, nf, gotAddrs},
+		{"AAAA only (A not found)", nf, addr6, gotAddrs},
+		{"an address outweighs the other family's SERVFAIL (v4)", addr4, sf, gotAddrs},
+		{"an address outweighs the other family's SERVFAIL (v6)", sf, addr6, gotAddrs},
+		{"an address outweighs the other family's timeout", to, addr6, gotAddrs},
+		{"both definitively absent → not found (the only route to `invalid`)", nf, nf, gotNotFound},
+		{"A not found, AAAA SERVFAIL → failure, NOT not-found", nf, sf, gotFailure},
+		{"A SERVFAIL, AAAA not found → failure, NOT not-found", sf, nf, gotFailure},
+		{"A not found, AAAA timeout → failure", nf, to, gotFailure},
+		{"both SERVFAIL → failure", sf, sf, gotFailure},
+		{"A answered-empty, AAAA SERVFAIL → failure (cannot prove AAAA is absent)", empty, sf, gotFailure},
+		{"both answered-empty → nothing, no error", empty, empty, gotNothing},
+	} {
+		n := &NetResolver{r: &stubLookuper{v4: tc.v4, v6: tc.v6}}
+		for i := 0; i < 20; i++ { // the two lookups run concurrently; the result must not depend on who finishes first
+			ips, err := n.LookupIP(context.Background(), "example.test")
+			var de *net.DNSError
+			var got outcome
+			switch {
+			case len(ips) > 0 && err == nil:
+				got = gotAddrs
+			case err == nil:
+				got = gotNothing
+			case asDNSNotFound(err, &de):
+				got = gotNotFound
+			default:
+				got = gotFailure
+			}
+			if got != tc.want {
+				t.Fatalf("%s [run %d]: got outcome %d (ips=%v err=%v), want %d", tc.name, i, got, ips, err, tc.want)
+			}
+		}
+	}
+}
+
+// Every name reaching the DNS client is rooted — the unit-level pin, no network and no resolv.conf involved — and the
+// address lookup is always TWO lookups ("ip4" then "ip6"), never the combined "ip" that races its own errors.
+type recordingLookuper struct {
+	names chan string
+}
 
 func (r *recordingLookuper) LookupMX(_ context.Context, name string) ([]*net.MX, error) {
-	r.names = append(r.names, "MX "+name)
+	r.names <- "MX " + name
 	return nil, &net.DNSError{Err: "no such host", Name: name, IsNotFound: true}
 }
-func (r *recordingLookuper) LookupIPAddr(_ context.Context, host string) ([]net.IPAddr, error) {
-	r.names = append(r.names, "IP "+host)
+func (r *recordingLookuper) LookupIP(_ context.Context, network, host string) ([]net.IP, error) {
+	r.names <- strings.ToUpper(network) + " " + host
 	return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
 }
 
 func TestNetResolver_RootsEveryName(t *testing.T) {
-	rec := &recordingLookuper{}
+	rec := &recordingLookuper{names: make(chan string, 16)}
 	n := &NetResolver{r: rec}
 	_, _ = n.LookupMX(context.Background(), "example.com")
 	_, _ = n.LookupIP(context.Background(), "example.com")
 	_, _ = n.LookupMX(context.Background(), "already.rooted.")
-	want := []string{"MX example.com.", "IP example.com.", "MX already.rooted."}
-	if strings.Join(rec.names, "|") != strings.Join(want, "|") {
-		t.Fatalf("names reaching the DNS client = %v, want %v (an unrooted name regains the search-list collapse)", rec.names, want)
+	close(rec.names)
+	var got []string
+	for s := range rec.names {
+		got = append(got, s)
+	}
+	sort.Strings(got)
+	want := []string{"IP4 example.com.", "IP6 example.com.", "MX already.rooted.", "MX example.com."}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("names reaching the DNS client = %v, want %v (an unrooted name regains the search-list collapse; a combined \"ip\" lookup regains the A/AAAA error race)", got, want)
 	}
 }
 
@@ -281,9 +376,9 @@ func resolvConfSearchList() []string {
 // claims a search domain it does not have (LAYERS_EXPECT_SEARCH_DOMAIN=1), or the hazard does not reproduce under
 // it, that is a failure — a green under a fixture that exercises nothing would be the vacuous kind.
 func TestSearchDomainCanary(t *testing.T) {
-	srv := startFixtureDNS(t)
+	srv := dnsfixture.Start(t)
 	raw := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-		return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, network, srv.addr())
+		return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, network, srv.Addr())
 	}} // deliberately NOT NetResolver: this is Go's resolver as it behaves without the fix
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()

@@ -145,7 +145,7 @@ jobs:
   # `invalid / no_mx` — our failure stated as a fact about their address. The dev host has no search domain; a cloud VM does,
   # which is the only reason this was ever possible to miss. Needs only Go and Docker (the DNS server is in the test binary).
   dns-search-domain:
-    name: control-plane DNS (a SERVFAIL is unknown, never invalid — under a resolv.conf search domain)
+    name: control-plane DNS (a SERVFAIL is unknown, never invalid; an A-only domain is not invalid — real DNS shapes)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -158,6 +158,14 @@ jobs:
       # canary green. Keeps "this fixture reds without the fix" true on every run.
       - name: dns-search-domain SELF-TEST (the fixture goes RED when name-rooting is disabled)
         run: bash scripts/check-dns-search-domain-selftest.sh
+      # ADR-0020 — RFC 5321 §5.1 implicit MX against REAL DNS shapes. A domain with no MX but an A/AAAA record receives mail at that
+      # host and is NOT `invalid / no_mx`; `invalid` is stated only when MX, A and AAAA are all provably absent; null MX stays invalid
+      # even with an A record; an outage of ours is `unknown`. The earlier fallback was dead code (it sat behind a resolver answer Go
+      # never produces and every fixture was a fake that produced it), so this gate speaks the real protocol and proves it can fail.
+      - name: implicit MX (A-only is not invalid; no-records and null-MX still are) — wire level and end to end
+        run: bash scripts/check-implicit-mx.sh
+      - name: implicit-mx SELF-TEST (the gate goes RED with the address follow-up removed, and with an AAAA failure counted as absent)
+        run: bash scripts/check-implicit-mx-selftest.sh
 
   verifier-node-rspec:
     name: verifier-node (RSpec — stock + /v1 wrapper)

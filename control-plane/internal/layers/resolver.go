@@ -6,6 +6,7 @@ import (
 	"net"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -50,9 +51,12 @@ func asDNSNotFound(err error, out **net.DNSError) bool {
 
 // lookuper is the subset of *net.Resolver NetResolver uses, so a test can record exactly which names reach
 // the DNS client (and prove every one is rooted) without any network.
+//
+// LookupIP takes the network ("ip4" asks ONLY for A, "ip6" ONLY for AAAA) because NetResolver.LookupIP must ask the two
+// separately — see there (ADR-0020).
 type lookuper interface {
 	LookupMX(ctx context.Context, name string) ([]*net.MX, error)
-	LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error)
+	LookupIP(ctx context.Context, network, host string) ([]net.IP, error)
 }
 
 // NetResolver is the production Resolver backed by the Go stdlib net.Resolver. It is used by
@@ -104,16 +108,51 @@ func (n *NetResolver) LookupMX(ctx context.Context, domain string) ([]MXHost, er
 	return out, nil
 }
 
+// LookupIP returns the domain's A and AAAA addresses. It asks for the two record types as TWO SEPARATE lookups and
+// combines them itself, and that is deliberate (ADR-0020): Go's own combined lookup (LookupIPAddr, or LookupIP with
+// network "ip") sends A and AAAA concurrently and, for a rooted name, keeps only the LAST error to arrive — so with A
+// = NODATA and AAAA = SERVFAIL it returns "not found" or "server misbehaving" depending on which goroutine finished
+// last. "Not found" is the one answer this module turns into `invalid`, so a partial outage of ours would sometimes be
+// stated as a fact about the user's domain. Asked separately, each error is unambiguous and the rule is explicit:
+//
+//   - any address from either family    → the addresses (the other family's failure is irrelevant: the host exists);
+//   - both families definitively absent → a not-found error (the one door resolveMX reads as "no A/AAAA");
+//   - anything else                     → the non-not-found error, which resolveMX keeps as `unknown`.
+//
+// The two queries run in parallel, so the extra family costs no extra latency over Go's combined lookup.
 func (n *NetResolver) LookupIP(ctx context.Context, domain string) ([]net.IP, error) {
-	addrs, err := n.r.LookupIPAddr(ctx, fqdn(domain))
-	if err != nil {
-		return nil, err
+	name := fqdn(domain)
+	type answer struct {
+		ips []net.IP
+		err error
 	}
-	ips := make([]net.IP, 0, len(addrs))
-	for _, a := range addrs {
-		ips = append(ips, a.IP)
+	var v4, v6 answer
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); v4.ips, v4.err = n.r.LookupIP(ctx, "ip4", name) }()
+	go func() { defer wg.Done(); v6.ips, v6.err = n.r.LookupIP(ctx, "ip6", name) }()
+	wg.Wait()
+
+	if all := append(append([]net.IP{}, v4.ips...), v6.ips...); len(all) > 0 {
+		return all, nil
 	}
-	return ips, nil
+	var de *net.DNSError
+	v4Absent := v4.err == nil || asDNSNotFound(v4.err, &de) // nil error + no addresses = answered, nothing there
+	v6Absent := v6.err == nil || asDNSNotFound(v6.err, &de)
+	switch {
+	case v4Absent && v6Absent:
+		if v4.err != nil {
+			return nil, v4.err // a not-found error, so the caller's narrow door sees it
+		}
+		if v6.err != nil {
+			return nil, v6.err
+		}
+		return nil, nil // both answered with nothing
+	case !v4Absent:
+		return nil, v4.err
+	default:
+		return nil, v6.err
+	}
 }
 
 func trimDot(host string) string {

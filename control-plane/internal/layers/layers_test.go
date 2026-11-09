@@ -9,6 +9,12 @@ import (
 
 // fixtureResolver is an injectable Resolver: no network. It maps domain→MX or domain→error,
 // so we can prove the harden-toward-unknown classification exactly.
+//
+// CAUTION — THIS IS A FAKE, AND ITS "no MX, no error" ANSWER (the `return nil, nil` below) IS A SHAPE REAL GO NEVER
+// PRODUCES: net.Resolver.LookupMX reports NODATA as an *error* (IsNotFound), never as an empty list. For that reason the
+// A/AAAA implicit-MX fallback was reachable only through this fake and was DEAD CODE against real DNS until ADR-0020.
+// Anything that depends on how a resolver answers must be proven in dns_realdns_test.go, against the real client over
+// the real protocol (internal/dnsfixture) — not here.
 type fixtureResolver struct {
 	mx   map[string][]MXHost
 	ips  map[string][]net.IP

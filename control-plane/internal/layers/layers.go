@@ -80,7 +80,7 @@ type mxOutcome int
 const (
 	mxUnresolved mxOutcome = iota // not yet looked up
 	mxFound                       // has MX records (or A/AAAA implicit MX)
-	mxNone                        // domain resolves but has NO mail route (positive proof → invalid)
+	mxNone                        // no MX AND no A/AAAA, all definitively absent — the only provable "no mail route" (→ invalid)
 	mxNullMX                      // RFC 7505 null-MX (explicit "accepts no mail" → invalid)
 	mxError                       // transient DNS failure (timeout/SERVFAIL → unknown, NEVER invalid)
 )
@@ -129,11 +129,14 @@ func (ev *Evidence) mx(ctx context.Context) (hosts []MXHost, outcome mxOutcome) 
 func resolveMX(ctx context.Context, r Resolver, domain string) ([]MXHost, mxOutcome) {
 	mxs, err := r.LookupMX(ctx, domain)
 	if err != nil {
-		// NXDOMAIN / "no such host" is DEFINITIVE non-existence → the domain cannot receive
-		// mail. Everything else (timeout, SERVFAIL, temporary) is NOT proof → unknown.
+		// A not-found MX answer is NOT yet "this domain cannot receive mail". It is NXDOMAIN (the name does not exist)
+		// OR NODATA (the name exists and simply has no MX) — and Go reports both identically, so this branch cannot tell
+		// them apart. For NODATA, RFC 5321 §5.1 says the domain's own A/AAAA host receives its mail (implicit MX), so the
+		// only way to know is to ask for the address (ADR-0020). Everything that is not a definitive not-found (timeout,
+		// SERVFAIL, temporary) is no proof of anything → unknown.
 		var dnsErr *net.DNSError
 		if ok := asDNSNotFound(err, &dnsErr); ok {
-			return nil, mxNone
+			return impliedMX(ctx, r, domain) // IMPLICIT-MX
 		}
 		return nil, mxError
 	}
@@ -151,17 +154,30 @@ func resolveMX(ctx context.Context, r Resolver, domain string) ([]MXHost, mxOutc
 	if len(real) > 0 {
 		return real, mxFound
 	}
-	// No MX records: fall back to A/AAAA (implicit MX, RFC 5321 §5.1).
-	ips, ipErr := r.LookupIP(ctx, domain)
-	if ipErr != nil {
+	// A resolver that answers "no MX" with an empty list rather than an error: same question, same follow-up.
+	return impliedMX(ctx, r, domain)
+}
+
+// impliedMX is the RFC 5321 §5.1 implicit-MX rule (ADR-0020): a domain with no MX record but an A or AAAA record
+// receives its mail at that host, so the domain itself is the mail host and the SMTP probe goes there. This is the ONLY
+// place a missing MX is allowed to become `invalid`, and only when the domain provably has NO address either:
+//
+//   - A and/or AAAA present            → mxFound, the domain as the (preference 0) mail host;
+//   - both definitively not found      → mxNone  (no MX AND no A/AAAA — the only provable "no mail route");
+//   - SERVFAIL / timeout / any other   → mxError (unknown; an outage of ours is never a fact about the address).
+//
+// Null-MX (RFC 7505) never reaches here: resolveMX decides it before asking. NetResolver.LookupIP asks A and AAAA as
+// two separate lookups, so a partial failure (A = NODATA, AAAA = SERVFAIL) arrives here as an error, not as "not found".
+func impliedMX(ctx context.Context, r Resolver, domain string) ([]MXHost, mxOutcome) {
+	ips, err := r.LookupIP(ctx, domain)
+	if err != nil {
 		var dnsErr *net.DNSError
-		if ok := asDNSNotFound(ipErr, &dnsErr); ok {
+		if ok := asDNSNotFound(err, &dnsErr); ok {
 			return nil, mxNone
 		}
 		return nil, mxError
 	}
 	if len(ips) > 0 {
-		// Implicit MX = the domain itself.
 		return []MXHost{{Host: domain, Pref: 0}}, mxFound
 	}
 	return nil, mxNone

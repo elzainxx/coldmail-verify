@@ -85,6 +85,10 @@ client in place of `net.Resolver`; it is not needed to stop a failure becoming a
 
 ## Not changed, found while auditing — needs a ruling
 
+> **RESOLVED 2026-11-09 by [ADR-0020](ADR-0020-implicit-mx-rfc5321.md)** (ruled: implicit MX per RFC 5321 §5.1; null MX and
+> no-A/AAAA stay `invalid`; an outage is `unknown`; a probe that cannot run leaves `risky`). What follows is the finding as it was
+> recorded, kept for the record.
+
 **An address at a domain with an A record and no MX is reported `invalid / no_mx`.** `resolveMX` treats *any* not-found from
 `LookupMX` as proof of no mail route and returns before the A/AAAA fallback that its own comments describe (RFC 5321 §5.1, implicit
 MX). Go reports NODATA on an MX query as an error with `IsNotFound`, so that fallback is dead code against real DNS. Measured
