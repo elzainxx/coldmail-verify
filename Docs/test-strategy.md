@@ -117,7 +117,7 @@ Per PROJECT_RULES.md §7, every change runs (see [`../.github/workflows/ci.yml`]
 10. **the verifier-node base image can never again be a cache-only build** — the Dockerfile's `FROM` is
     pinned by DIGEST, names a supported Debian (bookworm/trixie, never bullseye or older), carries the
     Ruby patch `.ruby-version` names, and every `docker build` in the workflow passes `--pull --no-cache`
-    (`scripts/check-base-image-pinned.sh`, plus its paired self-test
+    (`scripts/check-base-image-pinned.sh`, which since 2026-11-09 also fails any workflow `image:` — the postgres service — without a digest; plus its paired self-test
     `scripts/check-base-image-pinned-selftest.sh`). The defect it guards was invisible for months: the
     base was `ruby:3.2.0-slim` (Debian 11), whose `debian-security` repository was removed, so
     `apt-get install` 404s — but only on a build that does not reuse a cached layer, and every local build

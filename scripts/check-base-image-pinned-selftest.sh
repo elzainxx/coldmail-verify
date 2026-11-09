@@ -37,5 +37,11 @@ mk "$GOOD_FROM" 'ruby-3.2.11\n' 'docker build --no-cache -t x:ci verifier-node/t
 mk "$GOOD_FROM" 'ruby-3.2.11\n' 'docker build --pull -t x:ci verifier-node/truemail-rack';    expect_fail "a CI build missing --no-cache"    "lacks --pull --no-cache"
 mk "$GOOD_FROM" 'ruby-3.2.11\n' 'echo no build here';                                         expect_fail "a CI file with no docker build (vacuity)" "assertion 4 would be vacuous"
 
+# 5. other images the workflow pulls (the postgres service container)
+mkimg() { mk "$GOOD_FROM" 'ruby-3.2.11\n' "$GOOD_BUILD"; printf '    services:\n      pg:\n        image: %s\n' "$1" >> "$TMP/ci.yml"; }
+mkimg "postgres:16-alpine@sha256:$D";   expect_ok   "a digest-pinned service image passes"
+mkimg "postgres:16-alpine";             expect_fail "a tag-only service image (postgres:16-alpine)" "without a digest"
+mkimg "postgres:16-alpine@sha256:abc";  expect_fail "a truncated service-image digest"             "without a digest"
+
 echo "check-base-image-pinned-selftest: $pass passed, $failn failed"
 [ "$failn" -eq 0 ]

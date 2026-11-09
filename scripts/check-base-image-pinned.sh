@@ -54,5 +54,12 @@ while IFS= read -r l; do
 done < <(grep -E 'docker build ' "$CI" | grep -v -E '^[[:space:]]*#' || true)
 [ "$n" -gt 0 ] || bad "found no 'docker build' line in $CI — assertion 4 would be vacuous"
 
+# 5. EVERY other image the workflow pulls (service containers: postgres, ...) is pinned by digest too, not only the node's base.
+#    A tag moves: a runner pulls whatever the registry serves that day. (Owner ruling 2026-11-09: no unpinned image tag anywhere.)
+while IFS= read -r l; do
+  ref="$(echo "$l" | sed -E 's/^[[:space:]]*(-[[:space:]]*)?image:[[:space:]]*//; s/[[:space:]]*#.*$//; s/["'"'"']//g' | tr -d '\r')"
+  echo "$ref" | grep -Eq '@sha256:[0-9a-f]{64}$' || bad "$(basename "$CI") pulls image '$ref' without a digest (@sha256:<64 hex>) — a tag moves"
+done < <(grep -E '^[[:space:]]*(-[[:space:]]*)?image:' "$CI" | grep -v -E '^[[:space:]]*#' || true)
+
 [ "$fail" -eq 0 ] || exit 1
 echo "base-image-pinned: ok — $(echo "$from" | sed 's/@sha256:\(.\{12\}\).*/@sha256:\1…/'); Ruby ${want} matches .ruby-version; $n CI docker build(s) use --pull --no-cache."
