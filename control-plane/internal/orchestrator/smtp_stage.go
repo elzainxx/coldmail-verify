@@ -205,6 +205,12 @@ func (o *Orchestrator) runSMTP(ctx context.Context, normalized, domain, requestI
 		return smtpStageOutcome{Ran: true, Result: unknownResult(vocab.ReasonSMTPError), RawBlob: raw, NodeID: n.ID, VerifierIP: verifierIP}
 	}
 
+	// ADR-0021: the node's destination guard refused to open a session (the domain's mail host resolves to a non-public address).
+	// That is a FACT about the domain, reported with no transcript: risky/non_public_mx — never invalid, never a guess, never cached.
+	if wr.ProbeRefused != nil {
+		return smtpStageOutcome{Ran: true, Result: smtp.ProbeRefusedResult(wr.ProbeRefused), RawBlob: raw, NodeID: n.ID, VerifierIP: verifierIP}
+	}
+
 	parsed := smtp.ParseTranscript(wr.SMTPDebug, wr.Success)
 	in := smtp.Input{
 		Target:        parsed,

@@ -182,6 +182,20 @@ jobs:
       - name: resolver-hygiene SELF-TEST (the gate goes RED with the search, hostname or ndots rule disabled)
         run: bash scripts/check-resolver-hygiene-selftest.sh
 
+  # ADR-0021 — the verifier node never opens an SMTP session to a non-public address (loopback, RFC 1918, link-local/cloud metadata, CGNAT, ...).
+  # The guard's decisions are judged by an INDEPENDENT oracle (Python's ipaddress, test points generated from its own transcription of the IANA
+  # registries), the shipped egress firewall ruleset is checked against the guard's ranges and with `nft -c`, and four mutants prove the gate can fail.
+  # Needs only Docker.
+  verifier-node-probe-guard:
+    name: verifier-node SMTP probe destination guard (independent oracle + egress ruleset)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: probe guard vs the independent oracle; egress ruleset in step with the guard
+        run: bash scripts/check-probe-guard.sh
+      - name: probe-guard SELF-TEST (the gate goes RED with CGNAT, link-local, 172.16/12 or the firewall's CGNAT removed)
+        run: bash scripts/check-probe-guard-selftest.sh
+
   verifier-node-rspec:
     name: verifier-node (RSpec — stock + /v1 wrapper)
     runs-on: ubuntu-latest

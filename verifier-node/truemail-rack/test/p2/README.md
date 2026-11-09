@@ -23,7 +23,12 @@ docker run --rm -e VERIFIER_EMAIL=verifier@example.test -e ACCESS_TOKENS=tok \
   tmvn-p2-test:latest sh -c 'cd /app && ruby /proof.rb'
 ```
 
-## What it proves (Appendix B matrix, 8/8 as of 2026-07-17)
+**Rows 9–11 (2026-11-09, ADR-0021) prove the probe-destination guard against the same real DNS.** A counting listener is the destination:
+guard on → the loopback MX is refused and 0 connections reach it (also for the catch-all probe); the control (override on, same destination) → the
+gem connects (2 connections), so zero is an observation, not an inference. The harness sets `PROBE_ALLOW_NON_PUBLIC=1` itself for rows 1–8, whose fakes
+live on loopback — that override turns a real node's audit red, so it is for this harness only.
+
+## What it proves (Appendix B matrix: 8/8 as of 2026-07-17; 11/11 with the guard rows)
 
 | Row | Fixture | Proves |
 |---|---|---|

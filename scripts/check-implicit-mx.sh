@@ -31,7 +31,7 @@ case "${1:-}" in
   --mutant-partial)   MODE=mutant-partial ;;
   *) echo "usage: check-implicit-mx.sh [--mutant-implicit|--mutant-partial]" >&2; exit 2 ;;
 esac
-IMG="alpine@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f"   # alpine:3.22 (same pin as check-dns-search-domain.sh)
+IMG="alpine@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf"   # alpine:3.24 (same pin as check-dns-search-domain.sh)
 RUN='TestMXLayer_RealDNS_ImplicitMX|TestNetResolver_LookupIP|TestNetResolver_RootsEveryName'
 
 # Under the checkout, not /tmp: the path must be valid for the Docker daemon on a runner and inside a CI replica alike.

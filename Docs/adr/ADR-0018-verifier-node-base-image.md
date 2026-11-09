@@ -141,3 +141,26 @@ ran), one layer up. Ruled by the owner (C3 of the same brief) and done:
    including the original defect, a `bundle lock` in the image).
 
 To change a gem from now on: edit the Gemfile, run `bundle lock` in this image's Ruby, commit both, let CI rebuild.
+
+## Addendum 2 (2026-11-09) — the Ruby 3.2 end-of-life is closed by moving to Ruby 3.4.12, truemail 3.3.1 unchanged
+
+The report above (*"Ruby 3.2 end-of-life, and what moving off it would take"*) recommended scheduling the move and listed what to re-prove; the build experiment
+had not been run. The owner ruled a **bounded attempt**: try Ruby 3.4 with truemail 3.3.1 unchanged; if the suite and `assert-gem-unmodified` pass, move and
+digest-pin; if not, record exactly what breaks and the trigger that reopens it. It passed, so the image **moved**.
+
+**What was done, in a throwaway copy of the node directory (so a failed attempt could not have left anything in the repo):**
+1. Base `ruby:3.4.12-slim-bookworm@sha256:c81ac5a2…`, `.ruby-version` → `ruby-3.4.12` (the fork stores it CRLF; kept).
+2. The lock was regenerated **inside Ruby 3.4**, starting from the existing lock (`bundle lock`, bundler 2.7.2). **Result: one changed line**,
+   `RUBY VERSION ruby 3.2.11p268` → `3.4.12p148`. Every gem — truemail 3.3.1, net-smtp 0.5.1, rack, thin, eventmachine, dry-* — resolves to the same version
+   under 3.4. The Gemfile needed no change (the bundled-gem removals of 3.4 — `base64`, `bigdecimal`, `mutex_m`, `drb`, `observer`, `csv` … — are not hit).
+3. Built from scratch (`--pull --no-cache`, as CI does) and run: **RSpec 180 examples, 0 failures** (91 stock + wrapper before the ADR-0020/0021 work);
+   `assert-gem-unmodified.sh` OK (Door 5: pinned exactly to 3.3.1, no vendored source); and the **socket-level proof 11/11 on Ruby 3.4** — the real gem and
+   the real `net-smtp` over real sockets against `smtp_mock` and `dns_mock`, which is the check that would expose a behavioural break a stubbed spec cannot.
+4. The gates that run *inside the node image's Ruby* now run on 3.4, including the resolver-hygiene oracle (Ruby's own `Resolv::DNS` — the component most likely
+   to differ between minors) and the probe-guard oracle.
+
+**Consequences.** The interpreter receives security fixes again. Door 5 is untouched (the gem pin did not change; the engine is byte-identical). The digest is
+still the single pin (`check-base-image-pinned.sh` asserts the tag's patch equals `.ruby-version`); `check-gemfile-lock.sh` asserts the lock's Ruby equals it
+too. `FORK.md` row 18 records the edit. **Not changed:** upstream's legacy `.circleci/` config and its `TargetRubyVersion: 3.2` RuboCop target are not run by
+this project's CI and were left as they were. The next move (3.5/4.x) is the same drill: new base digest + `.ruby-version` + a lock regenerated in the new
+Ruby, and the same four checks.

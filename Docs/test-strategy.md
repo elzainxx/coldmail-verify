@@ -164,6 +164,18 @@ Per PROJECT_RULES.md §7, every change runs (see [`../.github/workflows/ci.yml`]
     which Ruby turns into a search domain even when resolv.conf is clean (ADR-0019 addendum). Also pinned in Go on the exact wrapper JSON
     (`internal/audit/resolver_warning_test.go`: red even when the box claims green) and end to end (`internal/orchestrator/resolver_hygiene_test.go`:
     real scheduler, real store, the node is never called, the verdict is `risky/plausible`, with a clean-audit control that does run the probe).
+15. **the verifier node never opens an SMTP session to a non-public address** — a pre-flight in the forked wrapper refuses loopback, RFC 1918,
+    link-local/cloud-metadata, CGNAT and every other non-public range before the gem's SMTP step; a post-check discards a transcript that leaked
+    through DNS rebinding; the brain turns the refusal into `risky` / `non_public_mx` (`scripts/check-probe-guard.sh`, plus its paired self-test
+    `scripts/check-probe-guard-selftest.sh`). The gate has Python generate ~51k addresses from its OWN transcription of the IANA registries (every
+    block's edges and midpoint, seeded random IPv4/IPv6, IPv4-mapped forms), the REAL guard decide each under the node image's Ruby, and Python's
+    `ipaddress.is_global` judge each: the guard must never allow a non-global address. It also fails if the shipped egress ruleset
+    (`verifier-node/egress/verifier_egress.nft`) lacks a range the guard refuses, loses its IPv6 allow-list rule, or is not valid nftables. The self-test
+    builds four mutants (CGNAT, link-local, 172.16/12 removed from the guard; CGNAT removed from the firewall file) and requires each to go red at the
+    removed block's edges only. The first version generated its edges from the guard's own table, so deleting a range deleted its test points — found
+    by asking why a mutant produced 2 violations and not 4+ (ADR-0021). Also: RSpec (every range + its public neighbours), the socket-proof harness
+    (`test/p2` rows 9–11: a counting listener sees 0 connections with the guard on and 2 with the control), and Go (golden wire fixture, end-to-end
+    `Verify`, and `TestVocabMirrorsTheDatabaseCheckConstraints` against real Postgres, with a through-0014 control).
 
 **This list is checked, not trusted.** It stood at five items while CI ran nine, which is the same
 count-drift this project has already found twice (a gate count below CI's; 53 documented config keys

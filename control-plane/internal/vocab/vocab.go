@@ -15,6 +15,8 @@
 // CHECK constraints (P1 §4.1) mirror.
 package vocab
 
+import "sort"
+
 // Status is the verdict. Exactly four values, frozen (P1 §3.4.1).
 type Status string
 
@@ -40,20 +42,20 @@ type Reason string
 
 const (
 	// Phase 1 — cheap layers (no port 25).
-	ReasonInvalidSyntax    Reason = "invalid_syntax"
-	ReasonInvalidDomain    Reason = "invalid_domain"
-	ReasonNoMX             Reason = "no_mx"
-	ReasonNullMX           Reason = "null_mx"
-	ReasonDNSError         Reason = "dns_error"
-	ReasonDisposable       Reason = "disposable" // -> risky, never invalid (OQ-7)
+	ReasonInvalidSyntax     Reason = "invalid_syntax"
+	ReasonInvalidDomain     Reason = "invalid_domain"
+	ReasonNoMX              Reason = "no_mx"
+	ReasonNullMX            Reason = "null_mx"
+	ReasonDNSError          Reason = "dns_error"
+	ReasonDisposable        Reason = "disposable" // -> risky, never invalid (OQ-7)
 	ReasonBlacklistedDomain Reason = "blacklisted_domain"
-	ReasonBlacklistedMX    Reason = "blacklisted_mx"
-	ReasonSpamTrap         Reason = "spam_trap"
-	ReasonRoleAccount      Reason = "role_account"
-	ReasonWhitelisted      Reason = "whitelisted"
-	ReasonProviderNoSMTP   Reason = "provider_no_smtp"
-	ReasonPlausible        Reason = "plausible"
-	ReasonUnknownError     Reason = "unknown_error"
+	ReasonBlacklistedMX     Reason = "blacklisted_mx"
+	ReasonSpamTrap          Reason = "spam_trap"
+	ReasonRoleAccount       Reason = "role_account"
+	ReasonWhitelisted       Reason = "whitelisted"
+	ReasonProviderNoSMTP    Reason = "provider_no_smtp"
+	ReasonPlausible         Reason = "plausible"
+	ReasonUnknownError      Reason = "unknown_error"
 
 	// Phase 2 — SMTP (reserved in P1, emitted from P2).
 	ReasonAccepted         Reason = "accepted"
@@ -72,6 +74,10 @@ const (
 
 	// Phase 7 — flywheel (reserved in P1).
 	ReasonHistoricalBounce Reason = "historical_bounce"
+
+	// ADR-0021 (additive): the verifier node refused to open an SMTP session because the domain's mail host resolves to a
+	// non-public address (loopback, RFC 1918, link-local/cloud-metadata, CGNAT, ...). risky, never invalid; no probe was made.
+	ReasonNonPublicMX Reason = "non_public_mx"
 )
 
 // The authoritative legal-value sets. Storage-layer CHECK constraints (P1 §4.1)
@@ -91,7 +97,7 @@ var (
 		ReasonAccepted: {}, ReasonMailboxNotFound: {}, ReasonMailboxFull: {}, ReasonCatchAll: {},
 		ReasonAcceptAll: {}, ReasonGreylisted: {}, ReasonSMTPBlocked: {}, ReasonSMTPTimeout: {},
 		ReasonSMTPError: {}, ReasonConnectionFailed: {},
-		ReasonExternalVerified: {}, ReasonHistoricalBounce: {},
+		ReasonExternalVerified: {}, ReasonHistoricalBounce: {}, ReasonNonPublicMX: {},
 	}
 )
 
@@ -116,4 +122,15 @@ func ComposabilityOK(s Status, rec Recommendation) bool {
 	default:
 		return false
 	}
+}
+
+// Reasons returns every legal reason, sorted. It exists so a test can check the storage-layer CHECK constraints against this set
+// (the comment above says they must mirror it; until ADR-0021 nothing verified that).
+func Reasons() []Reason {
+	out := make([]Reason, 0, len(reasons))
+	for r := range reasons {
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }

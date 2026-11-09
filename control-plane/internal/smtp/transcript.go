@@ -30,6 +30,7 @@ type WrapperResponse struct {
 	SMTPDebug         []HostTranscript `json:"smtp_debug"`
 	Catchall          *CatchallBlock   `json:"catchall"`
 	MX                *MXBlock         `json:"mx"`
+	ProbeRefused      *ProbeRefusal    `json:"probe_refused"` // ADR-0021: present only when the node's destination guard refused
 	Date              string           `json:"date"`
 }
 
@@ -209,4 +210,18 @@ func firstNonEmpty(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// ProbeRefusal is the node's destination-guard FACT (ADR-0021): the wrapper refused to open an SMTP session because the domain's
+// mail host resolves to a non-public address. There is no transcript; the brain turns this into risky/non_public_mx.
+type ProbeRefusal struct {
+	Reason  string          `json:"reason"` // "non_public_target"
+	Count   int             `json:"count"`
+	Targets []RefusedTarget `json:"targets"`
+}
+
+// RefusedTarget is one refused address and the special-purpose range it fell in.
+type RefusedTarget struct {
+	Address string `json:"address"`
+	Range   string `json:"range"`
 }

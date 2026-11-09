@@ -18,6 +18,12 @@ require 'dns_mock'
 require 'json'
 require_relative '/app/app/truemail_server/wrapper/serializer'
 require_relative '/app/app/truemail_server/wrapper/catchall_probe'
+require_relative '/app/app/truemail_server/wrapper/probe_guard'
+
+# ADR-0021: the destination guard refuses loopback, and every fake in this harness (dns_mock, smtp_mock) lives on loopback. The
+# original eight rows are about the SMTP wire path, not the guard, so they run with the guard explicitly overridden (the override is
+# exact "1", and turns a real node's audit RED). Rows 9-11 at the end turn the guard ON and prove it against the same real DNS.
+ENV['PROBE_ALLOW_NON_PUBLIC'] = '1'
 
 RESULTS = []
 
@@ -150,6 +156,62 @@ begin
   check('delta stock blacklist → 4xx transient (confirms §3.4 421-vs-554)', code&.start_with?('4'),
         "stock blacklist code=#{code}")
   s.stop!
+
+  # ── Rows 9-11 (ADR-0021): the DESTINATION GUARD against real DNS (dns_mock) and the real gem. ─────────────────────────────
+  # corp.test's MX resolves to 127.0.0.1 (above). The destination is a COUNTING listener, so "no connection was made" is observed,
+  # not inferred; and row 10 is the control that proves the listener WOULD have seen one (a zero count means nothing otherwise).
+  listener = Class.new do
+    attr_reader :port
+
+    def initialize
+      @server = TCPServer.new('127.0.0.1', 0)
+      @port = @server.addr[1]
+      @count = 0
+      @mutex = Mutex.new
+      @thread = Thread.new do
+        loop do
+          client = @server.accept
+          @mutex.synchronize { @count += 1 }
+          client.close
+        end
+      rescue StandardError
+        nil
+      end
+    end
+
+    def count = @mutex.synchronize { @count }
+
+    def close
+      @server.close
+    rescue StandardError
+      nil
+    end
+  end.new
+  configure_engine(listener.port)
+  guard = TruemailServer::Wrapper::ProbeGuard
+
+  # Row 9 — guard ON: the wrapper's sequence is `preflight → (refusal? return) → Truemail.validate`; the gem is only reached when
+  # there is no refusal. Loopback MX → refused, range named, and the listener saw NOTHING.
+  ENV.delete('PROBE_ALLOW_NON_PUBLIC')
+  refusal = guard.preflight('someone@corp.test')
+  Truemail.validate('someone@corp.test', with: :smtp) unless refusal
+  check('row9 guard ON: loopback MX refused, ZERO connections reach it',
+        !refusal.nil? && refusal[:targets].first[:range] == 'loopback' && listener.count.zero?,
+        "refusal=#{refusal&.slice(:reason, :count)} connections=#{listener.count}")
+
+  # Row 11 — the standalone catch-all probe is guarded too (it is a second SMTP session to the same destination).
+  probe = TruemailServer::Wrapper::CatchallProbe.run('corp.test')
+  check('row11 guard ON: the catch-all probe is refused too, ZERO connections',
+        probe[:conclusion] == 'inconclusive' && probe[:probe_refused] && listener.count.zero?,
+        "conclusion=#{probe[:conclusion]} connections=#{listener.count}")
+
+  # Row 10 — CONTROL: same domain, same listener, override ON → the pre-flight passes and the gem DOES connect.
+  ENV['PROBE_ALLOW_NON_PUBLIC'] = '1'
+  refusal = guard.preflight('someone@corp.test')
+  Truemail.validate('someone@corp.test', with: :smtp) unless refusal
+  check('row10 CONTROL override ON: the same destination IS connected to (the listener sees it)',
+        refusal.nil? && listener.count.positive?, "connections=#{listener.count}")
+  listener.close
 
 ensure
   begin

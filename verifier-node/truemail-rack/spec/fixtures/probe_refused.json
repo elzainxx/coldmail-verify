@@ -1,0 +1,17 @@
+{
+  "wrapper_api_version": "v1",
+  "email": "t@evil.test",
+  "validation_type": "smtp",
+  "success": false,
+  "errors": { "probe_guard": "SMTP probe refused: the mail host resolves to a non-public address" },
+  "smtp_debug": null,
+  "probe_refused": {
+    "reason": "non_public_target",
+    "count": 2,
+    "targets": [
+      { "address": "169.254.169.254", "range": "link-local/cloud-metadata" },
+      { "address": "10.0.0.5", "range": "private-rfc1918" }
+    ]
+  },
+  "date": "<date>"
+}

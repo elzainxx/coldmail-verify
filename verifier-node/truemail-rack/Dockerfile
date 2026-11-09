@@ -1,12 +1,12 @@
 # Verifier-node = forked truemail-rack + PINNED truemail gem (Door 5).
-# Ruby is pinned to the fork's .ruby-version (3.2). Runs STOCK in Phase 0 —
+# Ruby is pinned to the fork's .ruby-version (3.4). Runs STOCK in Phase 0 —
 # no wrapper endpoints (/verify, /audit, /catchall, /config, /stats): those are Phase 2.
 #
 # The truemail engine is pinned EXACTLY to 3.3.1 in the Gemfile (never forked).
 # Gemfile.lock is (re)generated here because the host has no Ruby and the exact
 # pin invalidated the upstream lock — the resolved lock is the build artifact.
 #
-# Base: the latest Ruby 3.2 patch on Debian 12 (bookworm), PINNED BY DIGEST (ADR-0018).
+# Base: Ruby 3.4.12 on Debian 12 (bookworm), PINNED BY DIGEST (ADR-0018; moved from 3.2.11 on 2026-11-09 — ADR-0018 addendum 2).
 #
 # WHY NOT ruby:3.2.0-slim any more. That image is Debian 11 (bullseye); Debian removed bullseye's `debian-security`
 # repository, so `apt-get install` returns 404 on any build that does not hit a cached layer. It stayed invisible on a
@@ -19,7 +19,7 @@
 # below are the same image TODAY; only the digest stays the same image tomorrow. CI builds with `--pull --no-cache`
 # (and scripts/check-base-image-pinned.sh enforces both), so a dead or changed base can never hide behind a cache again.
 # To move to a newer base: pull it, take its digest, change this line and `.ruby-version` together, re-run CI.
-FROM ruby:3.2.11-slim-bookworm@sha256:84140472007d27c7ec641dbc606a47ff9c0aa5f358445947b7350392fa5115e5
+FROM ruby:3.4.12-slim-bookworm@sha256:c81ac5a2118161a9e01cfbb2da6d68ae1c96d3e6dff14fb1f7f485fee538babe
 
 # thin/eventmachine need a compiler; net-smtp is pure Ruby. ca-certificates lets us
 # trust an optional corporate/AV TLS-interception proxy CA (see below). Kept minimal.

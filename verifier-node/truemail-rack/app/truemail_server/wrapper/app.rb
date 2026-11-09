@@ -8,6 +8,7 @@ require_relative 'config_view'
 require_relative 'counters'
 require_relative 'catchall_probe'
 require_relative 'resolver_hygiene'
+require_relative 'probe_guard'
 
 # FORK EDIT (Phase 2): the wrapper app — the fork's own /v1/* endpoints (§4). Mounted at /v1 by
 # config.ru's URLMap, so the STOCK rack (/,  /version, /healthcheck via TruemailServer::Application)
@@ -69,8 +70,22 @@ module TruemailServer
 
         counters.bump(:verify_total)
         with = vtype ? vtype.to_sym : nil
+
+        # ADR-0021 layer 1 — PRE-FLIGHT: a non-public probe target is refused BEFORE the gem's SMTP step can connect.
+        if smtp_expected?(email, with)
+          refusal = TruemailServer::Wrapper::ProbeGuard.preflight(email)
+          return refused(email, refusal) if refusal
+        end
+
         validator = with ? ::Truemail.validate(email, with: with) : ::Truemail.validate(email)
         result = validator.result
+
+        # ADR-0021 layer 2 — POST-CHECK: the gem re-resolves inside its SMTP step and appends what it finds. If a DNS answer flipped
+        # to a non-public address in between, the transcript is DISCARDED here (never returned, so never persisted).
+        if validator.validation_type == :smtp && (late = TruemailServer::Wrapper::ProbeGuard.postcheck(result))
+          return refused(email, late)
+        end
+
         counters.bump(:smtp_sessions) if validator.validation_type == :smtp
         tally_transcript(result.smtp_debug)
 
@@ -110,6 +125,9 @@ module TruemailServer
         warnings = (result.warnings || {}).dup
         resolver_problem = TruemailServer::Wrapper::ResolverHygiene.check
         warnings[TruemailServer::Wrapper::ResolverHygiene::WARNING_KEY] = resolver_problem if resolver_problem
+        # ADR-0021: a node whose probe-destination guard is switched OFF is red, so it receives no brain traffic.
+        guard_off = TruemailServer::Wrapper::ProbeGuard.override_warning
+        warnings[TruemailServer::Wrapper::ProbeGuard::WARNING_KEY] = guard_off if guard_off
         json(200,
               wrapper_api_version: WRAPPER_API_VERSION,
               current_host_ip: result.current_host_ip,
@@ -138,6 +156,7 @@ module TruemailServer
               conclusion: probe[:conclusion],
               probe_local_part: probe[:probe_local_part],
               smtp_debug: probe[:smtp_debug],
+              probe_refused: probe[:probe_refused],
               probed_at: now_rfc3339)
       end
 
@@ -180,6 +199,29 @@ module TruemailServer
 
       def token_valid?(request)
         TruemailServer::Services::AccessToken.validate(request.get_header('HTTP_AUTHORIZATION'))
+      end
+
+      # Will this request open an SMTP session? Mirrors the gem's own choice: a per-domain override wins, then the requested
+      # type, then the configured default. Only an SMTP request has a destination to guard.
+      def smtp_expected?(email, with)
+        cfg = ::Truemail.configuration
+        domain = email[::Truemail::RegexConstant::REGEX_EMAIL_PATTERN, 3]
+        (cfg.validation_type_by_domain[domain] || with || cfg.default_validation_type) == :smtp
+      end
+
+      # The refusal FACT (ADR-0021). The wrapper renders no verdict: the brain maps `probe_refused` to risky/non_public_mx.
+      # No transcript, no `mx` block (it would list the target's addresses twice), no configuration: only what explains it.
+      def refused(email, refusal)
+        counters.bump(:probe_refused)
+        json(200,
+             wrapper_api_version: WRAPPER_API_VERSION,
+             email: email,
+             validation_type: 'smtp',
+             success: false,
+             errors: { probe_guard: 'SMTP probe refused: the mail host resolves to a non-public address' },
+             smtp_debug: nil,
+             probe_refused: refusal,
+             date: gem_date)
       end
 
       def probe_requested?(body)

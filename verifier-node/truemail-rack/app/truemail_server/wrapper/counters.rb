@@ -10,7 +10,7 @@ require 'monitor'
 module TruemailServer
   module Wrapper
     class Counters
-      KEYS = %i[verify_total smtp_sessions catchall_probes timeouts 5xx_total 4xx_total].freeze
+      KEYS = %i[verify_total smtp_sessions catchall_probes timeouts 5xx_total 4xx_total probe_refused].freeze
 
       def self.instance
         @instance ||= new

@@ -197,7 +197,9 @@ func CacheableReason(status vocab.Status, reason vocab.Reason) bool {
 	case vocab.StatusRisky:
 		// risky/catch_all and address-fault-adjacent risky are settled; a risky that is really a
 		// transient placeholder would carry an unknown reason — but risky reasons here are settled.
-		return true
+		// ONE exception (ADR-0021): non_public_mx is derived from the domain's CURRENT DNS state, which its owner can change (a stray
+		// private A record), so it is not remembered for a TTL.
+		return reason != vocab.ReasonNonPublicMX
 	case vocab.StatusUnknown:
 		return false // every unknown is a non-answer → never cache (OQ-P2-6 generalized)
 	default:

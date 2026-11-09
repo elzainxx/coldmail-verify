@@ -33,7 +33,14 @@ module TruemailServer
         local = probe_local_part && !probe_local_part.empty? ? probe_local_part : random_local_part
         probe_email = "#{local}@#{domain}"
 
+        # ADR-0021: the probe is a second SMTP session to the same destination, so it is guarded like the first — before and after.
+        refusal = TruemailServer::Wrapper::ProbeGuard.preflight(probe_email)
+        return refused_block(local, refusal) if refusal
+
         result = ::Truemail.validate(probe_email, with: :smtp).result
+        late = TruemailServer::Wrapper::ProbeGuard.postcheck(result)
+        return refused_block(local, late) if late
+
         conclusion = conclude(result)
 
         {
@@ -52,6 +59,17 @@ module TruemailServer
           accepted: false,
           conclusion: CONCLUSION_INCONCLUSIVE,
           error: error.message
+        }
+      end
+
+      # A refused probe is INCONCLUSIVE (the brain hardens that toward risky) and carries no transcript — there is none to keep.
+      def refused_block(local, refusal)
+        {
+          probed: true,
+          probe_local_part: local,
+          accepted: false,
+          conclusion: CONCLUSION_INCONCLUSIVE,
+          probe_refused: refusal
         }
       end
 

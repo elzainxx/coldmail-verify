@@ -25,7 +25,7 @@ export MSYS_NO_PATHCONV=1   # git-bash on Windows must not rewrite the container
 # The path Docker needs for a bind mount: native on Windows (cygpath), unchanged elsewhere.
 hostpath() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf %s "$1"; fi; }
 MODE=real; [ "${1:-}" = "--mutant" ] && MODE=mutant
-IMG="alpine@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f"   # alpine:3.22
+IMG="alpine@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf"   # alpine:3.24
 RUN='TestMXLayer_RealDNS|TestNetResolver|TestFQDN|TestAsDNSNotFound|TestSearchDomainCanary'
 
 # Under the checkout, not /tmp: the path must be valid for the Docker daemon on a runner and inside a CI replica alike.
