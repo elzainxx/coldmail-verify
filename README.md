@@ -11,9 +11,10 @@ time. Its founding principle:
 Everything else — the architecture, the frozen contracts, the safe-degradation ladder — follows
 from that.
 
-> **New here?** Read the guide for your role:
-> **[developer](Docs/install-and-deploy.md)** · **[operator](Docs/operator-runbook.md)** ·
-> **[end user](Docs/history/USER_GUIDE.md)**. The full doc map is [`Docs/README.md`](Docs/README.md).
+> **New here?** Read the doc for your role:
+> **[developer](Docs/architecture.md)** (then [install & deploy](Docs/install-and-deploy.md)) ·
+> **[operator](Docs/operator-runbook.md)** · **[caller / end user](Docs/api-contract.md)** (Appendix A explains a verdict).
+> The full doc map is [`Docs/README.md`](Docs/README.md).
 
 ---
 
@@ -51,14 +52,16 @@ coldmail-verify/
 ├── verifier-node/   # Ruby — "the box". A dumb, stateless SMTP probe. Port 25 OPEN outbound.
 │   └── truemail-rack/   #   a FORK of truemail-rack embedding the PINNED, UNMODIFIED truemail gem.
 │                        #   Holds NO state, NO DB creds, NO pepper — disposable (kill + re-spin).
-├── Docs/            # The three audience guides, 7 phase specs, ADRs, DECISIONS, runbooks, config.
-└── .github/         # CI: build + vet + tests (real Postgres) + gem-unmodified + docs/config gates.
+├── Docs/            # architecture, install-and-deploy, operator-runbook, config, API contract, security,
+│                    #   go-live checklist, future-work, open-decisions, 21 ADRs; history/ holds the phase specs.
+└── .github/         # CI: 11 jobs — build + vet + tests (real Postgres), gem-unmodified, base-image / lockfile /
+                     #   DNS / resolver / probe-guard gates, secret-leak scan, docs/config gates, code review.
 ```
 
 The brain holds every secret and all accumulated data; the box does one thing — attempt an SMTP
 conversation from a reputation-bearing IP and report the raw facts, rendering no verdict. Because
 the box is stateless, adding a second one is a config line and a compromised box leaks nothing but
-itself. Full detail: [`Docs/install-and-deploy.md`](Docs/install-and-deploy.md).
+itself. Full detail: [`Docs/architecture.md`](Docs/architecture.md).
 
 ### The five frozen contracts ("one-way doors")
 
@@ -86,10 +89,13 @@ done
 # Run the full suite against real Postgres:
 TM_TEST_DATABASE_URL='postgres://postgres:dev@localhost:5432/cptest' go test -shuffle=on ./...
 
-# Run the brain (cheap-verification-ready with a DB + a pepper):
+# Run the brain (cheap-verification-ready with a DB + a pepper; listens on :8080):
 TM_DATABASE_URL='postgres://postgres:dev@localhost:5432/cptest' TM_PEPPER='<32-bytes-of-entropy>' \
   go run ./cmd/control-plane
 ```
+
+The migration loop applies all 15 (`0001`–`0015`). A production start (`TM_ENV=production`) also needs
+`TM_SUPABASE_KEY` (and `TM_FRONTDOOR_TOKEN` to call the sync endpoint) — see [`Docs/install-and-deploy.md`](Docs/install-and-deploy.md) §3.1.
 
 Build the box (no Ruby on the host — it's containerized), from the repo root:
 
@@ -104,8 +110,8 @@ The brain runs cheap-verification-only with just a database and a pepper. Each f
 is switched on when its prerequisite is in place — an operator action, config, or (for the vendor
 and outcome-feed tiers) a pluggable adapter dropped into an existing interface seam; the brain's
 decision code is never touched. Satisfy them in order (each is detailed, with verification
-commands, in the [operations guide](Docs/operator-runbook.md) and the
-[go-live runbook](Docs/go-live-checklist.md)):
+commands, in [install & deploy](Docs/install-and-deploy.md) §3, and tracked item by item — done, owner-only,
+or not built yet — in the [go-live checklist](Docs/go-live-checklist.md)):
 
 | Capability | Prerequisite | Switched on with |
 |---|---|---|
@@ -122,13 +128,16 @@ system simply returns its honest verdict from the layers it *can* run.
 
 | You want to… | Read |
 |---|---|
-| Become productive as a developer | [`Docs/install-and-deploy.md`](Docs/install-and-deploy.md) |
-| Deploy and operate the system | [`Docs/operator-runbook.md`](Docs/operator-runbook.md) |
-| Understand what a verdict means | [`Docs/history/USER_GUIDE.md`](Docs/history/USER_GUIDE.md) |
+| Understand how it is built | [`Docs/architecture.md`](Docs/architecture.md) |
+| Install, run, test and deploy it | [`Docs/install-and-deploy.md`](Docs/install-and-deploy.md) |
+| Operate it (kill-switches, alerts, rollback) | [`Docs/operator-runbook.md`](Docs/operator-runbook.md) |
+| Call the API / understand what a verdict means | [`Docs/api-contract.md`](Docs/api-contract.md) (Appendix A) |
+| See what protects what | [`Docs/security-posture.md`](Docs/security-posture.md) |
 | Know the rules that never change | [`PROJECT_RULES.md`](PROJECT_RULES.md) |
 | See every toggle/flag/secret/dial | [`Docs/config-reference.md`](Docs/config-reference.md) (generated) |
 | See the binding decisions and ADRs | [`Docs/open-decisions.md`](Docs/open-decisions.md) · [`Docs/adr/`](Docs/adr/) |
 | Follow the ordered go-live path | [`Docs/go-live-checklist.md`](Docs/go-live-checklist.md) |
+| See what is not done yet | [`Docs/future-work.md`](Docs/future-work.md) |
 | See the full documentation map | [`Docs/README.md`](Docs/README.md) |
 
 ## License
