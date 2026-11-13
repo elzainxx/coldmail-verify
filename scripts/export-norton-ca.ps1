@@ -6,7 +6,7 @@
 # rotates its CA key while keeping an identical subject/issuer name, so a stale PEM looks correct and
 # fails anyway — in-container `bundle install` dies on CertificateFailureError and the RSpec gate
 # exits 17 with NO output at all. Documented, with the SKI/AKI confirmation and why RSpec is the only
-# gate affected, in Docs/install-and-deploy.md §5 "Prerequisite on a TLS-interception host". This header used
+# gate affected, in Docs/install-and-deploy.md §2 "Prerequisite on a TLS-interception host". This header used
 # to say "one-off build helper", which is how the same diagnosis got paid for twice.
 #
 # Writes LF-only, 64-col-wrapped PEM (update-ca-certificates / OpenSSL c_rehash reject

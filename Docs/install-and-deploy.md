@@ -120,7 +120,9 @@ tested end to end without a real port-25 IP — permanent test infrastructure, n
 gem-unmodified assertion, the base-image and `Gemfile.lock` gates, the real-DNS fixtures, the node's
 resolver-hygiene and probe-guard gates, the node RSpec suite, the boot-log secret scan, the
 docs/config-freshness gates and the code-reviewer gate. Each gate script is `scripts/check-*.sh` with a
-paired `-selftest`; [`test-strategy.md`](test-strategy.md) names all of them. CI is designed to **never
+paired `-selftest`; [`test-strategy.md`](test-strategy.md) names all of them. The container-based gates run in
+digest-pinned images (Alpine 3.24 for the DNS fixtures, `python:3.15.2-alpine` for the probe-guard oracle, the node
+image's own Ruby 3.4.12, and the Postgres service image), so a rebuild cannot silently change what they test. CI is designed to **never
 fake green** — what can only be proven against real infrastructure (SMTP round-trips, vendor accuracy)
 is tested at rollout and listed in [`future-work.md`](future-work.md).
 
