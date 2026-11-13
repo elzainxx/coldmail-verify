@@ -189,3 +189,91 @@ one place item 18 could not see, because it never reached a handler. Both are no
 `OPTIONS` is served on no route: Go's ServeMux does not auto-answer it, and this module has no CORS
 surface. An `OPTIONS` request therefore gets `method_not_allowed`, which is what the wrong-verb tests
 probe with.
+
+---
+
+## Appendix A — Reading a verdict (what each field means, in plain language)
+
+*Folded in from the former end-user guide (kept whole in [`history/USER_GUIDE.md`](history/USER_GUIDE.md)) and corrected
+against the code on 2026-11-09. This appendix has no route rows; the route table above is the only thing
+`TestRoutes_ServedSetMatchesTheDocumentedSet` reads.*
+
+Each result has four parts: a **status** (the headline answer), a **reason** (the single most important cause), a
+**confidence** (0–100, how strongly the evidence supports the status) and a **recommendation** (what to do next). The
+vocabulary is frozen and additive-only: a value means the same thing today as on the first day the system ran, so you can
+build rules on it. An unrecognised `status` should be treated as `unknown` and an unrecognised `reason` as opaque.
+
+### A.1 The four statuses
+
+| Status | What it means | In practice |
+|---|---|---|
+| **valid** | Positive evidence the mailbox can receive mail. | Safe to send. |
+| **invalid** | Positive evidence it cannot. | Don't send. |
+| **risky** | Real enough to accept mail, but sending carries elevated risk (a shared inbox, a throwaway address, a domain that accepts everything, a provider that will not say). | Send with care, or review. |
+| **unknown** | We could not determine the answer. | Honest, not broken — see A.3. |
+
+`invalid` is reserved for actual evidence of non-deliverability (bad syntax, no mail host at all, a null MX, a confirmed
+no-such-mailbox). **An address we merely could not check is never `invalid`** — blocked, rate-limited, greylisted, timed-out
+and "our own DNS failed" all come back `unknown` or `risky`. That protects you from silently discarding good contacts.
+
+### A.2 The reason — the common ones
+
+- **invalid_syntax** — not a well-formed address.
+- **invalid_domain / no_mx** — the domain has no mail host: no MX *and* no A/AAAA record (a domain with only an A/AAAA
+  record is treated as receiving mail at that host, RFC 5321 §5.1, and is **not** `invalid`), or it publishes a null MX
+  (**null_mx**).
+- **dns_error** — our DNS lookup failed; the answer is `unknown`, never `invalid`.
+- **mailbox_not_found** — the mail service said this mailbox does not exist.
+- **mailbox_full** — the mailbox exists but is over quota (a real mailbox, so a `valid` result).
+- **role_account** — a shared inbox (`info@`, `sales@`) rather than a person.
+- **disposable** — a throwaway address: real today, likely gone tomorrow, so **risky** and never `invalid`.
+- **catch_all / accept_all** — the domain accepts mail to every address, so this particular mailbox cannot be confirmed.
+- **provider_no_smtp** — a large mailbox provider that does not reveal whether a mailbox exists (A.4); we did not probe it.
+- **greylisted · smtp_blocked · smtp_timeout · smtp_error · connection_failed** — the probe could not get an answer
+  (`unknown`/`risky`); retry later.
+- **non_public_mx** — the domain's mail host resolves to a non-public address (loopback, a private range, cloud
+  metadata, …). We refuse to connect to such an address, so the result is `risky`, never `invalid`, and is not cached.
+- **external_verified · historical_bounce** — provenance values for a rented third-party answer (capped at `risky`) and
+  for an address with confirmed earlier bounces. They tell you where an answer came from, not an extra mailbox fact.
+- **plausible** — the address looks deliverable and nothing is wrong, but there is no positive proof either way.
+
+### A.3 What `unknown` means — and why it is a good answer
+
+`unknown` means we could not obtain reliable evidence and are saying so instead of guessing. A fake `valid` costs a bounce
+(and enough bounces damage your ability to reach anyone); a fake `invalid` costs a real customer you never contact again;
+an honest `unknown` costs a moment's judgment and is recoverable — send cautiously, verify again later, or hold. A verifier
+that never returns `unknown` is not more capable; it is guessing where this one is honest. Treat `unknown` as "proceed with
+caution."
+
+### A.4 Confidence, and the addresses nobody can determine
+
+**Confidence is how strongly the evidence supports the status — not a probability of delivery** (80 does not mean "80%
+deliverable"; delivery also depends on the recipient's spam filter, whether they muted you, whether their mailbox fills up
+tomorrow). A `risky` at 60 and a `valid` at 60 are not equally good: the status is the headline, confidence refines it.
+
+Some addresses are inherently undeterminable, because of how email works: the largest consumer providers deliberately do
+not reveal whether a mailbox exists (we return `risky`, honestly), and catch-all domains accept everything, so "accepted"
+says nothing about one mailbox (we return `risky / catch_all`). A system that returns a confident `valid` here is
+overstating what it knows.
+
+### A.5 The recommendation
+
+| Recommendation | Meaning |
+|---|---|
+| **send** | The evidence supports delivery. |
+| **review** | Worth a human look, or send with care. |
+| **skip** | Don't send — proven undeliverable, or the risk outweighs the benefit. |
+
+It follows the status honestly and is checked in code (`vocab.ComposabilityOK`): `invalid ⇒ skip`; `valid ⇒ send` or
+`review`; `risky` and `unknown ⇒ review` or `skip`. You are free to apply your own thresholds.
+
+### A.6 Two worked examples
+
+> **status:** risky · **reason:** catch_all · **confidence:** 45 · **recommendation:** review
+> *The domain accepts all mail, so this exact mailbox cannot be confirmed. Probably deliverable, no proof of the specific
+> recipient — review before sending, especially for a cold, reputation-sensitive campaign.*
+
+> **status:** valid · **reason:** mailbox_full · **confidence:** 88 · **recommendation:** send
+> *The mailbox exists — it is over quota, which only a real mailbox can be. Safe; it may just be temporarily full.*
+
+The principle behind all of it: **we tell you what we can prove, and tell you honestly when we cannot prove anything.**
