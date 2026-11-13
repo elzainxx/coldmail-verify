@@ -16,11 +16,11 @@ cd verifier-node/truemail-rack
 # 1. Build the base fork image (production) if not already built:
 DOCKER_BUILDKIT=0 docker build -t truemail-verifier-node:p2 .
 # 2. Build the throwaway test image (adds mocks + smtpmock binary):
-DOCKER_BUILDKIT=0 docker build -f test/p2/Dockerfile -t tmvn-p2-test:latest .
+DOCKER_BUILDKIT=0 docker build -f test/p2/Dockerfile -t tmvn-p2-test:local .
 # 3. Run the socket proof (exits non-zero on any failure):
 docker run --rm -e VERIFIER_EMAIL=verifier@example.test -e ACCESS_TOKENS=tok \
   -v "$PWD/test/p2/socket_proof.rb:/proof.rb:ro" \
-  tmvn-p2-test:latest sh -c 'cd /app && ruby /proof.rb'
+  tmvn-p2-test:local sh -c 'cd /app && ruby /proof.rb'
 ```
 
 **Rows 9–11 (2026-11-09, ADR-0021) prove the probe-destination guard against the same real DNS.** A counting listener is the destination:

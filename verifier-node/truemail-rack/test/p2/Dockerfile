@@ -1,5 +1,5 @@
 # Phase-2 test image (test harness, NOT a deployable). Build context = the truemail-rack dir:
-#   docker build -f test/p2/Dockerfile -t tmvn-p2-test:latest .
+#   docker build -f test/p2/Dockerfile -t tmvn-p2-test:local .
 # See test/p2/README.md. Extends the built p2 image with
 # the test-group gems (rspec) + the socket-level mock substrate (smtp_mock/dns_mock gems + the
 # smtpmock Go binary) so we can (a) run the fork's rspec wrapper specs and (b) drive the REAL SMTP
