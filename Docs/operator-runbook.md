@@ -1,131 +1,35 @@
-# Operations — deploying and running the system
+# Operator runbook — running the system
 
-This is the operator's guide: how to deploy the system, satisfy each deployment prerequisite,
-run it safely, pull the kill-switches when you need to, promote self-tuning mechanisms from
-recommend-only to automatic, and read what the system is telling you. For the internal
-architecture see [`install-and-deploy.md`](install-and-deploy.md); for the exact ordered bring-up sequence see
-[`go-live-checklist.md`](go-live-checklist.md), which this guide summarizes and complements.
-
----
-
-## 1. What you deploy
-
-Two programs (see [`install-and-deploy.md`](install-and-deploy.md) §2):
-
-- the **control-plane** (Go) — holds all state, needs a Postgres and a set of secrets;
-- the **verifier-node** (Ruby, containerized) — the SMTP probe, needs a port-25-capable IP.
-
-The control-plane runs cheap-verification-only out of the box with just a database and a pepper.
-SMTP probing, the paid fallback, and the calibration feed are each switched on when their
-prerequisite is in place. **Turning capability on is always config or an operator action — never
-a code change or redeploy** (this is the payoff of the two-deployable split).
+This is the operator's guide to a system that is already installed: pulling the kill-switches,
+promoting self-tuning mechanisms from recommend-only to automatic, reading what the system is telling
+you, routine maintenance, and what "rollback" does and does not mean here. To install or deploy it, see
+[`install-and-deploy.md`](install-and-deploy.md); for how it is built see [`architecture.md`](architecture.md); for
+the ordered, status-marked path to live see [`go-live-checklist.md`](go-live-checklist.md).
+*Verified against the code 2026-11-09; the section numbers below are cited from elsewhere, so they are stable.*
 
 ---
 
-## 2. Deployment prerequisites — and how to satisfy each
+## 1. What you run
 
-Each capability tier has a prerequisite. These are ordinary setup steps, like provisioning a
-database: satisfy the prerequisite, set the switches, verify. They are gated in order — you can't
-usefully do a later tier before an earlier one is live.
+Two programs: the **control-plane** (Go, `:8080` unless `TM_LISTEN_ADDR` says otherwise — holds all
+state, needs Postgres and secrets) and the **verifier-node** (Ruby, containerised, `:3000` — the SMTP
+probe, needs a port-25-capable IP). The control-plane runs cheap-verification-only with just a database
+and a pepper; SMTP probing, the paid fallback and the calibration feed are each switched on when their
+prerequisite is in place. **Turning capability on is always config or an operator action — never a code
+change or redeploy** (the payoff of the two-deployable split).
 
-### 2.1 Baseline — cheap verification (database + secrets)
+## 2. Deployment prerequisites
 
-**Provide:** a Postgres 16 instance and the core secrets.
+Moved to [`install-and-deploy.md`](install-and-deploy.md) §3 (this section number is kept so existing
+citations resolve). In one table — each tier, what turns it on, and how you turn it back off:
 
-| Secret | Env var | Notes |
+| Tier | Turned on by | Turned off by |
 |---|---|---|
-| Database DSN | `TM_DATABASE_URL` | empty ⇒ `/v1/verify` reports not-ready (503); health still served |
-| Email-hash pepper | `TM_PEPPER` | the most fragile secret — generate once with strong entropy, back up geo-separately, **never rotate casually** (losing it de-joins all history) |
-| Front-door bearer | `TM_FRONTDOOR_TOKEN` | authenticates callers on `/v1/verify` |
-
-Apply the migrations in order (`migrations/0001_*.sql` … `0012_*.sql`), then start the
-control-plane. **Verify:**
-
-```bash
-curl -s localhost:8080/readyz          # {"status":"ready","checks":{"db":true,"pepper":true},...} — 503 if EITHER is down
-curl -s localhost:8080/healthz         # liveness: 200 while the process is up, even with every dependency down
-curl -s -H "authorization: Bearer $TM_FRONTDOOR_TOKEN" \
-     -d '{"email":"someone@example.com"}' localhost:8080/v1/verify
-```
-
-At this tier the system returns cheap-layer verdicts (syntax, domain/MX, disposable, role, …) —
-provable negatives at full confidence, everything needing SMTP as `risky`/`unknown`. This is a
-correct, shippable state, not a degraded one.
-
-### 2.2 SMTP verification (a port-25 host)
-
-**Provide:** a host that genuinely allows outbound port 25, with a settable PTR record, on a
-clean IP. This is the real procurement work — the market for port-25 + settable-PTR + clean-IP
-hosts is narrow. Vet a candidate host on a refundable trial against **V1–V5** before you pay:
-
-| Check | What to confirm | Proof |
-|---|---|---|
-| **V1** | Outbound TCP/25 genuinely open | `swaks --server <a-real-mx>:25 --quit-after CONNECT` sees a `220` banner |
-| **V2** | Settable custom PTR/rDNS | set PTR → verifier FQDN; `dig -x <box-ip> +short` returns it |
-| **V3** | Clean IP (no spam history) | check `<box-ip>` against reputation lists *before* warmup |
-| **V4** | Dedicated / stable IP | provider confirms the IP is yours for the box's life |
-| **V5** | Egress == PTR == audited IP | `curl ifconfig.me` == the PTR'd IP == the node's configured egress IP — **all identical** |
-
-**Then set** the node descriptor and switches:
-
-```
-TM_NODE_ID / TM_NODE_BASE_URL / TM_NODE_PUBLIC_EGRESS_IP   # the box (egress IP MUST equal V5)
-TM_NODE_ENABLED=true
-TM_SMTP_MODE=enabled
-TM_WARMUP_DAILY_CAP=50        # start low; step up on clean prior-day audits
-```
-
-**Verify:** the node promotes to `active` **only** if its audit is green, the audit's
-self-detected IP equals the configured egress IP (the four-way IP invariant — a green audit on
-the wrong IP will not promote, by design), **and** the egress smoke-test has set `port25_open`
-(see the runbook for setting it). Confirm real verdicts flow with a non-null `verifier_ip` equal
-to the egress IP.
-
-*Reversible:* `TM_NODE_ENABLED=false` or `TM_SMTP_MODE=disabled` returns to cheap verdicts with
-no redeploy and no lost history.
-
-### 2.3 Paid third-party fallback (a vendor + a signed DPA)
-
-**Provide:** a chosen verification vendor and a **signed Data Processing Agreement**. The
-fallback layer ships **disabled**; it egresses addresses to a third party, so enabling it before
-the DPA is signed would be unlawful sub-processing. Enabling takes **three independent affirmative
-switches** — accidental enablement is designed to be hard:
-
-```
-TM_EXTERNAL_DPA_CONFIRMED=true    # your affirmation the §7.4 DPA checklist passed
-TM_FALLBACK_MODE=enabled          # the fallback rung
-TM_VENDOR_KEYS=<vendor>=<key>     # the vendor's API key
-```
-
-Any one missing ⇒ the layer stays off. Set conservative spend ceilings from observed volume
-before raising them:
-
-```
-TM_EXTERNAL_DAILY_CAP / _MONTHLY_CAP / _PER_JOB_CAP / _RATE_CEILING
-```
-
-**Verify:** with the switches set, the layer routes only the *residue* (addresses the earlier
-tiers structurally couldn't answer) to the vendor, and a vendor "valid" is recorded as `risky`
-at a capped confidence — never laundered into an SMTP-grade `valid`.
-
-*Reversible:* `TM_FALLBACK_MODE=off` is the global panic button — no address egresses, all
-policies, one action.
-
-### 2.4 Confidence calibration (a real send-outcome feed)
-
-**Provide:** an authenticated feed of real send outcomes (bounces/deliveries) from your sending
-system, over a mutually-authenticated (mTLS) channel. Provision the trust anchor and the
-control-plane's client credential (loaded like the node tokens — never committed).
-
-The feed lets the system learn from reality: it classifies each outcome for what it *proves*
-about the address, recalibrates per-bucket confidence, and — once you promote the mechanisms
-(§4) — auto-promotes reliable providers and weans off the paid fallback where its own accuracy
-wins.
-
-**Verify:** until the feed is authenticated the ingestor pulls **nothing** (fail-closed, never
-unauthenticated data). The three calibration mutators (recalibration, promotion, weaning) stay
-**recommend-only** until you promote them; a fresh calibration store falls back to baseline
-confidence, so day-one behavior is unchanged until real volume accrues.
+| Cheap verification | `TM_DATABASE_URL` + `TM_PEPPER` (+ `TM_FRONTDOOR_TOKEN`; install §3.1) | — (it is the floor) |
+| Bulk / async | `TM_QUEUE_ADDR_KEY` + per-caller keys | `TM_FRONTDOOR_MODE=accept_and_defer` or `reject` (§3) |
+| SMTP verification | a vetted port-25 host, `TM_NODE_*`, `TM_SMTP_MODE=enabled` (install §3.2) | `TM_SMTP_MODE=disabled` or `TM_NODE_ENABLED=false` |
+| Paid fallback | vendor adapter + DPA + the three switches (install §3.3) | `TM_FALLBACK_MODE=off` |
+| Calibration | an authenticated outcome feed (install §3.4) | leave the mutators `recommend-only`; unset the opt-in flags |
 
 ---
 
@@ -185,7 +89,7 @@ What you will see, and what to tell a caller:
   `frontdoor=paused-accept-and-defer(Rung4)` or `paused-reject(Rung4)`:
 
 ```bash
-curl -s localhost:3000/readyz | grep -o 'frontdoor=[^ "]*'
+curl -s localhost:8080/readyz | grep -o 'frontdoor=[^ "]*'
 ```
 
 While paused the drainer also skips the lease-reclaim sweep. That is deliberate: it takes no new
@@ -268,7 +172,8 @@ brake (e.g. a fleet-brake fraction ≥ 100%) is a **startup error**, never a sil
 
 | Alert | Meaning | Action |
 |---|---|---|
-| **audit-red** | a node's audit went red (DNS/PTR/config problem) | the node auto-quarantines; investigate the host |
+| **audit-red** | a node's audit went red (DNS/PTR/config problem) | the node auto-quarantines; investigate the host. Read `GET /v1/audit` → `warnings`: `ptr`/`dns` come from the engine; **`resolver`** means the host has a `search`/`domain` line, `ndots` > 1 or a dotted hostname — fix the host (short hostname, nameservers-only `resolv.conf`), not the node; a node started with `PROBE_ALLOW_NON_PUBLIC=1` is also red by design |
+| **`non_public_mx`** (a verdict `reason`, not an alert) | the probe destination guard refused a mail host that resolves to a non-public address (ADR-0021); the verdict is `risky`, never cached | expected for hostile or misconfigured domains; investigate only if it appears for domains you know to be public |
 | **block-spike** (single node) | one node's block-rate crossed the threshold | it quarantines (if A1 promoted) or recommends; check that IP's reputation |
 | **fleet-wide** | a majority of nodes tripped at once — systemic | **the fleet brake has held the pool** — this needs a human; do not drain, find the common cause (a routing change, a shared upstream) |
 | **recovering** | a quarantined node is on its canary trickle | informational; watch for clean cycles |
@@ -288,9 +193,10 @@ that the brake did its job and a human decision is required.
   humbler verdicts, never wrong ones.
 - **Enabling capability is deliberate.** SMTP, the vendor, and auto-calibration each take an
   explicit operator action with its prerequisite in place — nothing dangerous turns itself on.
-- **The manual controls should be audited.** Node disables, the fallback-kill, pauses, and
-  mechanism promotions are operator actions that change what callers see; record who did what,
-  when (an append-only admin-audit log, distinct from the verdict LOG, is the intended home).
+- **The manual controls should be audited — and today they are not.** Node disables, the fallback-kill,
+  pauses and mechanism promotions change what callers see, and the intended home for "who did what, when" is an
+  append-only admin-audit log (DR-3). **It is not built** ([`future-work.md`](future-work.md) FW-1; go-live G0.2),
+  so until it is, record these actions yourself (a change ticket, the host's own access logs).
 
 For the full ordered bring-up with every owner gate and verification command, work through
 [`go-live-checklist.md`](go-live-checklist.md).
@@ -328,3 +234,71 @@ P1 §3.2.6) is still a manual `cp_admin` action. Nothing is dropped automaticall
 `verification_raw_2026_09` ends exactly at `2026-10-01 00:00:00+00` (`SELECT pg_get_expr(relpartbound, oid)
 FROM pg_class WHERE relname = 'verification_raw_2026_09'`) before trusting the first auto-created month;
 see the stated assumption in ADR-0017.
+
+---
+
+## 9. Schema changes, rollback and restore — what "reversible" does and does not mean
+
+Everything above is reversible by **flags and config**: unset a variable and the vendor layer is off, the feed
+fails closed, a node disables, a rung is released — no redeploy, no lost history. **The migration layer is the
+exception, and it is the one layer where reversal means touching data.** Anyone who takes "every stage is
+reversible" to cover schema changes will reach for `git revert` and get a result worse than doing nothing or
+rolling forward. (Originally written 2026-08-07 as `history/go-live-rollback-posture.md`; re-measured below on
+2026-11-09.)
+
+### 9.1 The measured facts
+
+Measured against the tree on 2026-11-09 — not inferred:
+
+| Fact | Value |
+|---|---|
+| Migrations | **15** (`0001` … `0015`), applied by `for f in $(ls migrations/[0-9][0-9][0-9][0-9]_*.sql \| sort); do psql -f "$f"; done`, the same way CI does it |
+| `.down.sql` files, or any other rollback mechanism | **0** — none |
+| A `schema_migrations` / version-tracking table | **none** (`migrations/README.md` only recommends one) |
+| `REVOKE` statements | **19** in 10 files (`grep -cE '^\s*REVOKE\b' migrations/*.sql`): 17 are `REVOKE … FROM cp_runtime` tightenings (the least-privilege pattern: `GRANT SELECT, INSERT … TO cp_runtime; REVOKE UPDATE, DELETE … FROM cp_runtime;`), and 2 (in `0014`) remove the default `PUBLIC` execute on two functions |
+| `ALTER TABLE … DROP CONSTRAINT` | **4**: `0008` (`nodes.valid_status`), `0012` (`send_outcomes.send_outcome_calibration_class`), `0015` (`verifications.valid_reason` and `cache.valid_reason`) — each drops, then recreates a **widened** constraint |
+
+The 2026-08-07 write-up reported "15 REVOKE across 8 migrations, 2 DROP CONSTRAINT" at 13 migrations; that figure
+did not reproduce with the command above (17 in 9 files at `0013`), so treat the *command*, not the old number,
+as the record. Forward-only is deliberate: `migrations/README.md` §"No Down Migrations" says a down-migration
+"would violate the append-only contract" of the LOG. That is sound *for the LOG*; §9.3 is about where it stops applying.
+
+### 9.2 `git revert` of a migration is not a rollback
+
+Measured 2026-08-07 on two databases built from the same repo, differing only in whether `0013_job_owner.sql` ran:
+the one that ran it has `api_callers.user_id`, `jobs.owner_user_id` and `idx_jobs_owner`; the other does not.
+`git revert` deletes the migration **file** and executes nothing against a database that already ran it. After a
+revert a *new* environment is built from the older schema while an *existing* one keeps the columns — and **nothing
+in either database records which it is**, because there is no tracking table. Two environments, one tree, divergent
+schemas. The hazard applies to every migration in the repo.
+
+### 9.3 Where the append-only rationale does not reach
+
+- **Grants.** The 2026-08-07 line-by-line review found that every REVOKE then in the tree revoked a privilege its own migration granted, so none silently strips
+  a privilege an earlier migration relied on (`0013`'s `REVOKE … ON api_callers` re-asserts `0010`'s and was measured
+  to be a no-op); the two added since (`0014`) only remove default `PUBLIC` execute on new functions. The irreversibility in `0013` is its two columns and its index, not a privilege.
+- **Constraints.** Each of the four dropped constraints was recreated *wider* (the latest, `0015`, admits the new
+  reason `non_public_mx`). Reverting the file leaves the **wider** constraint in the database while the reverted code
+  believes a narrower invariant — the direction that admits rows the old code cannot handle. Narrowing it again fails
+  while any row carrying the new value exists, so the reverse is a data decision, not a DDL one.
+
+### 9.4 What to do — in order
+
+1. **Adopt migration version tracking before a second environment exists** ([`future-work.md`](future-work.md) FW-3, 🔧
+   not built). With one database the gap is invisible; with two it is the difference between a query and archaeology.
+2. **Treat `git revert` of a migration as not a rollback.** To undo applied DDL write a **new forward migration** that
+   reverses it explicitly (`DROP COLUMN`, `DROP INDEX`, re-`GRANT`), reviewed like any other and applied the same way.
+3. **Before deploying a migration, know its reverse** — and whether it loses data. `ADD COLUMN` reverses cleanly;
+   `DROP CONSTRAINT` + recreate-widened does not, once rows exist that only the wider form allows.
+4. **The LOG genuinely does not roll back.** `verifications`, `verification_raw`, `send_outcomes`, `node_audits`,
+   `work_item_attempts` and `external_calls` are append-only by grant. Recovery for those is **restore**, not
+   rollback — which is what the DR-4 backup/PITR restore-into-isolation drill is for ([`future-work.md`](future-work.md)
+   B8; go-live G1.13). It is the only recovery path the LOG has, so run it rather than defer it. Back the **pepper** up
+   separately and test recovery: a restore without the pepper cannot re-join a single address.
+
+### 9.5 What this does not claim
+
+It does not claim a migration is broken — all 15 apply cleanly, in order, on a fresh database, in CI on every push. It
+does not claim forward-only is the wrong design. And it does not propose 15 `.down.sql` files: most would be trivial or
+dishonest (a down-migration of a partitioned append-only table is a data-loss script wearing a rollback costume). The
+actionable item is tracking, so you always know what a given database has run.
