@@ -18,6 +18,7 @@
 | `0006_catchall_write.sql` | P2 §5.6 (brain writes the catch-all probe result) | Grants `cp_runtime` INSERT+UPDATE on `catchall_domains` (DELETE stays `cp_admin`). Additive — NOT the append-only LOG. |
 | `0007_node_audits_warmup.sql` | P3 §4.3/§4.5 (audit history + gate), §5.2 (warmup) | `node_audits` (APPEND-ONLY audit history, OQ-P3-5), `node_warmup` (durable per-node/per-window ramp counter, §5.2). Grants `cp_runtime` INSERT+SELECT on `node_audits` (DELETE revoked — LOG posture), SELECT+INSERT+UPDATE on `node_warmup`, and INSERT+UPDATE on `nodes` (DELETE stays `cp_admin`). Additive — new tables, reserved `nodes` columns populated, no frozen-schema change. |
 | `0008_rate_budgets_recovering.sql` | P4 §4.4 (durable rate budget), §5.4/GAP-30 (canary sub-state) | `rate_budgets` (durable per-(node×provider) token-bucket spend — restart-safe, §4.4). Grants `cp_runtime` SELECT+INSERT+UPDATE on `rate_budgets` (DELETE revoked — counter posture, mirrors `node_warmup`). Widens the `nodes.status` CHECK to add `recovering` (the canary sub-state — a NODE-LIFECYCLE value, NOT verdict vocab; ADR-0010). Additive — new table + a strict CHECK widening, no frozen-schema change. |
+| `0009_work_items_jobs.sql` | P5 §3–§10 (the durable queue) | `work_items` (UNIQUE idempotency key; `addr_ciphertext` AES-256-GCM, the one bounded plaintext exception; lease `locked_by`/`locked_at`), `jobs`, `work_item_attempts` (APPEND-ONLY transcripts). `cp_runtime` SELECT+INSERT+UPDATE on the first two (DELETE stays `cp_admin`); INSERT+SELECT only on the attempts. |
 | `0010_api_callers.sql` | P5 §7.5 / PN-13 (per-caller front-door keys + rotation) | `api_callers` (per-caller key, stored `key_sha256` HASHED, validity window `[not_before, not_after)` for zero-downtime rotation). Grants `cp_runtime` **SELECT only** (hot auth read); INSERT/UPDATE/DELETE stay `cp_admin` (key issuance + rotation are admin-audited, DR-3). Additive — new table; auth is a header check, `caller_id` is key-derived (never from the body), so **no Door-1/Door-4 change**. |
 | `0011_external_calls.sql` … `0013_job_owner.sql` | P6 external calls, P7 flywheel/calibration, job owner | see each file header (not re-indexed here) |
 | `0014_raw_partition_maintenance.sql` | ADR-0017 (partition cliff fix) | `ensure_verification_raw_partitions(n)` (SECURITY DEFINER, granted to `cp_runtime`) + `ensure_verification_raw_partitions_at(ts, n)` (admin/test core, NOT granted to `cp_runtime`); bootstraps the current month. Future headroom is the `TM_RAW_PARTITION_MONTHS_AHEAD` dial |
@@ -146,18 +147,20 @@ All migrations use `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS`
 
 **Deliberate omission.** The LOG is append-only and becomes historical data; you **never roll back the LOG** (§3.2.1). If a migration fails, fix forward. Down-migrations are not provided because they would violate the append-only contract.
 
-**The scope of that reason, stated exactly (added 2026-08-07).** It explains the **LOG**, and it does
-not reach two other things these files carry. (a) **Grants** — 15 `REVOKE`s across 8 migrations. All 15
-revoke privileges granted by their *own* migration (least-privilege hardening in the same file), so
-none silently strips a privilege an earlier migration relied on — verified statement by statement. (b)
-**Constraints** — `0008` and `0012` each `DROP CONSTRAINT IF EXISTS` and recreate a widened version;
-reverting the file leaves the widened constraint live, so the code believes a narrower invariant than
-the database enforces. Neither is append-only data, and neither has a reverse path. Also note what
-`git revert` does *not* do: it deletes the file and executes nothing, so a database that already ran
-the migration keeps the DDL while a fresh one built from the reverted tree does not — measured on
-`0013` (two columns + an index present in one, absent in the other), with no tracking table to
-distinguish them. The go-live consequences and the checklist are in
-[`../../Docs/history/go-live-rollback-posture.md`](../../Docs/history/go-live-rollback-posture.md).
+**The scope of that reason, stated exactly (added 2026-08-07, re-measured 2026-11-09 over 15 migrations).** It
+explains the **LOG**, and it does not reach two other things these files carry. (a) **Grants** — 19 `REVOKE`
+statements across 10 files (`grep -cE '^\s*REVOKE\b' *.sql`): 17 are least-privilege `REVOKE … FROM cp_runtime`
+tightenings and 2 (in `0014`) remove the default `PUBLIC` execute on two functions; the 2026-08-07 line-by-line review
+found that every REVOKE then present revoked a privilege its *own* migration granted, so none silently strips a
+privilege an earlier migration relied on. (b) **Constraints** — 4 `DROP CONSTRAINT IF EXISTS` (`0008` `nodes.valid_status`,
+`0012` `send_outcomes.send_outcome_calibration_class`, `0015` `verifications.valid_reason` and `cache.valid_reason`), each
+recreating a **widened** version; reverting the file leaves the widened constraint live, so the code believes a narrower
+invariant than the database enforces. Neither is append-only data, and neither has a reverse path. Also note what
+`git revert` does *not* do: it deletes the file and executes nothing, so a database that already ran the migration keeps
+the DDL while a fresh one built from the reverted tree does not — measured on `0013` (two columns + an index present in
+one, absent in the other), with no tracking table to distinguish them (adopting one is `Docs/future-work.md` FW-3). The
+go-live consequences and the checklist are in [`../../Docs/operator-runbook.md`](../../Docs/operator-runbook.md) §9 (the
+original write-up is [`../../Docs/history/go-live-rollback-posture.md`](../../Docs/history/go-live-rollback-posture.md)).
 
 ---
 

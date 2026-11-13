@@ -1,6 +1,7 @@
 # PROJECT_RULES.md — the constitution
 
-**Status:** LIVE — the binding rules for the Truemail verification system. Authored in **Phase 0**.
+**Status:** LIVE — the binding rules for the Truemail verification system. Authored in **Phase 0**; citations and
+statuses re-checked 2026-11-09.
 **What this is:** the one document a developer reads to understand *the rules that can never change*
 and *the operational doctrine that keeps the system honest* — **without reading all seven phase specs.**
 **What this is NOT:** a design spec or a decision log. It **invents nothing.** Every rule here is
@@ -148,7 +149,7 @@ alert, never auto-change, until a human deliberately promotes it (DR-2, [shadow-
 - Promotion to `auto` is a per-mechanism, per-scope, **admin-audited** owner action — never a global
   flip. The two systemic brakes (A5 fleet, A7 cascade) already alert-and-hold; they are the pattern
   being generalized, and they must **not** auto-cascade on a fleet-wide signal (err toward alert —
-  [[truemail-fleet-brake-no-cascade]], GAP-28).
+  GAP-28, `TestEvaluate_FleetWideSpike_DoesNotEmptyPool_GAP28`).
 - **Shadow-mode mitigates but does not authenticate the outcome feed.** The P7 feed must be an
   authenticated channel with the sender as an identified principal (DR-1 / [ADR-0001](Docs/adr/ADR-0001-outcome-feed-authentication.md)) —
   a hard pre-P7 door, not a dial. Recommend-only + authentication are **both** required.
@@ -182,7 +183,8 @@ No rung ever fabricates `valid`/`invalid`. Every rung is reachable by **config/f
   `KillSwitch.CheapLayersOnly()` proves it — a Phase-0 done-criterion.
 - **Authz/audit on who pulls a rung** is a gate before P3 go-live: every manual control-plane action
   writes to an append-only admin-audit log with per-actor identity (DR-3, pre-takeoff-checklist §3.6).
-  Not built in Phase 0; recorded as a gate.
+  **Still not built (checked 2026-11-09)** — a go-live gate, tracked as `Docs/future-work.md` FW-1 and
+  `Docs/go-live-checklist.md` G0.2.
 
 ---
 
@@ -230,8 +232,10 @@ No rung ever fabricates `valid`/`invalid`. Every rung is reachable by **config/f
   `verifier-node/`) that does not also touch a doc/ADR fails the docs-updated CI check
   ([`scripts/check-docs-updated.sh`](scripts/check-docs-updated.sh)).
 - **One-way-door decisions and owner-OQ rulings become ADRs** ([`Docs/adr/`](Docs/adr/)). Cross-phase
-  rulings live in [`Docs/open-decisions.md`](Docs/open-decisions.md); parked sub-decisions stay parked in §5 there
-  until an owner resolves them (this Phase 0 did **not** resolve them).
+  rulings live in [`Docs/open-decisions.md`](Docs/open-decisions.md), which has **zero open items** — its former
+  parked sub-decisions were closed with evidence or moved to [`Docs/future-work.md`](Docs/future-work.md) §5
+  (2026-11-09). A sub-decision that needs an owner and has no recorded recommendation goes to `future-work.md`;
+  it is never decided silently.
 - **The config reference is generated from the manifest and checked in**
   ([`Docs/config-reference.md`](Docs/config-reference.md)) so "what's toggleable" is always current;
   regenerate it when the manifest changes.

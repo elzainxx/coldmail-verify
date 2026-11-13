@@ -12,7 +12,7 @@ we fork** (Door 5: the `truemail` *engine* gem is pinned, never forked). See
 | Tag | `v0.9.0` |
 | Commit | `9ecbbbdc45001d971a7d477e35136540c1477d11` |
 | Vendored on | 2026-07-17 |
-| Ruby | `3.2` (from `.ruby-version`; patch moved 3.2.0 → 3.2.11 on 2026-11-08, row 14 below) |
+| Ruby | `3.4.12` (from `.ruby-version`; was `3.2.0` at vendoring, `3.2.11` from 2026-11-08 (row 14), `3.4.12` from 2026-11-09 (row 18)) |
 | Nested `.git` | removed (vendored into this monorepo, not a submodule) |
 
 ## Modifications from upstream v0.9.0 (exhaustive — keep this list complete)
@@ -24,7 +24,7 @@ list covers *rack-side* edits (which are allowed — the rack is what we fork).
 | # | File | Change | Why |
 |---|---|---|---|
 | 1 | `Gemfile` | `gem 'truemail', '~> 3.1'` → **`'3.3.1'`** (exact) | Door 5 exact pin (the prompt's "pin the exact version, not a range"). |
-| 2 | `Gemfile` | `gem 'net-smtp', '~> 0.4.0'` → **`'0.5.1'`** (exact) | **Forced, not cosmetic:** `truemail 3.3.1` declares `net-smtp '~> 0.5.0'` on Ruby ≥ 3.1 (we pin Ruby 3.2). Upstream's `~> 0.4.0` is a **disjoint range = hard resolver conflict**. Rack-side edit only. **Phase-8:** pinned EXACTLY to `0.5.1` (the version the image resolved) — the earlier range `~> 0.5.0` let a rebuild drift within `0.5.x`; `0.5.1` satisfies `~> 0.5.0`, the engine is untouched (Door 5). |
+| 2 | `Gemfile` | `gem 'net-smtp', '~> 0.4.0'` → **`'0.5.1'`** (exact) | **Forced, not cosmetic:** `truemail 3.3.1` declares `net-smtp '~> 0.5.0'` on Ruby ≥ 3.1 (the fork pinned Ruby 3.2 when this was written; it is now 3.4.12, row 18 — the constraint holds either way). Upstream's `~> 0.4.0` is a **disjoint range = hard resolver conflict**. Rack-side edit only. **Phase-8:** pinned EXACTLY to `0.5.1` (the version the image resolved) — the earlier range `~> 0.5.0` let a rebuild drift within `0.5.x`; `0.5.1` satisfies `~> 0.5.0`, the engine is untouched (Door 5). |
 | 3 | `Gemfile.lock` | **deleted**, regenerated in Docker | The upstream lock pinned `truemail 3.1.0`; invalid after the exact 3.3.1 pin. Host has no Ruby + rubygems HTTPS is blocked here, so the lock is resolved at `docker build` time (`bundle lock`) and becomes the build artifact. |
 | 4 | `Dockerfile` (new) | added | Build + run the stock pinned rack (host has no Ruby). |
 

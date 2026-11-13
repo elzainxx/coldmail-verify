@@ -1,6 +1,6 @@
 # Config Manifest — Truemail Verification System (Phases 1–7)
 
-**Status:** DRAFT v0.1 — cross-phase consolidation pass (planning, not code)
+**Status:** LIVE — the source `config-reference.md` is generated from (CI fails if it is stale). Begun as the v0.1 cross-phase consolidation draft; `TM_LISTEN_ADDR`, `TM_ENV`, `TM_CACHE_TTL_SECONDS` and the secret scaffold are documented in [`install-and-deploy.md`](install-and-deploy.md) §3.1 and `control-plane/config/secrets.example.env`.
 **Purpose:** the single exhaustive registry of every toggle, flag, threshold, secret, and dial defined across the seven approved phase specs. If a phase mentioned a knob, it appears here.
 **Companion docs:** [`history/kill-switch-ladder.md`](history/kill-switch-ladder.md) · [`history/shadow-mode.md`](history/shadow-mode.md) · [`history/cross-phase-consistency-report.md`](history/cross-phase-consistency-report.md) · [`history/pre-takeoff-checklist.md`](history/pre-takeoff-checklist.md)
 
