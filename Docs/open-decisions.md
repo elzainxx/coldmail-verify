@@ -111,7 +111,7 @@ No ruling in this log reopens any frozen door. Restated for record (full evidenc
 
 ## 5. Parked sub-decisions — dispositions (verified 2026-11-09)
 
-This section used to be "Explicitly NOT decided": eight sub-decisions the 2026-07-17 pass surfaced and
+This section used to be "Explicitly NOT decided": eight sub-decisions (nine rows below, because PN-15 covers two seams) the 2026-07-17 pass surfaced and
 deliberately left to the owner or to the phase that built the thing. Every one now has a disposition, so
 **nothing is open in this file**. Two rules were applied: a sub-decision the build later *made* is **closed**
 and cites the code or migration that made it; a sub-decision still needing an owner call with **no recorded
@@ -130,7 +130,7 @@ no ruling is invented here.
 | **PN-9 / F-13** — hash-chain-to-WORM checkpoint in scope, or accept grant-based immutability with a documented residual | **MOVED** → [`future-work.md`](future-work.md) FW-9 and the owner list. The grant-based part is built and the residual is now written down: the runtime role cannot rewrite the LOG, but whoever holds `cp_admin` can (see [`security-posture.md`](security-posture.md) §3). Whether to add an external tamper-evidence checkpoint is an owner call with no recorded recommendation beyond "optional". | `control-plane/migrations/0005_grants.sql`; checklist §1.2 in `Docs/history/pre-takeoff-checklist.md`. |
 | **DR-4 mechanism** — backup-protection mechanism (exclusion / separate-key encryption / short retention) | **CLOSED** (ruled 2026-07-18, P5 build): separate-key at-rest encryption of `work_items.addr_ciphertext` plus purge in the settlement transaction. | §6.3 below; [ADR-0011](adr/ADR-0011-phase-5-queue-additive-surface.md); [ADR-0002](adr/ADR-0002-queue-plaintext-backup-scope.md). |
 
-**Count:** 9 parked items → **5 closed** (OQ-P7-1 mechanism, PN-11, PN-14a, PN-14b, DR-4 mechanism), **4 moved** (FLAG-A, FLAG-C,
+**Count:** 9 rows (8 parked sub-decisions; PN-15 is two) → **5 closed** (OQ-P7-1 mechanism, PN-11, PN-14a, PN-14b, DR-4 mechanism), **4 moved** (FLAG-A, FLAG-C,
 PN-8, PN-9). **Open in this file: 0.** The four moved items are decisions, not work: each is listed with the question the owner must
 answer in [`future-work.md`](future-work.md) §5.
 
