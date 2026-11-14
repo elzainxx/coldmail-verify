@@ -1,0 +1,65 @@
+# Secret scan over the FULL history of this repository, on the runner (identical in all five coldmail repositories).
+#
+# WHY IT IS A WORKFLOW. The rule is "never push before a clean secret scan", and the scan used to run from the owner's Docker Desktop — which stopped starting
+# on 2026-11-12 (the BIOS stopped exposing VT-x). A control that depends on one developer's workstation is not a control. This runs the same scan on every push to
+# any branch, so a secret that reached the remote is caught within minutes; it does not replace the scan BEFORE pushing, which still has to be run by whoever
+# pushes (any gitleaks 8.x, `gitleaks detect --source . --log-opts="--all" --redact --no-banner`).
+#
+# WHAT IS PINNED. gitleaks is downloaded at an exact version and its SHA-256 is checked before it is executed — a changed or substituted release fails the job.
+# (The release publishes a checksums file but no signature or attestation, so the check proves the download matches what was pinned here, not who published it.)
+#
+# THE SCANNER IS PROVEN BEFORE IT IS TRUSTED, on every run: a clean repository must exit 0, a planted token must exit 1, and a planted token that exists only in
+# HISTORY (committed, then deleted from the tree) must still exit 1 — the case `--log-opts="--all"` exists for. A scanner that has only ever said "no leaks"
+# has not been seen to scan. The planted token is assembled at run time so this file does not itself contain a token-shaped string.
+#
+# A repository's own .gitleaks.toml (the platform repository has one, scoped to its cited run logs) is picked up automatically from the source root.
+name: gitleaks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Install gitleaks at the pinned version (checksum verified before it runs)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tgz" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/gl" && tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP/gl"
+          "$RUNNER_TEMP/gl/gitleaks" version
+
+      - name: Prove the scanner — clean exits 0, a planted token exits 1, a token only in deleted history still exits 1
+        run: |
+          set -uo pipefail
+          GL="$RUNNER_TEMP/gl/gitleaks"
+          scan() { "$GL" detect --source "$1" --log-opts="--all" --redact --no-banner >/dev/null 2>&1; echo $?; }
+          T="$RUNNER_TEMP/scanner-proof"; rm -rf "$T"; mkdir -p "$T"
+          git -C "$T" init -q; git -C "$T" config user.email ci@example.invalid; git -C "$T" config user.name ci
+          echo "nothing secret here" > "$T/readme.txt"; git -C "$T" add readme.txt; git -C "$T" commit -q -m clean
+          rc=$(scan "$T"); [ "$rc" = 0 ] || { echo "CONTROL FAILED: a clean repository exited $rc, want 0"; exit 1; }
+          BODY="Xq3Z9kLm2PwR7tYb4NcV8dFh1JsA6uEoGi5T"; PFX="ghp"
+          printf 'token = %s_%s\n' "$PFX" "$BODY" > "$T/planted.txt"; git -C "$T" add planted.txt; git -C "$T" commit -q -m planted
+          rc=$(scan "$T"); [ "$rc" = 1 ] || { echo "CONTROL FAILED: a planted token exited $rc, want 1 — the scanner is not scanning"; exit 1; }
+          git -C "$T" rm -q planted.txt; git -C "$T" commit -q -m "remove it"
+          rc=$(scan "$T"); [ "$rc" = 1 ] || { echo "CONTROL FAILED: a token present only in history exited $rc, want 1 — history is not being scanned"; exit 1; }
+          echo "scanner proven: clean=0, planted=1, history-only=1"
+
+      - name: Scan the full history of this repository
+        run: |
+          set -euo pipefail
+          echo "commits visible to the scan: $(git rev-list --all --count)"
+          "$RUNNER_TEMP/gl/gitleaks" detect --source . --log-opts="--all" --redact --no-banner
