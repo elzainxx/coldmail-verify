@@ -244,11 +244,11 @@ fails closed, a node disables, a rung is released — no redeploy, no lost histo
 exception, and it is the one layer where reversal means touching data.** Anyone who takes "every stage is
 reversible" to cover schema changes will reach for `git revert` and get a result worse than doing nothing or
 rolling forward. (Originally written 2026-08-07 as `history/go-live-rollback-posture.md`; re-measured below on
-2026-11-09.)
+2026-11-13.)
 
 ### 9.1 The measured facts
 
-Measured against the tree on 2026-11-09 — not inferred:
+Measured against the tree on 2026-11-13 — not inferred:
 
 | Fact | Value |
 |---|---|

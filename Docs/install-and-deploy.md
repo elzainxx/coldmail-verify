@@ -1,7 +1,7 @@
 # Install and deploy — from a clean checkout to a running system
 
 **Status:** LIVE. Commands, env var names, ports and counts were checked against the code on
-2026-11-09 (15 migrations, control-plane default listen `:8080`, node `:3000`). Read
+2026-11-13 (15 migrations, control-plane default listen `:8080`, node `:3000`). Read
 [`architecture.md`](architecture.md) first for what you are installing; operate it with
 [`operator-runbook.md`](operator-runbook.md); follow the ordered, status-marked path to live in
 [`go-live-checklist.md`](go-live-checklist.md). The deep per-phase design is in [`history/`](history/).

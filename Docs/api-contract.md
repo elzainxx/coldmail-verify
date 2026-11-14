@@ -195,7 +195,7 @@ probe with.
 ## Appendix A — Reading a verdict (what each field means, in plain language)
 
 *Folded in from the former end-user guide (kept whole in [`history/USER_GUIDE.md`](history/USER_GUIDE.md)) and corrected
-against the code on 2026-11-09. This appendix has no route rows; the route table above is the only thing
+against the code on 2026-11-13. This appendix has no route rows; the route table above is the only thing
 `TestRoutes_ServedSetMatchesTheDocumentedSet` reads.*
 
 Each result has four parts: a **status** (the headline answer), a **reason** (the single most important cause), a

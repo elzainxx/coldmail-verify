@@ -147,7 +147,7 @@ All migrations use `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS`
 
 **Deliberate omission.** The LOG is append-only and becomes historical data; you **never roll back the LOG** (§3.2.1). If a migration fails, fix forward. Down-migrations are not provided because they would violate the append-only contract.
 
-**The scope of that reason, stated exactly (added 2026-08-07, re-measured 2026-11-09 over 15 migrations).** It
+**The scope of that reason, stated exactly (added 2026-08-07, re-measured 2026-11-13 over 15 migrations).** It
 explains the **LOG**, and it does not reach two other things these files carry. (a) **Grants** — 19 `REVOKE`
 statements across 10 files (`grep -cE '^\s*REVOKE\b' *.sql`): 17 are least-privilege `REVOKE … FROM cp_runtime`
 tightenings and 2 (in `0014`) remove the default `PUBLIC` execute on two functions; the 2026-08-07 line-by-line review

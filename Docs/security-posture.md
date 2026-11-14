@@ -1,7 +1,7 @@
 # Security posture — what protects what, and what is honestly not protected yet
 
 **Status:** LIVE. Every control below was checked against the code, a migration, an ADR or a gate on
-2026-11-09; the evidence is named so it can be re-checked. Where a control is *not built*, this file
+2026-11-13; the evidence is named so it can be re-checked. Where a control is *not built*, this file
 says so (§9) rather than implying it. The threat model for the one cross-project trust boundary (the
 outcome feed) is [ADR-0013](adr/ADR-0013-outcome-feed-auth-mechanism-and-tb7-threat-model.md); the
 rules that bind all work are [`../PROJECT_RULES.md`](../PROJECT_RULES.md).

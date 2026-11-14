@@ -3,7 +3,7 @@
 Living documentation for module 1 (`coldmail-verify`: the Go control-plane and the Ruby verifier-node). **Living, not
 aspirational:** every behaviour change updates the relevant doc or ADR in the same change, and CI fails a behaviour
 change that does not ([`../PROJECT_RULES.md`](../PROJECT_RULES.md) §8). Every count and name in the living set was
-checked against the code on 2026-11-09.
+checked against the code on 2026-11-13.
 
 ## Start here — by what you are doing
 

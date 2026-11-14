@@ -1,6 +1,6 @@
 # Architecture — how the system is built
 
-**Status:** LIVE. Every count, name and route below was checked against the code on 2026-11-09
+**Status:** LIVE. Every count, name and route below was checked against the code on 2026-11-13
 (24 control-plane packages, 6 control-plane routes, 15 migrations, 21 ADRs, 11 CI jobs). If you change
 the system, change this file in the same commit ([`../PROJECT_RULES.md`](../PROJECT_RULES.md) §8).
 This is the map; the design authority for any one capability is its ADR ([`adr/`](adr/)) and, for depth
@@ -178,7 +178,7 @@ Beyond the doors, nine guards protect properties that are expensive or impossibl
 a named **fail-verify test**: neuter the guard, watch the test go red, restore *from a copy* (not
 `git checkout`, which can mask an uncommitted state), watch it go green. A guard whose test survives
 neutering is not load-bearing — that is a finding. All ten test names below were confirmed to exist on
-2026-11-09.
+2026-11-13.
 
 | # | Surface | Guard (file) | Test |
 |---|---|---|---|

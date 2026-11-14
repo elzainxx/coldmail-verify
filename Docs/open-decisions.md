@@ -3,7 +3,7 @@
 > **OWNER: MODULE 1 (`coldmail-verify`).** Every ruling below is module 1's. Modules 2 and 3 (`coldmail-send-managed`, `coldmail-send-byo`) rule in their own `Docs/open-decisions.md` files and are not bound by anything here — and note that module 3's repo contains TWO files named `open-decisions.md` (its own living one, and module 2's carried copy under `Docs/history/`), each now carrying its own ownership header. Module 1's companion register of everything not done yet — real-world-gated work, in-repo build tasks, and the sub-decisions that still need an owner — is [`future-work.md`](future-work.md).
 
 **Status:** LIVE — the binding decision log for the Truemail control-plane. Rulings here are for-build.
-**Open items in this file: 0** (verified 2026-11-09 against the code and migrations 0001–0015). Every item that used to be parked here (old §5) now has a disposition in §5: **closed** with evidence, or **moved** to [`future-work.md`](future-work.md) §5 with the owner decision it needs named — nothing is decided here that was not already ruled, and nothing is left open here.
+**Open items in this file: 0** (verified 2026-11-13 against the code and migrations 0001–0015). Every item that used to be parked here (old §5) now has a disposition in §5: **closed** with evidence, or **moved** to [`future-work.md`](future-work.md) §5 with the owner decision it needs named — nothing is decided here that was not already ruled, and nothing is left open here.
 (Deployable names: the design docs' "brain" is the `control-plane`, "box" is the `verifier-node` — [ADR-0005](adr/ADR-0005-deployable-naming.md). Ruling text below that quotes the consistency report keeps its original "brain"/"box" vocabulary.)
 **Scope of this file:** owner rulings that are *cross-phase* or that *elevate/gate* something a single phase couldn't decide alone. Per-phase sign-offs remain in each spec's Appendix D; this file records only what the phases could not.
 **Companions:** [`adr/`](adr/) (door-touching decisions) · [`history/consolidation-application-report.md`](history/consolidation-application-report.md) · [`history/cross-phase-consistency-report.md`](history/cross-phase-consistency-report.md) · [`history/pre-takeoff-checklist.md`](history/pre-takeoff-checklist.md) · [`history/shadow-mode.md`](history/shadow-mode.md) · [`history/kill-switch-ladder.md`](history/kill-switch-ladder.md) · [`config-manifest.md`](config-manifest.md)
@@ -79,9 +79,9 @@ On **2026-07-17** the owner accepted, in one batch, the output of the cross-phas
 
 ## 2. Phase-gate summary (created by this pass)
 
-Created by the 2026-07-17 pass and recorded in [`history/pre-takeoff-checklist.md`](history/pre-takeoff-checklist.md). **Status as of 2026-11-09** (the gates were not implemented by that pass; the phases that owned them have since built or not built them):
+Created by the 2026-07-17 pass and recorded in [`history/pre-takeoff-checklist.md`](history/pre-takeoff-checklist.md). **Status as of 2026-11-13** (the gates were not implemented by that pass; the phases that owned them have since built or not built them):
 
-| Gate | Blocks | Source | Status 2026-11-09 |
+| Gate | Blocks | Source | Status 2026-11-13 |
 |---|---|---|---|
 | Outcome-feed **authenticated** (sender-as-principal, TB-7 threat-modelled) | before **P7** code | DR-1 / PN-2 / F-15 | ✅ **Discharged.** Mechanism = mutually-authenticated pull (mTLS) and the TB-7 threat model: [ADR-0013](adr/ADR-0013-outcome-feed-auth-mechanism-and-tb7-threat-model.md). `PullSource` is fail-closed (`Authenticated()` is false with no client). The real mTLS client waits for the sender: [`future-work.md`](future-work.md) S2/S3. |
 | **Admin-audit log** + per-actor identity for every control-plane action | before **P3** go-live | DR-3 / PN-1 / F-11 | 🔧 **Ruling stands; not built.** No admin-audit table exists in migrations 0001–0015. It gates go-live: [`go-live-checklist.md`](go-live-checklist.md) G0.2, build task [`future-work.md`](future-work.md) §4 FW-1. |
@@ -109,7 +109,7 @@ No ruling in this log reopens any frozen door. Restated for record (full evidenc
 
 ---
 
-## 5. Parked sub-decisions — dispositions (verified 2026-11-09)
+## 5. Parked sub-decisions — dispositions (verified 2026-11-13)
 
 This section used to be "Explicitly NOT decided": eight sub-decisions (nine rows below, because PN-15 covers two seams) the 2026-07-17 pass surfaced and
 deliberately left to the owner or to the phase that built the thing. Every one now has a disposition, so

@@ -1,7 +1,7 @@
 # PROJECT_RULES.md — the constitution
 
 **Status:** LIVE — the binding rules for the Truemail verification system. Authored in **Phase 0**; citations and
-statuses re-checked 2026-11-09.
+statuses re-checked 2026-11-13.
 **What this is:** the one document a developer reads to understand *the rules that can never change*
 and *the operational doctrine that keeps the system honest* — **without reading all seven phase specs.**
 **What this is NOT:** a design spec or a decision log. It **invents nothing.** Every rule here is
@@ -183,7 +183,7 @@ No rung ever fabricates `valid`/`invalid`. Every rung is reachable by **config/f
   `KillSwitch.CheapLayersOnly()` proves it — a Phase-0 done-criterion.
 - **Authz/audit on who pulls a rung** is a gate before P3 go-live: every manual control-plane action
   writes to an append-only admin-audit log with per-actor identity (DR-3, pre-takeoff-checklist §3.6).
-  **Still not built (checked 2026-11-09)** — a go-live gate, tracked as `Docs/future-work.md` FW-1 and
+  **Still not built (checked 2026-11-13)** — a go-live gate, tracked as `Docs/future-work.md` FW-1 and
   `Docs/go-live-checklist.md` G0.2.
 
 ---

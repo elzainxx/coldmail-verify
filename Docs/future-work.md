@@ -2,7 +2,7 @@
 
 > **OWNER: MODULE 1 (`coldmail-verify`, the Truemail control-plane / verifier-node pair).** "The arc" below means module 1's own phases 0–7 — nothing here concerns module 2 (`coldmail-send-managed`) or module 3 (`coldmail-send-byo`), which keep their own `Docs/future-work.md`. Module 1's *rulings of record* are in [`open-decisions.md`](open-decisions.md) (zero open items); this file is the register of everything still to do: §1–3.5 work that is built and fail-verified but honestly blocked on a real-world input; §4 work inside this repo that is simply not built yet; §5 the four sub-decisions that still need an owner; §6 what has closed since the register was first written.
 
-**Verified:** 2026-11-09 against the code, migrations 0001–0015 and CI run [42633652063](https://github.com/elzainxx/coldmail-verify/actions/runs/42633652063) (all 11 jobs green on `4b73326`). **Status of §1–3.5:** the single register of everything that is BUILT + fail-verified in logic but honestly deferred until a real-world input exists. **Every row was flagged PENDING at build time and NONE was ever faked green** (each phase's status doc carries the same "never faked green — the honest ledger" framing; grep-confirmed across `Docs/`, §8 below).
+**Verified:** 2026-11-13 against the code, migrations 0001–0015 and CI run [43445703791](https://github.com/elzainxx/coldmail-verify/actions/runs/43445703791) (all 11 jobs green on `de8b2a5`). **Status of §1–3.5:** the single register of everything that is BUILT + fail-verified in logic but honestly deferred until a real-world input exists. **Every row was flagged PENDING at build time and NONE was ever faked green** (each phase's status doc carries the same "never faked green — the honest ledger" framing; grep-confirmed across `Docs/`, §8 below).
 
 **How to read a row:** *Item* = the deferred thing · *Built + fail-verified now* = the logic that exists and is tested locally · *Why deferred* = the real-world dependency · *Verification command / proof* = the exact thing to run when the dependency lands · *Unblocked by* = the real-world event that makes the proof runnable.
 
@@ -26,7 +26,7 @@ The pool/queue/audit LOGIC is built and tested against simulated nodes + a contr
 | B8 | **DR-4 backup/PITR restore drill** | the at-rest ciphertext + transactional purge, proven locally (dump-the-row → ciphertext only) | a real snapshot restore-into-isolation | a real backup/PITR restore-into-isolation drill at go-live (ADR-0002 compliance test) | go-live infra |
 
 > **B8 got more load-bearing on 2026-08-07, so it should stop being the easy deferral.** The schema is
-> forward-only with **no** down-migration mechanism (measured 2026-08-07, re-measured 2026-11-09 over 15 migrations: 0 `.down.sql`, no version-tracking
+> forward-only with **no** down-migration mechanism (measured 2026-08-07, re-measured 2026-11-13 over 15 migrations: 0 `.down.sql`, no version-tracking
 > table — [FW-3](#4-not-built-yet-inside-this-repo)), and the LOG tables are append-only with `cp_runtime` holding no `UPDATE`/`DELETE` on them by
 > construction. So for the LOG, **restore IS the only recovery path there is** — B8 is not one recovery
 > option among several, it is the whole set. Detail and the go-live checklist:
@@ -82,7 +82,7 @@ This is **not** an un-mockable-behavior gap like §1–§3 (those wait on a real
 
 ## 4. Not built yet, inside this repo
 
-Everything in §1–3.5 waits on something *outside* this repo. These five do not: nothing external is missing, the work is simply unwritten. Each was checked absent on 2026-11-09 (the command is in the last column). They are build tasks, not decisions; none changes a door.
+Everything in §1–3.5 waits on something *outside* this repo. These five do not: nothing external is missing, the work is simply unwritten. Each was checked absent on 2026-11-13 (the command is in the last column). They are build tasks, not decisions; none changes a door.
 
 | ID | Task | What it blocks / why it matters | Fix shape | Verified absent by |
 |---|---|---|---|---|
@@ -146,7 +146,7 @@ None carries a runnable local command; each is honestly rollout-only. This is by
 
 ## 8. "Never faked green" — grep-confirmed
 
-Every `PENDING-REAL-*` marker sits inside an "honest ledger / never faked green" framing. Occurrence counts across `Docs/`, re-measured 2026-11-09, **excluding this file, `go-live-checklist.md` and `history/arc-closing.md`** (counting them would be circular):
+Every `PENDING-REAL-*` marker sits inside an "honest ledger / never faked green" framing. Occurrence counts across `Docs/`, re-measured 2026-11-13, **excluding this file, `go-live-checklist.md` and `history/arc-closing.md`** (counting them would be circular):
 - **`PENDING-REAL-BOX`** — 26 occurrences across 11 files; anchor: `history/phase-3-status.md:7` ("every real-IP-dependent check is honestly marked PENDING-REAL-BOX with its verification command — never faked green").
 - **`PENDING-REAL-VENDOR`** — 13 occurrences across 8 files; anchor: `history/phase-6-status.md:103` ("never faked green — the honest ledger").
 - **`PENDING-REAL-SENDER`** — 16 occurrences across 8 files; anchor: `history/phase-7-status.md:70` ("PENDING-REAL-SENDER / rollout (never faked green — the honest ledger)").
@@ -210,7 +210,7 @@ claim they are low-risk: `V1`, `S1`, and `S4` are precisely where this system's 
 measured against reality, and §2's claim discipline exists because "we have coverage" must never harden
 into "we are accurate." And it does not claim the *count* is stable — a new phase can add a
 twenty-first. What it claims is narrower and checkable: **as of 2026-08-07 nothing in this ledger is
-waiting on a decision, a judgement, or a piece of unwritten code inside this repo.** Re-checked 2026-11-09: still true of these twenty rows. The unwritten in-repo code that does exist is §4 (FW-1 … FW-5) and the decisions that remain are §5 (FW-6 … FW-9) — deliberately outside the twenty.
+waiting on a decision, a judgement, or a piece of unwritten code inside this repo.** Re-checked 2026-11-13: still true of these twenty rows. The unwritten in-repo code that does exist is §4 (FW-1 … FW-5) and the decisions that remain are §5 (FW-6 … FW-9) — deliberately outside the twenty.
 
 ---
 

@@ -1,8 +1,8 @@
 # Go-live checklist — one ordered path from local build to live, with a real status on every line
 
-**Status date:** 2026-11-09 · **Evidence base:** the tree at `4b73326`, CI run
-[42633652063](https://github.com/elzainxx/coldmail-verify/actions/runs/42633652063) (all 11 jobs green), and the
-local gate runs of 2026-11-09. The seven phases are built and fail-verified locally; this is the sequence that turns
+**Status date:** 2026-11-13 · **Evidence base:** the tree at `de8b2a5`, CI run
+[43445703791](https://github.com/elzainxx/coldmail-verify/actions/runs/43445703791) (all 11 jobs green), and the
+local gate runs of 2026-11-09 (the C1 close). The seven phases are built and fail-verified locally; this is the sequence that turns
 that machine on, safely, in order. Every step is config or an operator action — **zero control-plane code changes**
 (the Door-5 payoff) — except the three 🔧 build tasks below, which are code and are said to be.
 
