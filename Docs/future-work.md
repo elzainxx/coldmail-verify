@@ -96,7 +96,7 @@ The two other in-repo seams are in §2 and §3 because they wait on an external 
 
 ---
 
-## 5. Sub-decisions that still need an owner
+## 5. PARKED — sub-decisions that still need an owner
 
 Moved here from [`open-decisions.md`](open-decisions.md) §5 on 2026-11-09. Each needs an owner call, and **no recommendation is recorded anywhere** — so none is ruled here. For each, the built behaviour is safe, which is why none blocks go-live.
 
