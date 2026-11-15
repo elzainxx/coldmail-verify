@@ -136,7 +136,7 @@ func TestPGCalibration_EffectiveReadAndApprove(t *testing.T) {
 // The send_outcomes grant test used to live here as "attempt the DELETE; skip if it succeeds". CI
 // connects as superuser, so it ALWAYS SKIPPED while ci.yml claimed append-only was proven on every
 // push (D13 / fix-plan item 3). It is replaced by TestPGGrants_RuntimeCannotDeleteSendOutcomes in
-// pg_grants_test.go, which SET LOCAL ROLEs to cp_runtime and therefore actually enforces — plus an
+// pg_grants_test.go, which SET LOCAL ROLEs to verify_app and therefore actually enforces — plus an
 // anti-vacuity control proving the role switch drops privilege.
 
 // ── helpers ── (mustV7 is defined in postgres_test.go)
@@ -145,7 +145,7 @@ func countCalibrationVersions(t *testing.T, pg *PG, reason, provider string) int
 	t.Helper()
 	var n int
 	if err := pg.pool.QueryRow(context.Background(),
-		`SELECT COUNT(*) FROM calibration WHERE reason=$1 AND mx_provider=$2`, reason, provider).Scan(&n); err != nil {
+		`SELECT COUNT(*) FROM verify.calibration WHERE reason=$1 AND mx_provider=$2`, reason, provider).Scan(&n); err != nil {
 		t.Fatalf("count versions: %v", err)
 	}
 	return n

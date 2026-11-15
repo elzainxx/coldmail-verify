@@ -489,7 +489,7 @@ type Store interface {
 
 	// UpsertNodeState mirrors the config node descriptor + writes the lifecycle status/port25_open
 	// (§3.6, §4.5). Used at boot (register provisioning) and on a lifecycle transition
-	// (active/quarantined). It NEVER deletes; DELETE is a cp_admin action (migration 0007).
+	// (active/quarantined). It NEVER deletes; DELETE is a verify_admin action (migration 0007).
 	UpsertNodeState(ctx context.Context, nodeID, baseURL, status string, port25Open bool) error
 
 	// ReserveWarmupSlot atomically reserves one :smtp slot for a node in the given window against
@@ -653,7 +653,7 @@ type Store interface {
 	// — expiry is enforced in the query, so a rotated-out key (not_after in the past) yields
 	// ok=false. keySHA256 is sha256(raw key); the raw key is never stored (§7.5). A miss (unknown
 	// or expired key) is ok=false, NOT an error — the caller maps that to 401. This is a hot,
-	// read-only lookup (cp_runtime has SELECT only on api_callers; issuance/rotation are cp_admin).
+	// read-only lookup (verify_app has SELECT only on api_callers; issuance/rotation are verify_admin).
 	//
 	// It ALSO returns ownerUserID — the platform user the key acts for (api_callers.user_id, 0013).
 	// This is where the job-owner value comes from, and the reason it is returned HERE rather than

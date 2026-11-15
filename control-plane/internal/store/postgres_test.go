@@ -126,7 +126,7 @@ func TestPGAppendWithRawSidecar(t *testing.T) {
 	}
 }
 
-// P2 §5.6: the brain persists the catch-all conclusion (migration 0006 grants cp_runtime the
+// P2 §5.6: the brain persists the catch-all conclusion (migration 0006 grants verify_app the
 // write). A definitive true/false upserts; an inconclusive (nil) is a NO-OP that never overwrites.
 func TestPGSetCatchAllTriState(t *testing.T) {
 	pg := testPG(t)
@@ -208,8 +208,8 @@ func TestPGNodeStateAndAudit(t *testing.T) {
 	}
 }
 
-// Door-2-style append-only: node_audits DELETE is REVOKED from cp_runtime (migration 0007). This
-// requires connecting AS cp_runtime; if the test DSN is a superuser the REVOKE won't bite, so this
+// Door-2-style append-only: node_audits DELETE is REVOKED from verify_app (migration 0007). This
+// requires connecting AS verify_app; if the test DSN is a superuser the REVOKE won't bite, so this
 // test only asserts the migration ran (the grant is proven in the migration itself + CI). Here we
 // prove the HISTORY accumulates (multiple rows for one node), which is the append-only behavior.
 func TestPGNodeAuditHistoryAccumulates(t *testing.T) {
@@ -279,7 +279,7 @@ func TestPGWarmupReserveAtomicCap(t *testing.T) {
 // behavior so the Mem fake's mirroring is anchored to reality, not to itself.
 
 // An audit for an UNREGISTERED node updates history but NOT the summary → GetNodeHealth known=false
-// (PG's `UPDATE nodes WHERE id=$1` matches 0 rows). Mem now mirrors this (TestMemAppendNodeAudit_…).
+// (PG's `UPDATE verify.nodes WHERE id=$1` matches 0 rows). Mem now mirrors this (TestMemAppendNodeAudit_…).
 func TestPGAppendNodeAudit_UnregisteredNodeNotKnown(t *testing.T) {
 	pg := testPG(t)
 	ctx := context.Background()
@@ -387,7 +387,7 @@ func TestPGPeekRateBudget_DoesNotConsume(t *testing.T) {
 
 // The rate_budgets DELETE-grant test used to live here as "attempt the DELETE; skip if it succeeds",
 // which meant it ALWAYS SKIPPED under CI's superuser DSN (D13 / fix-plan item 3). Replaced by
-// TestPGGrants_RuntimeCannotDeleteRateBudgets in pg_grants_test.go, which runs as cp_runtime via
+// TestPGGrants_RuntimeCannotDeleteRateBudgets in pg_grants_test.go, which runs as verify_app via
 // SET LOCAL ROLE and asserts the UPDATE-allowed / DELETE-denied pair.
 
 // The block-rate SQL excludes cache hits (from_cache=true) and cheap-degrades (verifier_ip NULL) —
@@ -606,7 +606,7 @@ func TestPGMetricRowsSince_WindowOrderingAndTruncation(t *testing.T) {
 // TestPGLookupCaller_WindowEnforced proves the real SQL validity window (PN-13) matches the Mem
 // fake: an active key resolves its caller_id; an unknown key misses; a rotated-out key (not_after
 // in the past) misses; a not-yet-valid key (not_before in the future) misses; and a rotation
-// overlap resolves BOTH keys to the same caller. Uses direct INSERTs (issuance is cp_admin; the
+// overlap resolves BOTH keys to the same caller. Uses direct INSERTs (issuance is verify_admin; the
 // test connects as owner) then reads through the runtime LookupCaller path.
 func TestPGLookupCaller_WindowEnforced(t *testing.T) {
 	pg := testPG(t)
@@ -619,7 +619,7 @@ func TestPGLookupCaller_WindowEnforced(t *testing.T) {
 			naVal = na.UTC()
 		}
 		if _, err := pg.pool.Exec(ctx,
-			`INSERT INTO api_callers (caller_id, key_sha256, not_before, not_after)
+			`INSERT INTO verify.api_callers (caller_id, key_sha256, not_before, not_after)
 			 VALUES ($1,$2,$3,$4) ON CONFLICT (key_sha256) DO NOTHING`,
 			callerID, keySHA, nb.UTC(), naVal); err != nil {
 			t.Fatalf("seed caller: %v", err)
@@ -681,9 +681,9 @@ func TestPGWorkItem_CASSettlementExactlyOnce(t *testing.T) {
 		t.Fatalf("enqueue: %v", err)
 	}
 	t.Cleanup(func() {
-		// Owner-role cleanup (cp_runtime can't DELETE — retention posture).
-		_, _ = pg.pool.Exec(context.Background(), `DELETE FROM work_item_attempts WHERE work_item_id=$1`, itemID)
-		_, _ = pg.pool.Exec(context.Background(), `DELETE FROM work_items WHERE id=$1`, itemID)
+		// Owner-role cleanup (verify_app can't DELETE — retention posture).
+		_, _ = pg.pool.Exec(context.Background(), `DELETE FROM verify.work_item_attempts WHERE work_item_id=$1`, itemID)
+		_, _ = pg.pool.Exec(context.Background(), `DELETE FROM verify.work_items WHERE id=$1`, itemID)
 	})
 
 	// Attempt A leases it.
@@ -722,19 +722,19 @@ func TestPGWorkItem_CASSettlementExactlyOnce(t *testing.T) {
 		t.Fatalf("current-lease attempt B must settle, got %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = pg.pool.Exec(context.Background(), `DELETE FROM external_calls WHERE work_item_id=$1`, itemID)
-		_, _ = pg.pool.Exec(context.Background(), `DELETE FROM verifications WHERE id=$1`, vB.ID)
+		_, _ = pg.pool.Exec(context.Background(), `DELETE FROM verify.external_calls WHERE work_item_id=$1`, itemID)
+		_, _ = pg.pool.Exec(context.Background(), `DELETE FROM verify.verifications WHERE id=$1`, vB.ID)
 	})
 	// SPEND-ONCE assertion: exactly ONE external_calls row for this item (B's). A's charge rolled back.
 	var spendRows int
-	if err := pg.pool.QueryRow(ctx, `SELECT count(*) FROM external_calls WHERE work_item_id=$1`, itemID).Scan(&spendRows); err != nil {
+	if err := pg.pool.QueryRow(ctx, `SELECT count(*) FROM verify.external_calls WHERE work_item_id=$1`, itemID).Scan(&spendRows); err != nil {
 		t.Fatalf("count spend rows: %v", err)
 	}
 	if spendRows != 1 {
 		t.Fatalf("GAP-42 VIOLATED (double-charge on real PG): %d external_calls rows for one settle, want exactly 1", spendRows)
 	}
 	var survivingCallID string
-	if err := pg.pool.QueryRow(ctx, `SELECT id FROM external_calls WHERE work_item_id=$1`, itemID).Scan(&survivingCallID); err == nil && survivingCallID != callB.ID {
+	if err := pg.pool.QueryRow(ctx, `SELECT id FROM verify.external_calls WHERE work_item_id=$1`, itemID).Scan(&survivingCallID); err == nil && survivingCallID != callB.ID {
 		t.Fatalf("the surviving spend record must be the winner B's (%s), got %s", callB.ID, survivingCallID)
 	}
 
@@ -751,7 +751,7 @@ func TestPGWorkItem_CASSettlementExactlyOnce(t *testing.T) {
 	}
 	// A's verdict id must NOT exist in the LOG (GAP-33: the lost attempt wrote nothing).
 	var cnt int
-	if err := pg.pool.QueryRow(ctx, `SELECT count(*) FROM verifications WHERE id=$1`, vA.ID).Scan(&cnt); err != nil {
+	if err := pg.pool.QueryRow(ctx, `SELECT count(*) FROM verify.verifications WHERE id=$1`, vA.ID).Scan(&cnt); err != nil {
 		t.Fatalf("count A verdict: %v", err)
 	}
 	if cnt != 0 {

@@ -168,7 +168,7 @@ func buildAPI(appCtx context.Context, cfg config.Config, sec *secrets.Secrets, h
 	log.Printf("verify: orchestrator wired (%s, policy=%s v%d, cache_ttl=%s)",
 		mode, def.Key, def.Version, cfg.CacheTTL())
 	// PN-13 (§7.5): wire per-caller front-door auth. The store's LookupCaller reads api_callers
-	// (SELECT-only for cp_runtime; issuance/rotation are cp_admin/DR-3). Once wired, a valid
+	// (SELECT-only for verify_app; issuance/rotation are verify_admin/DR-3). Once wired, a valid
 	// per-caller key authenticates any endpoint and the P5 bulk surface requires one; the legacy
 	// static token still authenticates the sync /v1/verify during transition (backward-compat).
 	// WithPinger (fix-plan item 10): the SAME *store.PG, handed to /readyz as its readiness probe.

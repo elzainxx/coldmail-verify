@@ -94,7 +94,7 @@ TM_DATABASE_URL='postgres://postgres:dev@localhost:5432/cptest' TM_PEPPER='<32-b
   go run ./cmd/control-plane
 ```
 
-The migration loop applies all 15 (`0001`–`0015`). A production start (`TM_ENV=production`) also needs
+The migration loop applies all 16 (`0001`–`0016`; once — re-running `0001`–`0015` on a migrated database is not supported, see `control-plane/migrations/README.md`). A production start (`TM_ENV=production`) also needs
 `TM_SUPABASE_KEY` (and `TM_FRONTDOOR_TOKEN` to call the sync endpoint) — see [`Docs/install-and-deploy.md`](Docs/install-and-deploy.md) §3.1.
 
 Build the box (no Ruby on the host — it's containerized), from the repo root:

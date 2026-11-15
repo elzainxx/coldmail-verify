@@ -1,7 +1,7 @@
 # Architecture — how the system is built
 
-**Status:** LIVE. Every count, name and route below was checked against the code on 2026-11-13
-(24 control-plane packages, 6 control-plane routes, 15 migrations, 21 ADRs, 11 CI jobs). If you change
+**Status:** LIVE. Every count, name and route below was checked against the code on 2026-11-13 (migrations and roles brought up to `0016` on 2026-11-15)
+(24 control-plane packages, 6 control-plane routes, 16 migrations, 21 ADRs, 11 CI jobs). If you change
 the system, change this file in the same commit ([`../PROJECT_RULES.md`](../PROJECT_RULES.md) §8).
 This is the map; the design authority for any one capability is its ADR ([`adr/`](adr/)) and, for depth
 and history, the phase specs under [`history/`](history/).
@@ -136,13 +136,13 @@ frozen ([ADR-0018](adr/ADR-0018-verifier-node-base-image.md)). The node's own sa
 
 ## 6. Data model
 
-Postgres 16, 15 forward-only migrations (`control-plane/migrations/0001…0015`, no down-migrations —
-[`operator-runbook.md`](operator-runbook.md) §9). Two roles: `cp_runtime` (the service) and `cp_admin`
-(DDL / grant-admin, break-glass).
+Postgres 16, 16 forward-only migrations (`control-plane/migrations/0001…0016`, no down-migrations —
+[`operator-runbook.md`](operator-runbook.md) §9). Everything lives in schema `verify` (since `0016`; nothing of module 1 is in `public`). Three roles: `verify_owner` (owns every object; no login), `verify_app` (the service; the only login) and `verify_admin`
+(break-glass table privileges, no login; DDL needs `verify_owner`).
 
 | Group | Tables | Posture |
 |---|---|---|
-| **The LOG** | `verifications`, `verification_raw` (monthly partitions, ADR-0017) | append-only: `cp_runtime` has INSERT+SELECT only (Door 2) |
+| **The LOG** | `verifications`, `verification_raw` (monthly partitions, ADR-0017) | append-only: `verify_app` has INSERT+SELECT only (Door 2) |
 | **Cache, lists & policy** | `cache`, `disposable_domains`, `spam_trap_domains`, `catchall_domains`, `policies` | runtime-writable where the layer needs it |
 | **Pool** | `nodes`, `node_audits` (append-only), `node_warmup`, `rate_budgets` | the health-watcher is the single writer of node status |
 | **Queue** | `work_items` (the one bounded plaintext exception, encrypted), `jobs`, `work_item_attempts` (append-only) | lease/CAS-guarded |

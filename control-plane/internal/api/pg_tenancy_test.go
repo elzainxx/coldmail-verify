@@ -94,7 +94,7 @@ func tenancyPG(t *testing.T) *store.PG {
 }
 
 // seedTenantKey inserts an api_callers row binding a bearer key to (caller_id, user_id). Issuance is
-// cp_admin (0010) and this test connects as the owner role, so it INSERTs directly — the same
+// verify_admin (0010) and this test connects as the owner role, so it INSERTs directly — the same
 // pattern TestPGLookupCaller_WindowEnforced uses. The point of the direct INSERT is that the READ
 // side still goes through the production LookupCaller path.
 func seedTenantKey(t *testing.T, pg *store.PG, rawKey, callerID, userID string) {
@@ -102,14 +102,14 @@ func seedTenantKey(t *testing.T, pg *store.PG, rawKey, callerID, userID string) 
 	ctx := context.Background()
 	keySHA := sha(rawKey)
 	if _, err := pg.Pool().Exec(ctx,
-		`INSERT INTO api_callers (caller_id, key_sha256, not_before, not_after, user_id)
+		`INSERT INTO verify.api_callers (caller_id, key_sha256, not_before, not_after, user_id)
 		 VALUES ($1,$2,now() - interval '1 hour', NULL, $3)
 		 ON CONFLICT (key_sha256) DO UPDATE SET user_id = EXCLUDED.user_id`,
 		callerID, keySHA, userID); err != nil {
 		t.Fatalf("seed api_callers (%s): %v — if this is 'column user_id does not exist', migration 0013 has not been applied", callerID, err)
 	}
 	t.Cleanup(func() {
-		_, _ = pg.Pool().Exec(context.Background(), `DELETE FROM api_callers WHERE key_sha256=$1`, keySHA)
+		_, _ = pg.Pool().Exec(context.Background(), `DELETE FROM verify.api_callers WHERE key_sha256=$1`, keySHA)
 	})
 }
 
@@ -165,16 +165,16 @@ func getAs(t *testing.T, srv *Server, bearer, path string) *httptest.ResponseRec
 	return rec
 }
 
-// cleanupJob removes a job and everything hanging off it, as the owner role (cp_runtime cannot
+// cleanupJob removes a job and everything hanging off it, as the owner role (verify_app cannot
 // DELETE — 0009/0012 grants). Keeps a shared CI database from accumulating fixtures.
 func cleanupJob(t *testing.T, pg *store.PG, jobID string) {
 	t.Helper()
 	t.Cleanup(func() {
 		ctx := context.Background()
-		_, _ = pg.Pool().Exec(ctx, `DELETE FROM work_item_attempts WHERE work_item_id IN (SELECT id FROM work_items WHERE job_id=$1)`, jobID)
-		_, _ = pg.Pool().Exec(ctx, `DELETE FROM verifications WHERE id IN (SELECT verification_id FROM work_items WHERE job_id=$1 AND verification_id IS NOT NULL)`, jobID)
-		_, _ = pg.Pool().Exec(ctx, `DELETE FROM work_items WHERE job_id=$1`, jobID)
-		_, _ = pg.Pool().Exec(ctx, `DELETE FROM jobs WHERE id=$1`, jobID)
+		_, _ = pg.Pool().Exec(ctx, `DELETE FROM verify.work_item_attempts WHERE work_item_id IN (SELECT id FROM verify.work_items WHERE job_id=$1)`, jobID)
+		_, _ = pg.Pool().Exec(ctx, `DELETE FROM verify.verifications WHERE id IN (SELECT verification_id FROM verify.work_items WHERE job_id=$1 AND verification_id IS NOT NULL)`, jobID)
+		_, _ = pg.Pool().Exec(ctx, `DELETE FROM verify.work_items WHERE job_id=$1`, jobID)
+		_, _ = pg.Pool().Exec(ctx, `DELETE FROM verify.jobs WHERE id=$1`, jobID)
 	})
 }
 
@@ -326,14 +326,14 @@ func TestPGOwnerlessJobIsReadClosed(t *testing.T) {
 	// user_id NULL: models a pre-0013 key.
 	keySHA := sha(key)
 	if _, err := pg.Pool().Exec(context.Background(),
-		`INSERT INTO api_callers (caller_id, key_sha256, not_before, not_after, user_id)
+		`INSERT INTO verify.api_callers (caller_id, key_sha256, not_before, not_after, user_id)
 		 VALUES ($1,$2,now() - interval '1 hour', NULL, NULL)
 		 ON CONFLICT (key_sha256) DO UPDATE SET user_id = NULL`,
 		"caller_nouser_"+tag, keySHA); err != nil {
 		t.Fatalf("seed userless caller: %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = pg.Pool().Exec(context.Background(), `DELETE FROM api_callers WHERE key_sha256=$1`, keySHA)
+		_, _ = pg.Pool().Exec(context.Background(), `DELETE FROM verify.api_callers WHERE key_sha256=$1`, keySHA)
 	})
 
 	srv, _ := tenancyServer(t, pg, now)
@@ -352,7 +352,7 @@ func TestPGOwnerlessJobIsReadClosed(t *testing.T) {
 	// The row IS there — so the 404 is the owner predicate refusing, not a failed submit.
 	var stored int
 	if err := pg.Pool().QueryRow(context.Background(),
-		`SELECT count(*) FROM jobs WHERE id=$1 AND owner_user_id IS NULL`, jobID).Scan(&stored); err != nil {
+		`SELECT count(*) FROM verify.jobs WHERE id=$1 AND owner_user_id IS NULL`, jobID).Scan(&stored); err != nil {
 		t.Fatalf("count ownerless job: %v", err)
 	}
 	if stored != 1 {

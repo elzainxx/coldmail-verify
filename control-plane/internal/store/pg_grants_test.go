@@ -22,17 +22,18 @@ import (
 // The append-only posture was documented as proven and was not — the dangerous kind of failure,
 // because a control nobody re-checks gets trusted.
 //
-// THE MECHANISM: `SET LOCAL ROLE cp_runtime` inside a transaction. Three reasons this is the right
-// tool rather than giving cp_runtime a login and a CI password (M3's pattern, which the fix plan
-// offers as the alternative):
+// THE MECHANISM: `SET LOCAL ROLE verify_app` inside a transaction. Three reasons this is the right
+// tool for the GRANT matrix here (the shared test DSN stays a superuser, so a login as verify_app is not
+// available to these tests; TestRuntimeAsVerifyApp covers the real LOGIN path separately):
 //
-//	(1) cp_runtime is NOLOGIN by design (0005_grants.sql) and STAYS NOLOGIN. A role that cannot log
-//	    in cannot be reached with a leaked password. Giving it a login to test it would weaken the
-//	    very posture under test, and would add a CI secret to manage.
+//	(1) The shared test DSN (TM_TEST_DATABASE_URL) is the superuser `postgres`, which also seeds and cleans
+//	    up. verify_app (formerly cp_runtime, migration 0016) is a LOGIN role with no password in the
+//	    migrations; setting one on the shared database's cluster-wide role from inside this file would
+//	    race the other test packages, so the grant matrix is read through a role switch instead.
 //	(2) SET ROLE drops superuser: privilege checks are made against the CURRENT role, so a
 //	    superuser session that has SET ROLE to a non-superuser is genuinely subject to the grants.
 //	    Verified empirically, not assumed — see the anti-vacuity control below, which proves the
-//	    role switch actually bites by checking a privilege cp_runtime DOES hold and one it does not.
+//	    role switch actually bites by checking a privilege verify_app DOES hold and one it does not.
 //	(3) SET LOCAL is transaction-scoped, so the role reverts on commit/rollback and cannot leak into
 //	    a later test on a pooled connection. The role switch happens on an explicitly acquired
 //	    connection, and the transaction is always rolled back.
@@ -43,18 +44,18 @@ import (
 // honest comment saying nothing is checked.
 //
 // FAIL-VERIFY, per test:
-//   - Delete `REVOKE UPDATE, DELETE ON send_outcomes FROM cp_runtime` (0012:186) and re-migrate →
+//   - Delete `REVOKE UPDATE, DELETE ON send_outcomes FROM cp_runtime` (0012:186; 0016 renames the role) and re-migrate →
 //     TestPGGrants_RuntimeCannotDeleteSendOutcomes fails (the DELETE succeeds).
-//   - Delete `REVOKE DELETE ON rate_budgets FROM cp_runtime` (0008:78) → the rate_budgets case fails.
-//   - Delete `REVOKE UPDATE, DELETE ON verifications FROM cp_runtime` (0005:39) → the LOG case fails.
+//   - Delete `REVOKE DELETE ON rate_budgets FROM cp_runtime` (0008:78; 0016 renames the role) → the rate_budgets case fails.
+//   - Delete `REVOKE UPDATE, DELETE ON verifications FROM cp_runtime` (0005:39; 0016 renames the role) → the LOG case fails.
 //     That one is Door 2 itself.
-//   - Change asRuntime's `SET LOCAL ROLE cp_runtime` to `SET LOCAL ROLE postgres` (i.e. don't
+//   - Change asRuntime's `SET LOCAL ROLE verify_app` to `SET LOCAL ROLE postgres` (i.e. don't
 //     actually drop privilege) → TestPGGrants_RoleSwitchActuallyBites fails, and so does every
 //     denial case above. This is the control that makes the others non-vacuous: without it, a
 //     silently-ineffective role switch would let all the "denied" assertions pass for the wrong
 //     reason, which is the exact bug the old Skip-on-success tests had.
 
-// asRuntime runs fn inside a transaction whose role is cp_runtime, then ALWAYS rolls back. The
+// asRuntime runs fn inside a transaction whose role is verify_app, then ALWAYS rolls back. The
 // returned error is fn's, so a caller asserts on the privilege outcome rather than on plumbing.
 //
 // It takes a dedicated connection from the pool (not the pool's Exec) because SET LOCAL ROLE binds
@@ -76,19 +77,19 @@ func asRuntime(t *testing.T, pg *PG, fn func(pgx.Tx) error) error {
 	// dies with it. A committed grant test would be a test that mutates the shared CI database.
 	defer tx.Rollback(ctx) //nolint:errcheck // the rollback IS the cleanup; a post-rollback error is moot
 
-	if _, err := tx.Exec(ctx, `SET LOCAL ROLE cp_runtime`); err != nil {
+	if _, err := tx.Exec(ctx, `SET LOCAL ROLE verify_app`); err != nil {
 		// Not a skip. If the role is missing, the migrations did not run, and pretending that is
 		// "not exercised" is how D13 happened. The DSN is present (testPG got past its own gate),
 		// so a migrated database is a requirement, not a maybe.
-		t.Fatalf("SET LOCAL ROLE cp_runtime: %v — the migrations (0005_grants.sql) must be applied to TM_TEST_DATABASE_URL", err)
+		t.Fatalf("SET LOCAL ROLE verify_app: %v — the migrations (0005_grants.sql) must be applied to TM_TEST_DATABASE_URL", err)
 	}
 	// Confirm the switch took effect before asserting anything about privileges.
 	var who string
 	if err := tx.QueryRow(ctx, `SELECT current_user`).Scan(&who); err != nil {
 		t.Fatalf("current_user: %v", err)
 	}
-	if who != "cp_runtime" {
-		t.Fatalf("role switch did not take: current_user=%q, want cp_runtime — every denial below would be vacuous", who)
+	if who != "verify_app" {
+		t.Fatalf("role switch did not take: current_user=%q, want verify_app — every denial below would be vacuous", who)
 	}
 	return fn(tx)
 }
@@ -98,7 +99,7 @@ func asRuntime(t *testing.T, pg *PG, fn func(pgx.Tx) error) error {
 func denied(t *testing.T, what string, err error) {
 	t.Helper()
 	if err == nil {
-		t.Fatalf("%s SUCCEEDED as cp_runtime — the grant is not enforced (this is the D13 claim being false)", what)
+		t.Fatalf("%s SUCCEEDED as verify_app — the grant is not enforced (this is the D13 claim being false)", what)
 	}
 	if !strings.Contains(strings.ToLower(err.Error()), "permission denied") {
 		t.Fatalf("%s failed, but NOT with permission denied: %v — the grant may not be what stopped it", what, err)
@@ -106,32 +107,32 @@ func denied(t *testing.T, what string, err error) {
 }
 
 // TestPGGrants_RoleSwitchActuallyBites is the anti-vacuity control for this whole file: it proves
-// SET LOCAL ROLE cp_runtime genuinely drops privilege, by checking BOTH directions — a privilege
-// cp_runtime HOLDS (SELECT on verifications) still works, and one it does NOT (DELETE on
+// SET LOCAL ROLE verify_app genuinely drops privilege, by checking BOTH directions — a privilege
+// verify_app HOLDS (SELECT on verifications) still works, and one it does NOT (DELETE on
 // verifications) is refused. One direction alone proves nothing: if the role switch silently failed
 // we would still be superuser and everything would succeed; if it switched to a role with no
 // privileges at all, everything would fail and the "denied" tests would pass for the wrong reason.
 func TestPGGrants_RoleSwitchActuallyBites(t *testing.T) {
 	pg := testPG(t)
 
-	// Direction 1: a privilege cp_runtime HAS must still work (so we are not simply unprivileged).
+	// Direction 1: a privilege verify_app HAS must still work (so we are not simply unprivileged).
 	if err := asRuntime(t, pg, func(tx pgx.Tx) error {
 		var n int
-		return tx.QueryRow(context.Background(), `SELECT count(*) FROM verifications`).Scan(&n)
+		return tx.QueryRow(context.Background(), `SELECT count(*) FROM verify.verifications`).Scan(&n)
 	}); err != nil {
-		t.Fatalf("cp_runtime must retain SELECT on verifications (0005: GRANT SELECT, INSERT): %v", err)
+		t.Fatalf("verify_app must retain SELECT on verifications (0005: GRANT SELECT, INSERT): %v", err)
 	}
 
 	// Direction 2: a privilege it does NOT have must be refused (so superuser really was dropped).
 	err := asRuntime(t, pg, func(tx pgx.Tx) error {
-		_, e := tx.Exec(context.Background(), `DELETE FROM verifications WHERE false`)
+		_, e := tx.Exec(context.Background(), `DELETE FROM verify.verifications WHERE false`)
 		return e
 	})
-	denied(t, "DELETE FROM verifications", err)
+	denied(t, "DELETE FROM verify.verifications", err)
 }
 
 // TestPGGrants_RuntimeCannotMutateTheLog is Door 2 itself: THE LOG is append-only, "enforced by
-// revoked grants, not convention" (PROJECT_RULES.md Door 2, 0005_grants.sql:39). cp_runtime may
+// revoked grants, not convention" (PROJECT_RULES.md Door 2, 0005_grants.sql:39). verify_app may
 // INSERT and SELECT; UPDATE and DELETE are revoked, so a correction is a NEW ROW, never a mutation.
 //
 // This case did not exist before: the two tests D13 named covered send_outcomes and rate_budgets,
@@ -141,34 +142,34 @@ func TestPGGrants_RuntimeCannotMutateTheLog(t *testing.T) {
 	pg := testPG(t)
 	ctx := context.Background()
 
-	denied(t, "UPDATE verifications", asRuntime(t, pg, func(tx pgx.Tx) error {
-		_, e := tx.Exec(ctx, `UPDATE verifications SET status='valid' WHERE false`)
+	denied(t, "UPDATE verify.verifications", asRuntime(t, pg, func(tx pgx.Tx) error {
+		_, e := tx.Exec(ctx, `UPDATE verify.verifications SET status='valid' WHERE false`)
 		return e
 	}))
-	denied(t, "DELETE FROM verifications", asRuntime(t, pg, func(tx pgx.Tx) error {
-		_, e := tx.Exec(ctx, `DELETE FROM verifications WHERE false`)
+	denied(t, "DELETE FROM verify.verifications", asRuntime(t, pg, func(tx pgx.Tx) error {
+		_, e := tx.Exec(ctx, `DELETE FROM verify.verifications WHERE false`)
 		return e
 	}))
 	// The raw sidecar holds the same posture (0005:57) — it is part of the append-only LOG.
-	denied(t, "DELETE FROM verification_raw", asRuntime(t, pg, func(tx pgx.Tx) error {
-		_, e := tx.Exec(ctx, `DELETE FROM verification_raw WHERE false`)
+	denied(t, "DELETE FROM verify.verification_raw", asRuntime(t, pg, func(tx pgx.Tx) error {
+		_, e := tx.Exec(ctx, `DELETE FROM verify.verification_raw WHERE false`)
 		return e
 	}))
 }
 
 // TestPGGrants_RuntimeCannotDeleteSendOutcomes replaces TestPGSendOutcome_RuntimeCannotDelete, which
-// always skipped. send_outcomes is append-only for the runtime; retention is cp_admin (DR-3).
+// always skipped. send_outcomes is append-only for the runtime; retention is verify_admin (DR-3).
 func TestPGGrants_RuntimeCannotDeleteSendOutcomes(t *testing.T) {
 	pg := testPG(t)
 	ctx := context.Background()
 
-	denied(t, "DELETE FROM send_outcomes", asRuntime(t, pg, func(tx pgx.Tx) error {
-		_, e := tx.Exec(ctx, `DELETE FROM send_outcomes WHERE false`)
+	denied(t, "DELETE FROM verify.send_outcomes", asRuntime(t, pg, func(tx pgx.Tx) error {
+		_, e := tx.Exec(ctx, `DELETE FROM verify.send_outcomes WHERE false`)
 		return e
 	}))
 	// 0012:186 revokes UPDATE too — an outcome cannot be edited after the fact, only appended.
-	denied(t, "UPDATE send_outcomes", asRuntime(t, pg, func(tx pgx.Tx) error {
-		_, e := tx.Exec(ctx, `UPDATE send_outcomes SET event='delivered' WHERE false`)
+	denied(t, "UPDATE verify.send_outcomes", asRuntime(t, pg, func(tx pgx.Tx) error {
+		_, e := tx.Exec(ctx, `UPDATE verify.send_outcomes SET event='delivered' WHERE false`)
 		return e
 	}))
 }
@@ -185,13 +186,13 @@ func TestPGGrants_RuntimeCannotDeleteRateBudgets(t *testing.T) {
 	// UPDATE is granted (0008:77) — the runtime spends tokens. Proven so the DELETE denial below is
 	// visibly about DELETE, not about the table being unreachable.
 	if err := asRuntime(t, pg, func(tx pgx.Tx) error {
-		_, e := tx.Exec(ctx, `UPDATE rate_budgets SET tokens = tokens WHERE false`)
+		_, e := tx.Exec(ctx, `UPDATE verify.rate_budgets SET tokens = tokens WHERE false`)
 		return e
 	}); err != nil {
-		t.Fatalf("cp_runtime must retain UPDATE on rate_budgets (it spends tokens): %v", err)
+		t.Fatalf("verify_app must retain UPDATE on rate_budgets (it spends tokens): %v", err)
 	}
-	denied(t, "DELETE FROM rate_budgets", asRuntime(t, pg, func(tx pgx.Tx) error {
-		_, e := tx.Exec(ctx, `DELETE FROM rate_budgets WHERE false`)
+	denied(t, "DELETE FROM verify.rate_budgets", asRuntime(t, pg, func(tx pgx.Tx) error {
+		_, e := tx.Exec(ctx, `DELETE FROM verify.rate_budgets WHERE false`)
 		return e
 	}))
 }
@@ -208,20 +209,20 @@ func TestPGGrants_RuntimeCannotIssueKeys(t *testing.T) {
 	// SELECT is granted: the hot auth path reads this table on every request.
 	if err := asRuntime(t, pg, func(tx pgx.Tx) error {
 		var n int
-		return tx.QueryRow(ctx, `SELECT count(*) FROM api_callers`).Scan(&n)
+		return tx.QueryRow(ctx, `SELECT count(*) FROM verify.api_callers`).Scan(&n)
 	}); err != nil {
-		t.Fatalf("cp_runtime must retain SELECT on api_callers (the hot auth lookup): %v", err)
+		t.Fatalf("verify_app must retain SELECT on api_callers (the hot auth lookup): %v", err)
 	}
-	denied(t, "INSERT INTO api_callers", asRuntime(t, pg, func(tx pgx.Tx) error {
+	denied(t, "INSERT INTO verify.api_callers", asRuntime(t, pg, func(tx pgx.Tx) error {
 		_, e := tx.Exec(ctx,
-			`INSERT INTO api_callers (caller_id, key_sha256, not_before) VALUES ($1,$2,now())`,
+			`INSERT INTO verify.api_callers (caller_id, key_sha256, not_before) VALUES ($1,$2,now())`,
 			"caller_escalation_"+must(idgen.NewV7String(time.Now().UTC())), []byte("forged-key"))
 		return e
 	}))
 	// And it cannot re-point an existing key at a different platform user (0013's own concern: that
 	// would hand one tenant another tenant's jobs without touching the jobs table at all).
-	denied(t, "UPDATE api_callers", asRuntime(t, pg, func(tx pgx.Tx) error {
-		_, e := tx.Exec(ctx, `UPDATE api_callers SET user_id = gen_random_uuid() WHERE false`)
+	denied(t, "UPDATE verify.api_callers", asRuntime(t, pg, func(tx pgx.Tx) error {
+		_, e := tx.Exec(ctx, `UPDATE verify.api_callers SET user_id = gen_random_uuid() WHERE false`)
 		return e
 	}))
 }

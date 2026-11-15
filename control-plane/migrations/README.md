@@ -24,9 +24,31 @@
 | `0014_raw_partition_maintenance.sql` | ADR-0017 (partition cliff fix) | `ensure_verification_raw_partitions(n)` (SECURITY DEFINER, granted to `cp_runtime`) + `ensure_verification_raw_partitions_at(ts, n)` (admin/test core, NOT granted to `cp_runtime`); bootstraps the current month. Future headroom is the `TM_RAW_PARTITION_MONTHS_AHEAD` dial |
 | `0015_non_public_mx_reason.sql` | ADR-0021 (additive reason `non_public_mx`) | widens the `valid_reason` CHECK on `verifications` and `cache` (NOT VALID + VALIDATE) |
 
+| `0016_verify_schema.sql` | Platform Phase 1 (one schema per module) | Moves all 21 tables, every `verification_raw` partition and both partition functions from `public` into schema **`verify`**; renames `cp_runtime` → **`verify_app`** (now `LOGIN`) and `cp_admin` → **`verify_admin`**; creates **`verify_owner`** (owns the schema and everything in it); rebuilds the two partition functions for `verify`. Adds exactly two privileges: `INSERT` and `UPDATE (is_default)` on `verify.policies` for `verify_app` (startup `EnsurePolicy` needs them), plus `USAGE` on the schema. See "Since 0016" below. |
+
+Rows `0005`–`0015` describe those files as they were written, so they still say `cp_runtime` / `cp_admin` and unqualified table names; `0016` is what renames the roles and moves the tables.
+
 > **Migration `0009_work_items_jobs.sql` (P5 queue tables) is added by task #84** — it applies before `0010` in lexical order. `0010` (auth) is independent of `0009` and lands first in the P5 gate sequence (PN-13 before the bulk endpoint).
 
-**Apply order:** Run sequentially in the zero-padded filename order (`0001` → … → `0008` → `0009` → `0010`). CI applies every `migrations/NNNN_*.sql` in `sort` order, so a new migration is picked up automatically.
+**Apply order:** Run sequentially in the zero-padded filename order (`0001` → … → `0010` → … → `0016`). CI applies every `migrations/NNNN_*.sql` in `sort` order, so a new migration is picked up automatically.
+
+---
+
+## Since 0016: schema `verify` and three roles
+
+After `0016`, **nothing of module 1 is left in `public`** (that schema belongs to the platform; modules 2 and 3 use `send_managed` and `send_byo`). Every object is in schema `verify`, owned by `verify_owner`, and the control plane writes every SQL statement `verify.`-qualified (`verify.cache`, `verify.ensure_verification_raw_partitions(n)`) — no `search_path` setting, no `SET ROLE`, no pool configuration — exactly as modules 2 and 3 write `send_managed.config`.
+
+| Role | Login | Holds |
+|---|---|---|
+| `verify_app` | **yes** — the control plane's runtime identity (`TM_DATABASE_URL`); formerly `cp_runtime` | exactly the table privileges `cp_runtime` had (carried over by the rename, proven by `TestVerifySchema_PrivilegesCarriedOver`), plus `INSERT` and `UPDATE (is_default)` on `verify.policies` and `USAGE` on the schema. No `CREATE`, owns nothing. |
+| `verify_admin` | no — break-glass; formerly `cp_admin` | the same table privileges `cp_admin` had (`ALL` on every table, `EXECUTE` on both partition functions), plus `USAGE` on the schema. Table DML only: it owns nothing, so it cannot run DDL. |
+| `verify_owner` | no | owns the schema, every table, partition, index and both functions. DDL (a new partition by hand, `DROP` of an aged partition, `ALTER`) runs as this role: `SET ROLE verify_owner;` first. `0016` grants it to the migrating role when that role is not already a member (a superuser always is). |
+
+- **The runtime password is set out of band**, never in a migration: `ALTER ROLE verify_app PASSWORD '…'`. `0016` only makes the role `LOGIN`.
+- **Why `INSERT` + `UPDATE (is_default)` on `policies`:** `EnsurePolicy` runs at startup (`cmd/control-plane/main.go`) and does `INSERT INTO verify.policies … ON CONFLICT DO NOTHING` then `UPDATE verify.policies SET is_default=true …`. Before `0016` the runtime role held `SELECT` only, so a login that held exactly the old grants failed there with SQLSTATE 42501 and the process never served. `UPDATE` is column-level: policy rows stay immutable except for the default flag. Nothing else was widened and nothing unused was pruned (e.g. `DELETE` on `cache` stays; tightening it is a separate decision).
+- **Do not re-run `0001`–`0015` on a database that already ran `0016`.** They are unqualified and every `CREATE` is `IF NOT EXISTS`, so they would create empty module-1 tables in `public` again. `0016` then refuses to move anything and stops with SQLSTATE `42P07`, naming the table. Recovery: confirm the `public` copy is empty, drop it, re-run `0016`. (`0016` itself is safe on an empty database and on one already at `0015`; there is still no migration tracker, `Docs/future-work.md` FW-3.)
+- **Roles are cluster-wide, tables are per database.** In a cluster with a single module-1 database (production) `0016` renames the two roles. In a cluster with several (CI, the test suite's scratch databases, a shared dev server) the first database renames them; every later database's `0005` creates `cp_runtime` / `cp_admin` again and grants its own tables to them, so `0016` (section 6b) copies that database's table privileges to `verify_app` / `verify_admin`, revokes them from the old role and drops it when no other database still depends on it. Tests that read or change role state therefore take `testpg`'s migration lock (`pg_advisory_lock`), because migrations in parallel test binaries rename, alter and drop the same roles.
+- **Counts:** `0016` has 3 top-level `REVOKE` statements (`PUBLIC` on the schema and on each of the two functions; all three on objects it creates itself) and 5 top-level `GRANT` statements (schema `USAGE`, `EXECUTE` on each of the two functions, and the two `policies` privileges). The `GRANT`/`REVOKE` that section 6b issues through `EXECUTE format(…)` are not counted: they only copy privileges that `0005`–`0014` already granted. All 22 `REVOKE`s of the 16 files (19 before `0016`) are accounted for in "No Down Migrations" below.
 
 ---
 
@@ -74,24 +96,24 @@ done
 
 ## Append-Only Grant Model (Door 2 Enforcement)
 
-The `0005_grants.sql` migration implements two roles:
+`0005_grants.sql` created two roles (`cp_runtime`, `cp_admin`); `0016` renamed them, and the names below are the current ones. A third role, `verify_owner`, owns the objects (see "Since 0016" above):
 
 | Role | Purpose | Verifications Grants | Other Tables |
 |---|---|---|---|
-| `cp_runtime` | Brain's operational credential (maps to Supabase `service_role`) | **INSERT, SELECT only** (NO UPDATE, NO DELETE) | Full read/write on `cache`; INSERT+UPDATE on `catchall_domains` (0006); INSERT+SELECT on `node_audits` (append-only, 0007); SELECT+INSERT+UPDATE on `node_warmup` + INSERT+UPDATE on `nodes` (0007); SELECT+INSERT+UPDATE on `rate_budgets` (counter, 0008); read-only on other lists/policies |
-| `cp_admin` | DDL owner / grant-admin (break-glass, admin-audited) | ALL (for migrations, partitions) | ALL (incl. the only DELETE on `node_audits`/`node_warmup`/`nodes`/`rate_budgets`) |
+| `verify_app` | Brain's operational credential (maps to Supabase `service_role`) | **INSERT, SELECT only** (NO UPDATE, NO DELETE) | Full read/write on `cache`; INSERT+UPDATE on `catchall_domains` (0006); INSERT+SELECT on `node_audits` (append-only, 0007); SELECT+INSERT+UPDATE on `node_warmup` + INSERT+UPDATE on `nodes` (0007); SELECT+INSERT+UPDATE on `rate_budgets` (counter, 0008); read-only on other lists; on `policies` SELECT, INSERT and UPDATE (`is_default`) only (0016) |
+| `verify_admin` | grant-admin (break-glass, admin-audited); owns nothing, so DDL needs `verify_owner` | ALL table privileges (DML + TRUNCATE; no DDL) | ALL (incl. the only DELETE on `node_audits`/`node_warmup`/`nodes`/`rate_budgets`) |
 
-**P3 append-only note (0007):** `node_audits` carries the LOG's own posture — `cp_runtime` gets
+**P3 append-only note (0007):** `node_audits` carries the LOG's own posture — `verify_app` gets
 INSERT+SELECT, DELETE is revoked, so audit *history* (a green→red→green flap record P4 needs) can
-never be destroyed by the runtime. Proven live: as `cp_runtime`, `INSERT node_audits` succeeds and
+never be destroyed by the runtime. Proven live: as `verify_app`, `INSERT node_audits` succeeds and
 `DELETE FROM node_audits` raises `permission denied` (same for `node_warmup`/`nodes` DELETE).
 
-**P4 counter-posture note (0008):** `rate_budgets` mirrors `node_warmup` — `cp_runtime` gets
+**P4 counter-posture note (0008):** `rate_budgets` mirrors `node_warmup` — `verify_app` gets
 SELECT+INSERT+UPDATE (the durable token-bucket spend the limiter increments), DELETE revoked. Proven
-live: as `cp_runtime`, `INSERT`/`UPDATE rate_budgets` succeed and `DELETE FROM rate_budgets` raises
+live: as `verify_app`, `INSERT`/`UPDATE rate_budgets` succeed and `DELETE FROM rate_budgets` raises
 `permission denied`. The `recovering` value is accepted by the widened `nodes.status` CHECK.
 
-**Why:** The LOG (`verifications`) is append-only by **revoked grants**, not convention. The runtime service role *cannot* update or delete historical rows — corrections are new rows. PN-9 hardens this: `cp_admin` is a separate, audited credential (not held by the runtime process), so the runtime cannot silently rewrite history.
+**Why:** The LOG (`verifications`) is append-only by **revoked grants**, not convention. The runtime service role *cannot* update or delete historical rows — corrections are new rows. PN-9 hardens this: `verify_admin` is a separate, audited credential (not held by the runtime process), so the runtime cannot silently rewrite history.
 
 **Retention note:** `verification_raw` is RANGE-partitioned by month. Aging out old engine blobs is `DROP PARTITION` (admin action), never `UPDATE`/`DELETE` on rows. This keeps `verifications` truly append-only (§3.2.6).
 
@@ -139,7 +161,7 @@ live: as `cp_runtime`, `INSERT`/`UPDATE rate_budgets` succeed and `DELETE FROM r
 
 ## Idempotency
 
-All migrations use `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS`. Re-running a migration is safe (no-op if already applied). For production: track applied migrations in a `schema_migrations` table or use a migration tool (e.g., `golang-migrate`, `dbmate`).
+All migrations use `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS`. Re-running a migration is safe (no-op if already applied) **up to `0015`, and only on a database that has not run `0016`**: `0001`–`0015` create their tables unqualified, i.e. in `public`, so re-running them after `0016` re-creates empty module-1 tables there (see "Since 0016"). `0016` itself is safe on an empty database and on one already at `0015`. For production: track applied migrations in a `schema_migrations` table or use a migration tool (e.g., `golang-migrate`, `dbmate`).
 
 ---
 
@@ -147,11 +169,14 @@ All migrations use `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS`
 
 **Deliberate omission.** The LOG is append-only and becomes historical data; you **never roll back the LOG** (§3.2.1). If a migration fails, fix forward. Down-migrations are not provided because they would violate the append-only contract.
 
-**The scope of that reason, stated exactly (added 2026-08-07, re-measured 2026-11-13 over 15 migrations).** It
-explains the **LOG**, and it does not reach two other things these files carry. (a) **Grants** — 19 `REVOKE`
-statements across 10 files (`grep -cE '^\s*REVOKE\b' *.sql`): 17 are least-privilege `REVOKE … FROM cp_runtime`
-tightenings and 2 (in `0014`) remove the default `PUBLIC` execute on two functions; the 2026-08-07 line-by-line review
-found that every REVOKE then present revoked a privilege its *own* migration granted, so none silently strips a
+**The scope of that reason, stated exactly (added 2026-08-07, re-measured 2026-11-15 over 16 migrations).** It
+explains the **LOG**, and it does not reach two other things these files carry. (a) **Grants** — 22 `REVOKE`
+statements across 11 files (`grep -cE '^\s*REVOKE\b' *.sql`): 17 are least-privilege `REVOKE … FROM cp_runtime`
+tightenings (`cp_runtime` is the role `0016` renames to `verify_app`), 2 (in `0014`) remove the default `PUBLIC` execute
+on two functions, and 3 (in `0016`) remove the default `PUBLIC` access to the schema `verify` and to the two functions
+it creates; the 2026-08-07 line-by-line review
+found that every REVOKE then present revoked a privilege its *own* migration granted (the three in `0016` revoke the
+default `PUBLIC` access on objects that same file creates), so none silently strips a
 privilege an earlier migration relied on. (b) **Constraints** — 4 `DROP CONSTRAINT IF EXISTS` (`0008` `nodes.valid_status`,
 `0012` `send_outcomes.send_outcome_calibration_class`, `0015` `verifications.valid_reason` and `cache.valid_reason`), each
 recreating a **widened** version; reverting the file leaves the widened constraint live, so the code believes a narrower
@@ -166,21 +191,25 @@ original write-up is [`../../Docs/history/go-live-rollback-posture.md`](../../Do
 
 ## Adding Partitions (verification_raw)
 
-Example partitions (2026-07 through 2026-09) are created in `0001_verifications.sql`. **Production:** automate partition creation ahead of time (e.g., cron job creating next month's partition).
+Example partitions (2026-07 through 2026-09) are created in `0001_verifications.sql`. **Production:** the control plane keeps future partitions created itself (ADR-0017: `verify.ensure_verification_raw_partitions(n)`, every `TM_RAW_PARTITION_MAINTAIN_INTERVAL_SECONDS`); the SQL below is the by-hand equivalent. DDL needs the table owner, `verify_owner` (`verify_admin` owns nothing and cannot run it):
 
 ```sql
--- Example: add October 2026 partition
-CREATE TABLE verification_raw_2026_10 PARTITION OF verification_raw
+-- Example: add October 2026 partition, by hand
+SET ROLE verify_owner;
+CREATE TABLE verify.verification_raw_2026_10 PARTITION OF verify.verification_raw
     FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
 
-GRANT SELECT, INSERT ON verification_raw_2026_10 TO cp_runtime;
-GRANT ALL PRIVILEGES ON verification_raw_2026_10 TO cp_admin;
+GRANT SELECT, INSERT ON verify.verification_raw_2026_10 TO verify_app;
+GRANT ALL PRIVILEGES ON verify.verification_raw_2026_10 TO verify_admin;
+RESET ROLE;
 ```
 
 **Retention (after ~90 days):**
 ```sql
--- Admin action only (cp_admin)
-DROP TABLE verification_raw_2026_07;
+-- Owner action only (verify_owner); verify_app and verify_admin cannot drop a partition
+SET ROLE verify_owner;
+DROP TABLE verify.verification_raw_2026_07;
+RESET ROLE;
 ```
 
 ---
@@ -225,4 +254,4 @@ All 25 open questions signed off (Appendix C). Key findings already resolved:
 
 ---
 
-**Ready to apply.** Run migrations `0001` → `0010` in zero-padded filename order against your PostgreSQL 14+ / Supabase instance.
+**Ready to apply.** Run migrations `0001` → `0016` in zero-padded filename order against your PostgreSQL 14+ / Supabase instance, once (see "Since 0016" for what must not be re-run).

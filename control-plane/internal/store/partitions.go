@@ -31,7 +31,7 @@ var _ RawPartitioner = (*PG)(nil)
 // EnsureRawPartitions calls the runtime door from migration 0014.
 func (p *PG) EnsureRawPartitions(ctx context.Context, monthsAhead int) (int, error) {
 	var created int
-	if err := p.pool.QueryRow(ctx, `SELECT ensure_verification_raw_partitions($1)`, monthsAhead).Scan(&created); err != nil {
+	if err := p.pool.QueryRow(ctx, `SELECT verify.ensure_verification_raw_partitions($1)`, monthsAhead).Scan(&created); err != nil {
 		return 0, fmt.Errorf("store: ensure raw partitions: %w", err)
 	}
 	return created, nil

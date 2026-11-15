@@ -224,8 +224,8 @@ func TestDSNRedaction_ShortValuesDoNotSuppressEverything(t *testing.T) {
 // regard for the key, so `port=5432` yielded the candidate "5432" — four characters, so the length
 // floor let it through. Measured against the messages an operator actually gets, FIVE of six
 // credential-free errors were replaced by the suppression notice: connection-refused (via "5432"),
-// no-such-host (via "db.internal"), `password authentication failed for user "cp_runtime"` (via
-// "cp_runtime"), `sslmode is invalid` (via "require"), and `user=… database=…` (via "verifydb"). An
+// no-such-host (via "db.internal"), `password authentication failed for user "verify_app"` (via
+// "verify_app"), `sslmode is invalid` (via "require"), and `user=… database=…` (via "verifydb"). An
 // operator whose database is simply DOWN was told their connection string was malformed.
 //
 // WHY ShortValuesDoNotSuppressEverything MISSED IT — and this is the lesson, not the bug. Its fixture
@@ -238,7 +238,7 @@ func TestDSNRedaction_ShortValuesDoNotSuppressEverything(t *testing.T) {
 func TestDSNRedaction_StructuralValuesNeverSuppress(t *testing.T) {
 	cases := map[string]struct{ dsn, msg string }{
 		"port, kv unspaced": {
-			dsn: "host=db.internal port=5432 dbname=verifydb user=cp_runtime",
+			dsn: "host=db.internal port=5432 dbname=verifydb user=verify_app",
 			msg: "dial tcp 10.0.0.5:5432: connect: connection refused",
 		},
 		"port, kv SPACED": {
@@ -250,11 +250,11 @@ func TestDSNRedaction_StructuralValuesNeverSuppress(t *testing.T) {
 			msg: "hostname resolving error: lookup db.internal: no such host",
 		},
 		"dbname and user": {
-			dsn: "host=h port=5432 dbname=verifydb user=cp_runtime",
-			msg: "failed to connect to `user=cp_runtime database=verifydb`: server closed the connection",
+			dsn: "host=h port=5432 dbname=verifydb user=verify_app",
+			msg: "failed to connect to `user=verify_app database=verifydb`: server closed the connection",
 		},
 		"url form, structural only": {
-			dsn: "postgres://cp_runtime@db.internal:5432/verifydb?sslmode=require&connect_timeout=10",
+			dsn: "postgres://verify_app@db.internal:5432/verifydb?sslmode=require&connect_timeout=10",
 			msg: "dial tcp 10.0.0.5:5432: i/o timeout",
 		},
 
@@ -274,24 +274,24 @@ func TestDSNRedaction_StructuralValuesNeverSuppress(t *testing.T) {
 		// `unable to read CA file: open /etc/ssl/verify-ca.pem` with the whole-DSN prefix pgx puts on
 		// parse failures removed, so that the candidate check is the only thing under test.
 		"url query host= override, unix socket path in message": {
-			dsn: "postgres://cp_runtime@127.0.0.1:5432/verifydb?host=/var/run/postgresql",
-			msg: "failed to connect to `user=cp_runtime database=verifydb`: /var/run/postgresql/.s.PGSQL.5432 " +
+			dsn: "postgres://verify_app@127.0.0.1:5432/verifydb?host=/var/run/postgresql",
+			msg: "failed to connect to `user=verify_app database=verifydb`: /var/run/postgresql/.s.PGSQL.5432 " +
 				"(/var/run/postgresql): dial error: dial unix /var/run/postgresql/.s.PGSQL.5432: connect: no such file or directory",
 		},
 		"url query dbname and user, both echoed": {
-			dsn: "postgres://127.0.0.1:5432/?dbname=verifydb&user=cp_runtime&connect_timeout=2",
-			msg: "failed to connect to `user=cp_runtime database=verifydb`: 127.0.0.1:5432 (127.0.0.1): " +
+			dsn: "postgres://127.0.0.1:5432/?dbname=verifydb&user=verify_app&connect_timeout=2",
+			msg: "failed to connect to `user=verify_app database=verifydb`: 127.0.0.1:5432 (127.0.0.1): " +
 				"dial error: dial tcp 127.0.0.1:5432: connect: connection refused",
 		},
 		"url query sslrootcert, path in message": {
-			dsn: "postgres://cp_runtime@db.internal:5432/verifydb?sslmode=verify-full&sslrootcert=/etc/ssl/verify-ca.pem",
+			dsn: "postgres://verify_app@db.internal:5432/verifydb?sslmode=verify-full&sslrootcert=/etc/ssl/verify-ca.pem",
 			msg: "failed to configure TLS (unable to read CA file: open /etc/ssl/verify-ca.pem: no such file or directory)",
 		},
 		"the literal word password in a SERVER error": {
 			// `password` as a bare key must not itself become a candidate, or every authentication
 			// failure — the error most likely to be a real misconfiguration — is suppressed.
-			dsn: "host=h port=5432 dbname=verifydb user=cp_runtime password = " + dsnCanary,
-			msg: `failed to connect: password authentication failed for user "cp_runtime"`,
+			dsn: "host=h port=5432 dbname=verifydb user=verify_app password = " + dsnCanary,
+			msg: `failed to connect: password authentication failed for user "verify_app"`,
 		},
 		"sslmode value": {
 			dsn: "host=h port=5432 dbname=verifydb sslmode=require",

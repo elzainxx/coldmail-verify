@@ -92,7 +92,7 @@ func ageTable(t *testing.T, dsn string, now time.Time) {
 	defer conn.Close(ctx)
 	for _, p := range parts {
 		if p.From.After(testpg.MonthStart(now)) {
-			if _, err := conn.Exec(ctx, `DROP TABLE public.`+pgx.Identifier{p.Name}.Sanitize()); err != nil {
+			if _, err := conn.Exec(ctx, `DROP TABLE verify.`+pgx.Identifier{p.Name}.Sanitize()); err != nil {
 				t.Fatalf("drop %s: %v", p.Name, err)
 			}
 		}
@@ -105,8 +105,18 @@ func ageTable(t *testing.T, dsn string, now time.Time) {
 // before 0014 (migrations 0001..0013). It is deliberately DATE-INDEPENDENT: it uses a date after the
 // last legacy partition (2026-09), so it holds on any day this suite runs — unlike
 // TestPGAppendWithRawSidecar, which only started failing when the calendar passed 2026-09-30.
+//
+// Since 0016 the store addresses schema verify only, and 0001..0013 alone leave the tables in public, so this
+// database is 0001..0013 plus 0016 (0014 and 0015 left out): the three legacy partitions, no 0014 bootstrap
+// partition, no headroom, in the schema the store reads. A state no upgrade passes through, chosen because it is
+// the only one in which the store can still reach the pre-0014 partition layout.
 func TestPGRawPartitions_LegacyCliffIsReal(t *testing.T) {
-	pg, _ := scratchPG(t, 13)
+	dsn := testpg.ScratchSelect(t, func(n int) bool { return n <= 13 || n == 16 })
+	pg, err := OpenPG(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("OpenPG(scratch): %v", err)
+	}
+	t.Cleanup(pg.Close)
 	ctx := context.Background()
 
 	// Control: a date INSIDE legacy coverage inserts fine, so the failure below is the missing
@@ -117,7 +127,7 @@ func TestPGRawPartitions_LegacyCliffIsReal(t *testing.T) {
 	}
 
 	row, raw = rawRowAt(t, time.Date(2027, 1, 15, 12, 0, 0, 0, time.UTC))
-	err := pg.AppendVerification(ctx, row, raw)
+	err = pg.AppendVerification(ctx, row, raw)
 	if err == nil {
 		t.Fatal("a row dated past the last legacy partition must be REJECTED on the pre-0014 schema — the cliff did not reproduce")
 	}
@@ -242,8 +252,8 @@ func inRuntimeTx(t *testing.T, dsn string, fn func(ctx context.Context, tx pgx.T
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
-	if _, err := tx.Exec(ctx, `SET LOCAL ROLE cp_runtime`); err != nil {
-		t.Fatalf("SET LOCAL ROLE cp_runtime: %v", err)
+	if _, err := tx.Exec(ctx, `SET LOCAL ROLE verify_app`); err != nil {
+		t.Fatalf("SET LOCAL ROLE verify_app: %v", err)
 	}
 	fn(ctx, tx)
 }
@@ -258,26 +268,26 @@ func TestPGRawPartitions_RuntimeDoorIsNarrow(t *testing.T) {
 		if err := tx.QueryRow(ctx, `SELECT current_user, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)`).Scan(&who, &super); err != nil {
 			t.Fatal(err)
 		}
-		if who != "cp_runtime" || super {
-			t.Fatalf("control: expected non-superuser cp_runtime, got %s super=%v", who, super)
+		if who != "verify_app" || super {
+			t.Fatalf("control: expected non-superuser verify_app, got %s super=%v", who, super)
 		}
 	})
 
 	// Allowed: the one door.
 	inRuntimeTx(t, dsn, func(ctx context.Context, tx pgx.Tx) {
 		var n int
-		if err := tx.QueryRow(ctx, `SELECT ensure_verification_raw_partitions(1)`).Scan(&n); err != nil {
-			t.Fatalf("cp_runtime must be able to call ensure_verification_raw_partitions: %v", err)
+		if err := tx.QueryRow(ctx, `SELECT verify.ensure_verification_raw_partitions(1)`).Scan(&n); err != nil {
+			t.Fatalf("verify_app must be able to call ensure_verification_raw_partitions: %v", err)
 		}
 	})
 
 	denied := []struct{ name, sql, want string }{
-		{"core with caller-supplied time", `SELECT ensure_verification_raw_partitions_at(now(), 1)`, "42501"},
-		{"raw CREATE PARTITION", `CREATE TABLE verification_raw_2099_01 PARTITION OF verification_raw FOR VALUES FROM ('2099-01-01') TO ('2099-02-01')`, "42501"},
-		{"DROP a partition", `DROP TABLE verification_raw_2026_07`, "42501"},
-		{"DELETE rows", `DELETE FROM verification_raw`, "42501"},
-		{"UPDATE rows", `UPDATE verification_raw SET raw = NULL`, "42501"},
-		{"months_ahead out of range", `SELECT ensure_verification_raw_partitions(121)`, "22023"},
+		{"core with caller-supplied time", `SELECT verify.ensure_verification_raw_partitions_at(now(), 1)`, "42501"},
+		{"raw CREATE PARTITION", `CREATE TABLE verify.verification_raw_2099_01 PARTITION OF verify.verification_raw FOR VALUES FROM ('2099-01-01') TO ('2099-02-01')`, "42501"},
+		{"DROP a partition", `DROP TABLE verify.verification_raw_2026_07`, "42501"},
+		{"DELETE rows", `DELETE FROM verify.verification_raw`, "42501"},
+		{"UPDATE rows", `UPDATE verify.verification_raw SET raw = NULL`, "42501"},
+		{"months_ahead out of range", `SELECT verify.ensure_verification_raw_partitions(121)`, "22023"},
 	}
 	for _, d := range denied {
 		d := d
@@ -296,19 +306,19 @@ func TestPGRawPartitions_RuntimeDoorIsNarrow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close(ctx)
-	if _, err := conn.Exec(ctx, `SELECT ensure_verification_raw_partitions_at(now(), 2)`); err != nil {
+	if _, err := conn.Exec(ctx, `SELECT verify.ensure_verification_raw_partitions_at(now(), 2)`); err != nil {
 		t.Fatal(err)
 	}
 	var sel, ins, upd, del bool
 	if err := conn.QueryRow(ctx, `
-		SELECT has_table_privilege('cp_runtime', p, 'SELECT'), has_table_privilege('cp_runtime', p, 'INSERT'),
-		       has_table_privilege('cp_runtime', p, 'UPDATE'), has_table_privilege('cp_runtime', p, 'DELETE')
-		FROM (SELECT 'verification_raw_' || to_char((date_trunc('month', now() AT TIME ZONE 'UTC') + interval '2 months'), 'YYYY_MM') AS p) s`).
+		SELECT has_table_privilege('verify_app', p, 'SELECT'), has_table_privilege('verify_app', p, 'INSERT'),
+		       has_table_privilege('verify_app', p, 'UPDATE'), has_table_privilege('verify_app', p, 'DELETE')
+		FROM (SELECT 'verify.verification_raw_' || to_char((date_trunc('month', now() AT TIME ZONE 'UTC') + interval '2 months'), 'YYYY_MM') AS p) s`).
 		Scan(&sel, &ins, &upd, &del); err != nil {
 		t.Fatal(err)
 	}
 	if !sel || !ins || upd || del {
-		t.Fatalf("new partition grants for cp_runtime must be SELECT+INSERT only, got select=%v insert=%v update=%v delete=%v", sel, ins, upd, del)
+		t.Fatalf("new partition grants for verify_app must be SELECT+INSERT only, got select=%v insert=%v update=%v delete=%v", sel, ins, upd, del)
 	}
 }
 
@@ -338,7 +348,7 @@ func TestPGRawPartitions_BoundsAreUTCMonthAligned(t *testing.T) {
 	if _, err := conn.Exec(ctx, `SET TIME ZONE 'Asia/Tokyo'`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := conn.Exec(ctx, `SELECT ensure_verification_raw_partitions_at('2027-03-10 12:00:00+00', 2)`); err != nil {
+	if _, err := conn.Exec(ctx, `SELECT verify.ensure_verification_raw_partitions_at('2027-03-10 12:00:00+00', 2)`); err != nil {
 		t.Fatal(err)
 	}
 	parts, err := testpg.Parts(ctx, dsn)

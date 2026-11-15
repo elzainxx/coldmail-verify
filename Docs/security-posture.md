@@ -59,13 +59,13 @@ memory, so host hardening and core-dump suppression are part of custody. The que
   `TestAddrCipher_CiphertextContainsNoPlaintext` fails if a ciphertext column ever contains the address.
   A backup therefore holds ciphertext only; the restore-into-isolation drill that proves it is
   real-world-gated ([`future-work.md`](future-work.md) B8).
-- **The LOG is append-only by grant.** `cp_runtime` has INSERT+SELECT only on `verifications`,
+- **The LOG is append-only by grant.** `verify_app` has INSERT+SELECT only on `verifications`,
   `verification_raw`, `node_audits`, `work_item_attempts`, `external_calls` and `send_outcomes`
   (migrations 0005, 0007, 0009, 0011, 0012); the Go `store.Store` interface offers no update or delete of
   a verdict. **Residual, stated plainly:** this is immutability by *grant*, not by write-once media. Whoever
-  holds `cp_admin` (DDL/grant-admin, a separate break-glass role) can re-grant and rewrite history. An
+  holds `verify_admin` (the break-glass table-privilege role, no login) or `verify_owner` (owns the objects: DDL and re-granting) can rewrite history. An
   external tamper-evidence checkpoint is an open owner decision ([`future-work.md`](future-work.md) FW-9);
-  the audit of who used `cp_admin` depends on the unbuilt admin-audit log (FW-1).
+  the audit of who used `verify_admin` depends on the unbuilt admin-audit log (FW-1).
 - **Third-party egress.** The vendor layer is *off*. It needs three independent affirmative switches
   (`TM_EXTERNAL_DPA_CONFIRMED=true`, `TM_FALLBACK_MODE=enabled`, a `TM_VENDOR_KEYS` entry); any one
   missing ⇒ no address leaves. `TM_FALLBACK_MODE=off` is the global panic button. `external_calls`
@@ -93,7 +93,7 @@ memory, so host hardening and core-dump suppression are part of custody. The que
   ([ADR-0001](adr/ADR-0001-outcome-feed-authentication.md), ADR-0013).
 - **Operator actions** (pull a kill-switch rung, promote a mutator, flip `port25_open`) are *not yet*
   per-actor audited: that is DR-3 ([`future-work.md`](future-work.md) FW-1). Until it is built they are
-  config/env changes and `cp_admin` writes, attributable only by the host's own access logs.
+  config/env changes and `verify_admin` writes, attributable only by the host's own access logs.
 
 ## 5. The verifier node
 
@@ -173,8 +173,8 @@ The node probes whatever mail host a user-supplied domain publishes, so its cont
 | Gap | Effect today | Tracked |
 |---|---|---|
 | **No admin-audit log** (DR-3) | Manual control-plane actions have no per-actor record | [`future-work.md`](future-work.md) FW-1; go-live G0.2 |
-| **No operator command for `port25_open`** | A node cannot become `:smtp`-eligible without a `cp_admin` write | FW-2 |
-| **A `cp_admin` holder can rewrite the LOG** | Immutability is by grant, not write-once media | FW-9 (owner decision) |
+| **No operator command for `port25_open`** | A node cannot become `:smtp`-eligible without a `verify_admin` write | FW-2 |
+| **A `verify_admin` holder can rewrite the LOG** | Immutability is by grant, not write-once media | FW-9 (owner decision) |
 | **No migration version tracking** | Which migrations a database has run is not recorded | FW-3 |
 | **Brakes have no timeout and no authenticated confirm** | They stay held until a human acts | FW-8 (owner decision) |
 | **The egress firewall and short hostname are not installed anywhere yet** | They are shipped and gated, but the real box does not exist | go-live G1.4, G1.5 |

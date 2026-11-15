@@ -1,7 +1,7 @@
 # Install and deploy — from a clean checkout to a running system
 
 **Status:** LIVE. Commands, env var names, ports and counts were checked against the code on
-2026-11-13 (15 migrations, control-plane default listen `:8080`, node `:3000`). Read
+2026-11-13 (control-plane default listen `:8080`, node `:3000`); the migration count (16) and the database roles were brought up to migration `0016` on 2026-11-15. Read
 [`architecture.md`](architecture.md) first for what you are installing; operate it with
 [`operator-runbook.md`](operator-runbook.md); follow the ordered, status-marked path to live in
 [`go-live-checklist.md`](go-live-checklist.md). The deep per-phase design is in [`history/`](history/).
@@ -33,7 +33,7 @@ go vet ./...
 
 # A throwaway Postgres for the store + append-only integration tests:
 docker run -d --name cp-pg -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=cptest -p 5432:5432 postgres:16-alpine
-# Apply every migration in order (0001 … 0015):
+# Apply every migration in order (0001 … 0016), ONCE (re-running 0001–0015 on a migrated database is not supported, see migrations/README.md):
 for f in $(ls migrations/[0-9][0-9][0-9][0-9]_*.sql | sort); do
   docker exec -i cp-pg psql -U postgres -d cptest -v ON_ERROR_STOP=1 -f - < "$f"
 done
@@ -153,7 +153,20 @@ see [`security-posture.md`](security-posture.md) §2):
 A template with every secret and non-secret knob is `control-plane/config/secrets.example.env`; the full
 list of every dial and flag is [`config-reference.md`](config-reference.md) (generated).
 
-Apply the migrations **in order, `0001` … `0015`** (the loop in §2), then start the control-plane.
+Apply the migrations **in order, `0001` … `0016`** (the loop in §2), then start the control-plane.
+
+**The runtime login (since `0016`).** The migrations create module 1's tables in schema `verify`, owned by the no-login role `verify_owner`, and make `verify_app` a `LOGIN` role holding only the runtime privileges. Give it a password **out of band** (never in a migration) and point `TM_DATABASE_URL` at it:
+
+```sql
+-- once, as the role that ran the migrations (a superuser, or Supabase's `postgres`)
+ALTER ROLE verify_app PASSWORD '<generated, never committed>';
+```
+
+```
+TM_DATABASE_URL=postgres://verify_app:<password>@<host>:5432/<db>
+```
+
+The control plane writes every statement `verify.`-qualified and sets no `search_path` or role, so the DSN needs no extra parameters. The dev quick-start above connects as the superuser `postgres`, which also works (it sees schema `verify`); production should not. `verify_app` cannot do DDL, cannot `UPDATE`/`DELETE` the verdict log, and cannot create anything in the schema; the manual DDL a runbook step needs runs as `verify_owner` (`SET ROLE verify_owner`), see [`operator-runbook.md`](operator-runbook.md) §8.
 **Verify:**
 
 ```bash
@@ -221,8 +234,8 @@ or the system default — replacing the mock ports.
 code changes.
 
 1. **Egress-25 smoke test, then set the node's `port25_open=true`.** ⚠ There is no operator/env/admin command
-   for this yet ([`future-work.md`](future-work.md) FW-2). Interim, as `cp_admin`:
-   `UPDATE nodes SET port25_open=true WHERE id='…'`. Until it is true the node is not `:smtp`-eligible.
+   for this yet ([`future-work.md`](future-work.md) FW-2). Interim, as `verify_admin` (`SET ROLE verify_admin` from a session that may; the role has no login):
+   `UPDATE verify.nodes SET port25_open=true WHERE id='…'`. Until it is true the node is not `:smtp`-eligible.
 2. **Point the box at real config** (`SMTP_PORT=25`, real `DNS`) and `POST /v1/config/reload` → a new
    `config_fingerprint` (which naturally invalidates a mock-era cache).
 3. **Set the brain's node descriptor:** `TM_NODE_ID`, `TM_NODE_BASE_URL=<private-network address>`,

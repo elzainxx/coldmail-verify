@@ -211,10 +211,10 @@ dated in a month with no partition is rejected** with `SQLSTATE 23514` ("no part
 verdict write fails.** Migration `0001` created only 2026-07..09; this is what keeps it from happening
 again ([ADR-0017](adr/ADR-0017-raw-partition-maintenance.md)).
 
-**What runs by itself.** The control-plane calls `ensure_verification_raw_partitions(n)` at startup and then
+**What runs by itself.** The control-plane calls `verify.ensure_verification_raw_partitions(n)` at startup and then
 every `TM_RAW_PARTITION_MAINTAIN_INTERVAL_SECONDS` (default 6 h), keeping the current month plus
 `TM_RAW_PARTITION_MONTHS_AHEAD` (default 3) future months. It is idempotent. Migration `0014` must be
-applied first: the runtime role gets the function from it and gains no other DDL.
+applied first (and `0016`, which rebuilds the function in schema `verify`): the runtime role `verify_app` gets the function from them and gains no other DDL.
 
 **What to watch.** One log line per failure, and it names the consequence:
 `raw-partitions: maintenance FAILED (...) — verification_raw will run out of partitions ...`. A failing
@@ -223,16 +223,21 @@ week* alert, not a page — unless the line appears together with `SQLSTATE 2351
 case it is already a page. Created partitions log `raw-partitions: created N ...`.
 
 **If the cliff has already been hit** (writes failing with 23514): apply `0014` if it is not applied, then
-restart the control-plane (tick 0 creates the partitions within seconds of startup), or as `cp_admin` run
-`SELECT ensure_verification_raw_partitions_at(now(), 3);`. Verdicts whose write failed during the gap were not logged
+restart the control-plane (tick 0 creates the partitions within seconds of startup), or call the runtime door by
+hand, as `verify_app` or as any role that may `SET ROLE` to it: `SELECT verify.ensure_verification_raw_partitions(3);`
+(it is `SECURITY DEFINER`, owned by `verify_owner`, so it creates the partitions with the owner's rights). The
+admin core `verify.ensure_verification_raw_partitions_at(now(), 3)` is `SECURITY INVOKER`: running it **as
+`verify_admin` does not work** (that role owns nothing, and creating a partition needs ownership of
+`verify.verification_raw` and `CREATE` on schema `verify`, which only `verify_owner` has), so the core needs
+`SET ROLE verify_owner;` first. Verdicts whose write failed during the gap were not logged
 and callers should re-submit them (this document does not know what each caller received).
 
 **What does NOT run by itself: retention.** Dropping old partitions (`DROP PARTITION` after ~90 days,
-P1 §3.2.6) is still a manual `cp_admin` action. Nothing is dropped automatically.
+P1 §3.2.6) is still a manual action, and it needs `verify_owner` (`SET ROLE verify_owner; DROP TABLE verify.verification_raw_YYYY_MM;`): `verify_admin` owns nothing and cannot drop a partition. Nothing is dropped automatically.
 
 **A deployment whose database default time zone was not UTC when `0001` ran** should check that
 `verification_raw_2026_09` ends exactly at `2026-10-01 00:00:00+00` (`SELECT pg_get_expr(relpartbound, oid)
-FROM pg_class WHERE relname = 'verification_raw_2026_09'`) before trusting the first auto-created month;
+FROM pg_class WHERE relname = 'verification_raw_2026_09' AND relnamespace = 'verify'::regnamespace`) before trusting the first auto-created month;
 see the stated assumption in ADR-0017.
 
 ---
@@ -248,14 +253,15 @@ rolling forward. (Originally written 2026-08-07 as `history/go-live-rollback-pos
 
 ### 9.1 The measured facts
 
-Measured against the tree on 2026-11-13 — not inferred:
+Measured against the tree — the migration and `REVOKE` rows re-measured on 2026-11-15 over 16 migrations, the others on 2026-11-13; not inferred:
 
 | Fact | Value |
 |---|---|
-| Migrations | **15** (`0001` … `0015`), applied by `for f in $(ls migrations/[0-9][0-9][0-9][0-9]_*.sql \| sort); do psql -f "$f"; done`, the same way CI does it |
+| Migrations | **16** (`0001` … `0016`), applied by `for f in $(ls migrations/[0-9][0-9][0-9][0-9]_*.sql \| sort); do psql -f "$f"; done`, the same way CI does it |
 | `.down.sql` files, or any other rollback mechanism | **0** — none |
 | A `schema_migrations` / version-tracking table | **none** (`migrations/README.md` only recommends one) |
-| `REVOKE` statements | **19** in 10 files (`grep -cE '^\s*REVOKE\b' migrations/*.sql`): 17 are `REVOKE … FROM cp_runtime` tightenings (the least-privilege pattern: `GRANT SELECT, INSERT … TO cp_runtime; REVOKE UPDATE, DELETE … FROM cp_runtime;`), and 2 (in `0014`) remove the default `PUBLIC` execute on two functions |
+| `REVOKE` statements | **22** in 11 files (`grep -cE '^\s*REVOKE\b' migrations/*.sql`): 17 are `REVOKE … FROM cp_runtime` tightenings (the least-privilege pattern: `GRANT SELECT, INSERT … TO cp_runtime; REVOKE UPDATE, DELETE … FROM cp_runtime;`), 2 (in `0014`) remove the default `PUBLIC` execute on two functions, and 3 (in `0016`) remove the default `PUBLIC` access to schema `verify` and to the two functions that file creates (`cp_runtime` is the role `0016` renames to `verify_app`) |
+| Re-running `0001` … `0015` on a database that already ran `0016` | **not supported**: they are unqualified and `IF NOT EXISTS`, so they re-create empty module-1 tables in `public`; `0016` then stops with SQLSTATE `42P07` naming the table, before moving anything. Check the `public` copy is empty, drop it, re-run `0016` |
 | `ALTER TABLE … DROP CONSTRAINT` | **4**: `0008` (`nodes.valid_status`), `0012` (`send_outcomes.send_outcome_calibration_class`), `0015` (`verifications.valid_reason` and `cache.valid_reason`) — each drops, then recreates a **widened** constraint |
 
 The 2026-08-07 write-up reported "15 REVOKE across 8 migrations, 2 DROP CONSTRAINT" at 13 migrations; that figure
@@ -298,7 +304,7 @@ schemas. The hazard applies to every migration in the repo.
 
 ### 9.5 What this does not claim
 
-It does not claim a migration is broken — all 15 apply cleanly, in order, on a fresh database, in CI on every push. It
-does not claim forward-only is the wrong design. And it does not propose 15 `.down.sql` files: most would be trivial or
+It does not claim a migration is broken — all 16 apply cleanly, in order, on a fresh database, in CI on every push. It
+does not claim forward-only is the wrong design. And it does not propose 16 `.down.sql` files: most would be trivial or
 dishonest (a down-migration of a partitioned append-only table is a data-loss script wearing a rollback costume). The
 actionable item is tracking, so you always know what a given database has run.

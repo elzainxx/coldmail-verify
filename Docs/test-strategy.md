@@ -89,7 +89,14 @@ CI surfaces these as **explicit `PROVABLE-ONLY-AT-ROLLOUT` markers**, not skippe
 ## 5. CI shape
 
 Per PROJECT_RULES.md §7, every change runs (see [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml)):
-1. **control-plane:** `go build ./...`, `go vet ./...`, `go test -v ./...` against a real Postgres
+1. **control-plane:** `go build ./...`, `go vet ./...`, `go test -v ./...` against a real Postgres. The suite runs with the
+   DEFAULT `search_path` (no test DSN sets one, `testpg` sets neither a role nor a path): since migration `0016` public holds
+   nothing of module 1, so a SQL statement that forgets its `verify.` prefix fails with 42P01 instead of passing by accident.
+   `internal/store/verify_schema_test.go` pins `0016` itself (nothing left in `public`, every object owned by `verify_owner`, the
+   roles and schema ACL, every pre-`0016` privilege carried over plus exactly the two declared additions) and
+   `internal/store/verify_runtime_test.go` drives the real store over a real `verify_app` LOGIN, each with a paired control.
+   They are not build-tagged and run whenever `TM_TEST_DATABASE_URL` is set. Roles are cluster-wide, so `testpg` holds one
+   `pg_advisory_lock` while migrations run and any test that reads or changes role state takes it too
 2. **every declared test actually EXECUTED** — a skip is a shortfall, not a pass; two-tiered so the
    PENDING GAP harness below stays legal and everything else must run
    (`scripts/check-test-execution.sh`, plus its paired self-test)

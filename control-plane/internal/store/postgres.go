@@ -154,7 +154,7 @@ func knownDSNKey(s string) bool {
 //	dsn                                        message                                    suppressed by
 //	host=h port=5432 dbname=verifydb …         dial tcp 10.0.0.5:5432: connection refused  "5432"
 //	host=db.internal port=5432 dbname=…        lookup db.internal: no such host            "db.internal"
-//	host=h … user=cp_runtime password = …      password authentication failed for "…"      "cp_runtime"
+//	host=h … user=verify_app password = …      password authentication failed for "…"      "verify_app"
 //	host=h … sslmode=require                   failed to configure TLS (sslmode invalid)   "require"
 //	host=h port=5432 dbname=verifydb user=…    failed to connect to `user=… database=…`     "verifydb"
 //
@@ -243,7 +243,7 @@ func (p *PG) Close()                         { p.pool.Close() }
 // (e.g. an external-package E2E test that seeds/inspects/cleans rows the append-only interface
 // deliberately can't). It is NOT part of the Store interface and MUST NOT be used on the request
 // path — the append-only Door-2 discipline lives in the interface shape + the DB grants, both of
-// which still apply to whatever this pool runs (cp_runtime cannot UPDATE/DELETE the LOG regardless).
+// which still apply to whatever this pool runs (verify_app cannot UPDATE/DELETE the LOG regardless).
 func (p *PG) Pool() *pgxpool.Pool { return p.pool }
 
 // nullBytes / nullStr map Go zero values to SQL NULL (no empty-string sentinels — §3.2.7).
@@ -285,7 +285,7 @@ func (p *PG) GetCachedVerdict(ctx context.Context, emailHash []byte, cfg string)
 	const q = `
 SELECT email_hash, config_fingerprint, domain, mx_provider, hash_scheme,
        status, reason, confidence, recommendation, flags, signals, cached_at, expires_at
-FROM cache WHERE email_hash=$1 AND config_fingerprint=$2 AND expires_at > now()`
+FROM verify.cache WHERE email_hash=$1 AND config_fingerprint=$2 AND expires_at > now()`
 	var v CachedVerdict
 	var mxProvider *string
 	var flagsJSON, signalsJSON []byte
@@ -321,7 +321,7 @@ func (p *PG) PutCachedVerdict(ctx context.Context, v CachedVerdict) error {
 		return fmt.Errorf("store: marshal signals: %w", err)
 	}
 	const q = `
-INSERT INTO cache (
+INSERT INTO verify.cache (
   email_hash, config_fingerprint, domain, mx_provider, hash_scheme,
   status, reason, confidence, recommendation, flags, signals, cached_at, expires_at
 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
@@ -342,7 +342,7 @@ ON CONFLICT (email_hash, config_fingerprint) DO UPDATE SET
 func (p *PG) existsDomain(ctx context.Context, table, domain string) (bool, error) {
 	var one int
 	// table is a fixed internal literal (never user input) — no injection surface.
-	err := p.pool.QueryRow(ctx, "SELECT 1 FROM "+table+" WHERE domain=$1", domain).Scan(&one)
+	err := p.pool.QueryRow(ctx, "SELECT 1 FROM verify."+table+" WHERE domain=$1", domain).Scan(&one)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -361,7 +361,7 @@ func (p *PG) IsSpamTrap(ctx context.Context, domain string) (bool, error) {
 
 func (p *PG) CatchAllState(ctx context.Context, domain string) (bool, bool, error) {
 	var isCatchall *bool
-	err := p.pool.QueryRow(ctx, "SELECT is_catchall FROM catchall_domains WHERE domain=$1", domain).Scan(&isCatchall)
+	err := p.pool.QueryRow(ctx, "SELECT is_catchall FROM verify.catchall_domains WHERE domain=$1", domain).Scan(&isCatchall)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, false, nil // never probed (§4.3 tri-state)
 	}
@@ -375,7 +375,7 @@ func (p *PG) CatchAllState(ctx context.Context, domain string) (bool, bool, erro
 }
 
 // SetCatchAll upserts a domain's catch-all conclusion (P2 §5.6 — brain-side; migration 0006
-// grants cp_runtime INSERT+UPDATE, never DELETE). A nil isCatchall (inconclusive) is a NO-OP:
+// grants verify_app INSERT+UPDATE, never DELETE). A nil isCatchall (inconclusive) is a NO-OP:
 // it must never overwrite a previously-determined value with unknown (§5.6). checked_at is now();
 // method ∈ probe|seed|manual. On conflict it updates is_catchall/detected_at/method/expires_at.
 func (p *PG) SetCatchAll(ctx context.Context, domain string, isCatchall *bool, method string, expiresAt time.Time) error {
@@ -383,7 +383,7 @@ func (p *PG) SetCatchAll(ctx context.Context, domain string, isCatchall *bool, m
 		return nil // inconclusive → never overwrite a known value with NULL (§5.6)
 	}
 	const q = `
-INSERT INTO catchall_domains (domain, is_catchall, detected_at, method, expires_at)
+INSERT INTO verify.catchall_domains (domain, is_catchall, detected_at, method, expires_at)
 VALUES ($1, $2, now(), $3, $4)
 ON CONFLICT (domain) DO UPDATE SET
   is_catchall = EXCLUDED.is_catchall,
@@ -401,12 +401,12 @@ ON CONFLICT (domain) DO UPDATE SET
 }
 
 func (p *PG) GetDefaultPolicy(ctx context.Context) (PolicyRow, error) {
-	const q = `SELECT key, version, definition, is_default FROM policies WHERE is_default = true`
+	const q = `SELECT key, version, definition, is_default FROM verify.policies WHERE is_default = true`
 	return p.scanPolicy(p.pool.QueryRow(ctx, q))
 }
 
 func (p *PG) GetPolicy(ctx context.Context, key string, version int) (PolicyRow, error) {
-	const q = `SELECT key, version, definition, is_default FROM policies WHERE key=$1 AND version=$2`
+	const q = `SELECT key, version, definition, is_default FROM verify.policies WHERE key=$1 AND version=$2`
 	return p.scanPolicy(p.pool.QueryRow(ctx, q, key, version))
 }
 
@@ -417,7 +417,7 @@ func (p *PG) GetPolicy(ctx context.Context, key string, version int) (PolicyRow,
 func (p *PG) EnsurePolicy(ctx context.Context, key string, version int, definition []byte, asDefault bool) error {
 	// Insert the policy row if absent (immutable — ON CONFLICT DO NOTHING).
 	if _, err := p.pool.Exec(ctx,
-		`INSERT INTO policies (key, version, definition, is_default) VALUES ($1,$2,$3,false)
+		`INSERT INTO verify.policies (key, version, definition, is_default) VALUES ($1,$2,$3,false)
 		 ON CONFLICT (key, version) DO NOTHING`,
 		key, version, definition,
 	); err != nil {
@@ -429,9 +429,9 @@ func (p *PG) EnsurePolicy(ctx context.Context, key string, version int, definiti
 	// Set as default only if there is no default yet (the partial-unique index guarantees at
 	// most one; this avoids fighting an operator-chosen default).
 	if _, err := p.pool.Exec(ctx,
-		`UPDATE policies SET is_default=true
+		`UPDATE verify.policies SET is_default=true
 		 WHERE key=$1 AND version=$2
-		   AND NOT EXISTS (SELECT 1 FROM policies WHERE is_default=true)`,
+		   AND NOT EXISTS (SELECT 1 FROM verify.policies WHERE is_default=true)`,
 		key, version,
 	); err != nil {
 		return fmt.Errorf("store: set default policy: %w", err)
@@ -470,7 +470,7 @@ func (p *PG) AppendNodeAudit(ctx context.Context, row NodeAuditRow) error {
 	defer tx.Rollback(ctx) //nolint:errcheck // rollback after a successful commit is a no-op
 
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO node_audits (id, node_id, audited_at, audit_status, warnings, current_host_ip)
+		`INSERT INTO verify.node_audits (id, node_id, audited_at, audit_status, warnings, current_host_ip)
 		 VALUES ($1,$2,$3,$4,$5,$6)`,
 		row.ID, row.NodeID, row.AuditedAt.UTC(), row.AuditStatus, warningsJSON, nullStr(row.CurrentHostIP),
 	); err != nil {
@@ -480,7 +480,7 @@ func (p *PG) AppendNodeAudit(ctx context.Context, row NodeAuditRow) error {
 	// This never creates the row — an audit for an unregistered node is a no-op on the summary
 	// (the history row is still recorded). The gate reads GetNodeHealth, backed by these columns.
 	if _, err := tx.Exec(ctx,
-		`UPDATE nodes SET audit_status=$2, last_audit_at=$3 WHERE id=$1`,
+		`UPDATE verify.nodes SET audit_status=$2, last_audit_at=$3 WHERE id=$1`,
 		row.NodeID, row.AuditStatus, row.AuditedAt.UTC(),
 	); err != nil {
 		return fmt.Errorf("store: update node audit summary: %w", err)
@@ -494,9 +494,9 @@ func (p *PG) GetNodeHealth(ctx context.Context, nodeID string) (NodeHealth, bool
 	const q = `
 SELECT n.status, COALESCE(n.audit_status,''), n.last_audit_at, COALESCE(n.port25_open,false),
        COALESCE(host(a.current_host_ip),'')
-FROM nodes n
+FROM verify.nodes n
 LEFT JOIN LATERAL (
-  SELECT current_host_ip FROM node_audits WHERE node_id = n.id ORDER BY audited_at DESC LIMIT 1
+  SELECT current_host_ip FROM verify.node_audits WHERE node_id = n.id ORDER BY audited_at DESC LIMIT 1
 ) a ON true
 WHERE n.id=$1`
 	var h NodeHealth
@@ -519,7 +519,7 @@ WHERE n.id=$1`
 // It preserves audit_status/last_audit_at (a separate write path). Never deletes (migration 0007).
 func (p *PG) UpsertNodeState(ctx context.Context, nodeID, baseURL, status string, port25Open bool) error {
 	const q = `
-INSERT INTO nodes (id, base_url, status, port25_open, enabled)
+INSERT INTO verify.nodes (id, base_url, status, port25_open, enabled)
 VALUES ($1,$2,$3,$4,true)
 ON CONFLICT (id) DO UPDATE SET
   base_url = EXCLUDED.base_url,
@@ -546,7 +546,7 @@ func (p *PG) ReserveWarmupSlot(ctx context.Context, nodeID string, windowStart t
 	// Single statement: INSERT ... ON CONFLICT DO UPDATE with a guard that only increments below
 	// cap, and RETURNING the resulting count so we know whether the reservation was granted.
 	const q = `
-INSERT INTO node_warmup (node_id, window_start, count, cap, updated_at)
+INSERT INTO verify.node_warmup (node_id, window_start, count, cap, updated_at)
 VALUES ($1, $2, 1, $3, now())
 ON CONFLICT (node_id, window_start) DO UPDATE SET
   count = node_warmup.count + 1,
@@ -561,7 +561,7 @@ RETURNING count, cap`
 		// denied decision (cap<=0 was already handled above, so a row exists here).
 		var curCount, curCap int
 		rerr := p.pool.QueryRow(ctx,
-			`SELECT count, cap FROM node_warmup WHERE node_id=$1 AND window_start=$2`, nodeID, ws).
+			`SELECT count, cap FROM verify.node_warmup WHERE node_id=$1 AND window_start=$2`, nodeID, ws).
 			Scan(&curCount, &curCap)
 		if rerr != nil {
 			return WarmupDecision{}, fmt.Errorf("store: warmup read-after-deny: %w", rerr)
@@ -602,7 +602,7 @@ func (p *PG) reserveRate(ctx context.Context, nodeID, providerBucket string, pp 
 	// Idempotent pre-create: a never-seen bucket starts FULL at capacity (mirrors Mem). ON CONFLICT
 	// DO NOTHING makes concurrent first-touches safe — the loser is a no-op, not a unique_violation.
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO rate_budgets (node_id, provider_bucket, tokens, capacity, refill_per_sec, last_refill_at, updated_at)
+		`INSERT INTO verify.rate_budgets (node_id, provider_bucket, tokens, capacity, refill_per_sec, last_refill_at, updated_at)
 		 VALUES ($1,$2,$3,$4,$5,$6,now())
 		 ON CONFLICT (node_id, provider_bucket) DO NOTHING`,
 		nodeID, providerBucket, pp.Capacity, pp.Capacity, pp.RefillPerSec, now.UTC(),
@@ -614,7 +614,7 @@ func (p *PG) reserveRate(ctx context.Context, nodeID, providerBucket string, pp 
 	var stored float64
 	var lastRefill time.Time
 	if err := tx.QueryRow(ctx,
-		`SELECT tokens, last_refill_at FROM rate_budgets WHERE node_id=$1 AND provider_bucket=$2 FOR UPDATE`,
+		`SELECT tokens, last_refill_at FROM verify.rate_budgets WHERE node_id=$1 AND provider_bucket=$2 FOR UPDATE`,
 		nodeID, providerBucket).Scan(&stored, &lastRefill); err != nil {
 		return RateDecision{}, fmt.Errorf("store: rate select: %w", err)
 	}
@@ -630,7 +630,7 @@ func (p *PG) reserveRate(ctx context.Context, nodeID, providerBucket string, pp 
 	// Persist the refill + any decrement. capacity/refill are refreshed from the caller's params (a
 	// policy edit takes effect next call, mirroring ReserveWarmupSlot's per-call cap).
 	if _, err := tx.Exec(ctx,
-		`UPDATE rate_budgets SET tokens=$3, capacity=$4, refill_per_sec=$5, last_refill_at=$6, updated_at=now()
+		`UPDATE verify.rate_budgets SET tokens=$3, capacity=$4, refill_per_sec=$5, last_refill_at=$6, updated_at=now()
 		 WHERE node_id=$1 AND provider_bucket=$2`,
 		nodeID, providerBucket, tokens, pp.Capacity, pp.RefillPerSec, now.UTC(),
 	); err != nil {
@@ -665,7 +665,7 @@ SELECT host(verifier_ip) AS ip,
        count(*)                                                        AS attempts,
        count(*) FILTER (WHERE reason = 'smtp_blocked')                 AS blocked,
        count(*) FILTER (WHERE reason IN ('smtp_timeout','connection_failed')) AS timeouts
-FROM verifications
+FROM verify.verifications
 WHERE from_cache = false
   AND verifier_ip IS NOT NULL
   AND checked_at >= $1
@@ -701,7 +701,7 @@ func (p *PG) MetricRowsSince(ctx context.Context, since time.Time, limit int) ([
 	const q = `
 SELECT checked_at, status, reason, COALESCE(mx_provider,''), COALESCE(host(verifier_ip),''),
        from_cache, COALESCE(latency_ms,0), signals
-FROM verifications
+FROM verify.verifications
 WHERE checked_at >= $1
 ORDER BY checked_at DESC
 LIMIT $2`
@@ -736,7 +736,7 @@ LIMIT $2`
 // transition. It never touches port25_open/audit columns. WHERE id=$1 matching 0 rows (unregistered
 // node) is a no-op (mirrors Mem + AppendNodeAudit's summary posture). Never deletes.
 func (p *PG) SetNodeStatus(ctx context.Context, nodeID, status string) error {
-	if _, err := p.pool.Exec(ctx, `UPDATE nodes SET status=$2 WHERE id=$1`, nodeID, status); err != nil {
+	if _, err := p.pool.Exec(ctx, `UPDATE verify.nodes SET status=$2 WHERE id=$1`, nodeID, status); err != nil {
 		return fmt.Errorf("store: set node status: %w", err)
 	}
 	return nil
@@ -746,7 +746,7 @@ func (p *PG) SetNodeStatus(ctx context.Context, nodeID, status string) error {
 // canary recovery). Upserts the window row (idempotent).
 func (p *PG) ResetWarmup(ctx context.Context, nodeID string, windowStart time.Time, cap int) error {
 	const q = `
-INSERT INTO node_warmup (node_id, window_start, count, cap, updated_at)
+INSERT INTO verify.node_warmup (node_id, window_start, count, cap, updated_at)
 VALUES ($1, $2, 0, $3, now())
 ON CONFLICT (node_id, window_start) DO UPDATE SET count = 0, cap = EXCLUDED.cap, updated_at = now()`
 	if _, err := p.pool.Exec(ctx, q, nodeID, windowStart.UTC(), cap); err != nil {
@@ -762,7 +762,7 @@ ON CONFLICT (node_id, window_start) DO UPDATE SET count = 0, cap = EXCLUDED.cap,
 // The caller sealed AddrCiphertext (DR-4) — this store persists ciphertext, never plaintext.
 func (p *PG) EnqueueWorkItem(ctx context.Context, item WorkItemRow) (string, bool, error) {
 	const q = `
-INSERT INTO work_items (
+INSERT INTO verify.work_items (
   id, idempotency_key, job_id, domain, email_hash, policy_key, policy_version,
   config_fingerprint, status, attempt, not_before, addr_ciphertext, created_at
 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
@@ -800,9 +800,9 @@ func (p *PG) DequeueReady(ctx context.Context, workerID string, limit int, now t
 		limit = 10
 	}
 	const q = `
-UPDATE work_items SET status='in_flight', locked_by=$2, locked_at=$3
+UPDATE verify.work_items SET status='in_flight', locked_by=$2, locked_at=$3
 WHERE id IN (
-  SELECT id FROM work_items
+  SELECT id FROM verify.work_items
   WHERE status IN ('ready','waiting_retry') AND not_before <= $3
   ORDER BY domain, not_before
   FOR UPDATE SKIP LOCKED
@@ -859,7 +859,7 @@ func (p *PG) SettleWorkItem(ctx context.Context, itemID, workerID, terminal stri
 	// set to verdict.ID here; the LOG row with that id is inserted in step (1) below within the
 	// same tx, so the FK-less pointer and the row commit atomically — GAP-33.)
 	const casUpdate = `
-UPDATE work_items SET
+UPDATE verify.work_items SET
   status=$5, verification_id=$2, settled_at=$3, addr_ciphertext=NULL, locked_by=NULL, locked_at=NULL
 WHERE id=$1 AND locked_by=$4 AND status='in_flight'`
 	tag, err := tx.Exec(ctx, casUpdate, itemID, verdict.ID, verdict.CheckedAt.UTC(), workerID, terminal)
@@ -878,8 +878,8 @@ WHERE id=$1 AND locked_by=$4 AND status='in_flight'`
 	// (3) If job-owned, bump the denormalized progress counter (cheap display; completion is
 	// authoritative via JobCompletion — GAP-38). Guarded so a NULL job_id is a no-op.
 	if _, err := tx.Exec(ctx,
-		`UPDATE jobs SET settled_count = settled_count + 1
-		 WHERE id = (SELECT job_id FROM work_items WHERE id=$1 AND job_id IS NOT NULL)`,
+		`UPDATE verify.jobs SET settled_count = settled_count + 1
+		 WHERE id = (SELECT job_id FROM verify.work_items WHERE id=$1 AND job_id IS NOT NULL)`,
 		itemID); err != nil {
 		return fmt.Errorf("store: settle job count: %w", err)
 	}
@@ -915,7 +915,7 @@ func (p *PG) RequeueWorkItem(ctx context.Context, itemID, workerID string, notBe
 		inc = 1
 	}
 	const casUpdate = `
-UPDATE work_items SET
+UPDATE verify.work_items SET
   status='waiting_retry', attempt=attempt+$5, not_before=$2, last_reason=$3,
   locked_by=NULL, locked_at=NULL
 WHERE id=$1 AND locked_by=$4 AND status='in_flight'`
@@ -938,7 +938,7 @@ WHERE id=$1 AND locked_by=$4 AND status='in_flight'`
 func (p *PG) ReclaimExpiredLeases(ctx context.Context, leaseTTL time.Duration, now time.Time) (int, error) {
 	cutoff := now.Add(-leaseTTL).UTC()
 	const q = `
-UPDATE work_items SET
+UPDATE verify.work_items SET
   status = CASE WHEN not_before <= $2 THEN 'ready' ELSE 'waiting_retry' END,
   locked_by=NULL, locked_at=NULL
 WHERE status='in_flight' AND locked_at < $1`
@@ -956,7 +956,7 @@ SELECT id, idempotency_key, COALESCE(job_id::text,''), domain, email_hash, polic
        policy_version, config_fingerprint, status, attempt, not_before,
        COALESCE(locked_by,''), COALESCE(last_reason,''), COALESCE(verification_id::text,''),
        addr_ciphertext, created_at
-FROM work_items WHERE id=$1`
+FROM verify.work_items WHERE id=$1`
 	var w WorkItemRow
 	var addrCT []byte
 	err := p.pool.QueryRow(ctx, q, itemID).Scan(
@@ -985,7 +985,7 @@ func (p *PG) CreateJob(ctx context.Context, job JobRow) (string, error) {
 	// platform user is honestly ownerless, and the read predicates make an ownerless row match no
 	// caller (NULL = $2 is NULL, not true), so the fail-safe direction is read-CLOSED.
 	const q = `
-INSERT INTO jobs (id, policy_key, policy_version, status, total_count, settled_count, caller_ref, owner_user_id)
+INSERT INTO verify.jobs (id, policy_key, policy_version, status, total_count, settled_count, caller_ref, owner_user_id)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`
 	if _, err := p.pool.Exec(ctx, q,
 		job.ID, job.PolicyKey, job.PolicyVersion, status, job.TotalCount, job.SettledCount,
@@ -1016,7 +1016,7 @@ func (p *PG) GetJob(ctx context.Context, jobID, ownerUserID string) (JobRow, boo
 SELECT id, policy_key, policy_version, status, total_count, settled_count, submitted_at,
        COALESCE(completed_at, 'epoch'::timestamptz), COALESCE(caller_ref,''),
        COALESCE(owner_user_id::text,'')
-FROM jobs WHERE id=$1 AND owner_user_id=$2`
+FROM verify.jobs WHERE id=$1 AND owner_user_id=$2`
 	var j JobRow
 	var completed time.Time
 	err := p.pool.QueryRow(ctx, q, jobID, nullStr(ownerUserID)).Scan(
@@ -1050,7 +1050,7 @@ FROM jobs WHERE id=$1 AND owner_user_id=$2`
 func (p *PG) JobCompletion(ctx context.Context, jobID, ownerUserID string) (bool, int, int, error) {
 	var total, settled int
 	if err := p.pool.QueryRow(ctx,
-		`SELECT total_count, settled_count FROM jobs WHERE id=$1 AND owner_user_id=$2`,
+		`SELECT total_count, settled_count FROM verify.jobs WHERE id=$1 AND owner_user_id=$2`,
 		jobID, nullStr(ownerUserID)).Scan(&total, &settled); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Covers BOTH "no such job" and "not yours" — indistinguishable by design (the handler
@@ -1061,7 +1061,7 @@ func (p *PG) JobCompletion(ctx context.Context, jobID, ownerUserID string) (bool
 	}
 	var complete bool
 	if err := p.pool.QueryRow(ctx,
-		`SELECT NOT EXISTS(SELECT 1 FROM work_items WHERE job_id=$1 AND status NOT IN ('settled','dead'))`,
+		`SELECT NOT EXISTS(SELECT 1 FROM verify.work_items WHERE job_id=$1 AND status NOT IN ('settled','dead'))`,
 		jobID).Scan(&complete); err != nil {
 		return false, 0, 0, fmt.Errorf("store: job completion authoritative: %w", err)
 	}
@@ -1097,9 +1097,9 @@ func (p *PG) ListJobResults(ctx context.Context, jobID, ownerUserID, cursor stri
 SELECT w.id, w.email_hash,
        v.id, v.status, v.reason, v.confidence, v.recommendation, v.flags, v.signals,
        COALESCE(v.mx_provider,''), COALESCE(v.domain,''), v.policy_key, v.policy_version, v.api_version
-FROM work_items w
-JOIN jobs j ON j.id = w.job_id AND j.owner_user_id = $2
-JOIN verifications v ON v.id = w.verification_id
+FROM verify.work_items w
+JOIN verify.jobs j ON j.id = w.job_id AND j.owner_user_id = $2
+JOIN verify.verifications v ON v.id = w.verification_id
 WHERE w.job_id=$1 AND w.status IN ('settled','dead') AND w.verification_id IS NOT NULL
   AND ($3 = '' OR w.id > $3::uuid)
 ORDER BY w.id
@@ -1153,7 +1153,7 @@ func insertVerificationTx(ctx context.Context, tx pgx.Tx, row VerificationRow, r
 		engineSuccess = row.EngineSuccess
 	}
 	const q = `
-INSERT INTO verifications (
+INSERT INTO verify.verifications (
   id, request_id, checked_at, created_at,
   email_hash, hash_scheme, domain, provider_canonical_hash, local_part_len,
   status, reason, confidence, recommendation, flags, signals, mx_provider,
@@ -1176,7 +1176,7 @@ INSERT INTO verifications (
 	}
 	if raw != nil {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO verification_raw (verification_id, raw, created_at) VALUES ($1,$2,$3)`,
+			`INSERT INTO verify.verification_raw (verification_id, raw, created_at) VALUES ($1,$2,$3)`,
 			raw.VerificationID, raw.Raw, row.CreatedAt.UTC(),
 		); err != nil {
 			return fmt.Errorf("store: settle insert raw: %w", err)
@@ -1209,7 +1209,7 @@ func insertExternalCallTx(ctx context.Context, tx pgx.Tx, c ExternalCallRow) err
 		return fmt.Errorf("store: external call requires an id")
 	}
 	const q = `
-INSERT INTO external_calls (
+INSERT INTO verify.external_calls (
   id, verification_id, work_item_id, job_id, vendor, residue_class, email_hash,
   vendor_status_raw, vendor_confidence_raw, request_id, cost_units, outcome, latency_ms, called_at
 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`
@@ -1236,7 +1236,7 @@ SELECT
   COALESCE(SUM(cost_units) FILTER (WHERE outcome='ok' AND called_at >= $2), 0),
   COALESCE(SUM(cost_units) FILTER (WHERE outcome='ok' AND called_at >= $3), 0),
   COALESCE(SUM(cost_units) FILTER (WHERE outcome='ok' AND $4 <> '' AND job_id::text = $4), 0)
-FROM external_calls
+FROM verify.external_calls
 WHERE vendor = $1`
 	if err := p.pool.QueryRow(ctx, spendQ, vendor, dayStart.UTC(), monthStart.UTC(), jobID).
 		Scan(&s.SpentDay, &s.SpentMonth, &s.SpentJob); err != nil {
@@ -1249,7 +1249,7 @@ SELECT
   COUNT(*) FILTER (WHERE called_at >= $2),
   COUNT(*) FILTER (WHERE outcome='error' AND called_at >= $2),
   COUNT(*) FILTER (WHERE called_at >= $3)
-FROM external_calls
+FROM verify.external_calls
 WHERE vendor = $1 AND called_at >= LEAST($2, $3)`
 	if err := p.pool.QueryRow(ctx, errQ, vendor, errWindowStart.UTC(), minuteStart.UTC()).
 		Scan(&s.Calls, &s.Errors, &s.CallsLastMinute); err != nil {
@@ -1268,7 +1268,7 @@ func insertAttemptTx(ctx context.Context, tx pgx.Tx, a WorkItemAttemptRow) error
 		return fmt.Errorf("store: marshal attempt signals: %w", err)
 	}
 	const q = `
-INSERT INTO work_item_attempts (id, work_item_id, attempt, attempted_at, node_id, verifier_ip, reason, signals, latency_ms)
+INSERT INTO verify.work_item_attempts (id, work_item_id, attempt, attempted_at, node_id, verifier_ip, reason, signals, latency_ms)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`
 	if _, err := tx.Exec(ctx, q,
 		a.ID, a.WorkItemID, a.Attempt, a.AttemptedAt.UTC(), nullStr(a.NodeID), nullStr(a.VerifierIP),
@@ -1293,7 +1293,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`
 // recorded — it authenticates and may submit, but its jobs get a NULL owner and are read-closed.
 func (p *PG) LookupCaller(ctx context.Context, keySHA256 []byte, now time.Time) (string, string, bool, error) {
 	const q = `
-SELECT caller_id, COALESCE(user_id::text,'') FROM api_callers
+SELECT caller_id, COALESCE(user_id::text,'') FROM verify.api_callers
 WHERE key_sha256 = $1
   AND not_before <= $2
   AND (not_after IS NULL OR not_after > $2)

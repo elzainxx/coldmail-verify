@@ -73,8 +73,8 @@ func diff(a, b []string) (onlyA, onlyB []string) {
 }
 
 func TestVocabMirrorsTheDatabaseCheckConstraints(t *testing.T) {
-	dsn := testpg.Scratch(t, 0) // every migration
-	for _, table := range []string{"verifications", "cache"} {
+	dsn := testpg.Scratch(t, 0) // every migration; since 0016 the tables are in schema verify
+	for _, table := range []string{"verify.verifications", "verify.cache"} {
 		inDB := checkReasons(t, dsn, table)
 		onlyVocab, onlyDB := diff(vocabReasons(), inDB)
 		if len(onlyVocab) > 0 || len(onlyDB) > 0 {
@@ -86,8 +86,8 @@ func TestVocabMirrorsTheDatabaseCheckConstraints(t *testing.T) {
 // CONTROL: the check can fail. Through migration 0014 — before ADR-0021 — the database does NOT know non_public_mx, so the mirror above
 // would have been red; 0015 is exactly what turns it green.
 func TestVocabMirror_ControlBeforeMigration0015TheReasonIsRejected(t *testing.T) {
-	dsn := testpg.Scratch(t, 14)
-	for _, table := range []string{"verifications", "cache"} {
+	dsn := testpg.Scratch(t, 14) // a real 0014-state database: 0016 has not run, so the tables are still in public
+	for _, table := range []string{"public.verifications", "public.cache"} {
 		onlyVocab, _ := diff(vocabReasons(), checkReasons(t, dsn, table))
 		if len(onlyVocab) != 1 || onlyVocab[0] != string(vocab.ReasonNonPublicMX) {
 			t.Fatalf("CONTROL FAILED: through 0014, %s should reject exactly non_public_mx, got %v — the mirror check would not detect a missing migration", table, onlyVocab)

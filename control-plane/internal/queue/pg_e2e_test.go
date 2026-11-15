@@ -105,17 +105,17 @@ func TestPGE2E_SubmitDrainSettleResults_MasterInvariant(t *testing.T) {
 	}
 	jobID := res.JobID
 	t.Cleanup(func() {
-		// Owner-role cleanup (cp_runtime can't DELETE).
-		_, _ = pg.Pool().Exec(context.Background(), `DELETE FROM work_item_attempts WHERE work_item_id IN (SELECT id FROM work_items WHERE job_id=$1)`, jobID)
-		_, _ = pg.Pool().Exec(context.Background(), `DELETE FROM verifications WHERE id IN (SELECT verification_id FROM work_items WHERE job_id=$1 AND verification_id IS NOT NULL)`, jobID)
-		_, _ = pg.Pool().Exec(context.Background(), `DELETE FROM work_items WHERE job_id=$1`, jobID)
-		_, _ = pg.Pool().Exec(context.Background(), `DELETE FROM jobs WHERE id=$1`, jobID)
+		// Owner-role cleanup (verify_app can't DELETE).
+		_, _ = pg.Pool().Exec(context.Background(), `DELETE FROM verify.work_item_attempts WHERE work_item_id IN (SELECT id FROM verify.work_items WHERE job_id=$1)`, jobID)
+		_, _ = pg.Pool().Exec(context.Background(), `DELETE FROM verify.verifications WHERE id IN (SELECT verification_id FROM verify.work_items WHERE job_id=$1 AND verification_id IS NOT NULL)`, jobID)
+		_, _ = pg.Pool().Exec(context.Background(), `DELETE FROM verify.work_items WHERE job_id=$1`, jobID)
+		_, _ = pg.Pool().Exec(context.Background(), `DELETE FROM verify.jobs WHERE id=$1`, jobID)
 	})
 
 	// DR-4 at-rest proof: BEFORE draining, the plaintext column is CIPHERTEXT (not the raw address).
 	var addrCT []byte
 	if err := pg.Pool().QueryRow(ctx,
-		`SELECT addr_ciphertext FROM work_items WHERE job_id=$1 LIMIT 1`, jobID).Scan(&addrCT); err != nil {
+		`SELECT addr_ciphertext FROM verify.work_items WHERE job_id=$1 LIMIT 1`, jobID).Scan(&addrCT); err != nil {
 		t.Fatalf("read addr_ciphertext: %v", err)
 	}
 	if len(addrCT) == 0 {
@@ -171,7 +171,7 @@ func TestPGE2E_SubmitDrainSettleResults_MasterInvariant(t *testing.T) {
 	// DR-4 purge proof: AFTER settle, the plaintext column is NULL on every item.
 	var remaining int
 	if err := pg.Pool().QueryRow(ctx,
-		`SELECT count(*) FROM work_items WHERE job_id=$1 AND addr_ciphertext IS NOT NULL`, jobID).Scan(&remaining); err != nil {
+		`SELECT count(*) FROM verify.work_items WHERE job_id=$1 AND addr_ciphertext IS NOT NULL`, jobID).Scan(&remaining); err != nil {
 		t.Fatalf("count non-null ciphertext: %v", err)
 	}
 	if remaining != 0 {

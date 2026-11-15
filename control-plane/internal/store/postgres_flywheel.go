@@ -26,7 +26,7 @@ SELECT status, reason, confidence, COALESCE(mx_provider,''), from_cache, created
        email_hash, COALESCE(domain,''),
        COALESCE(signals->'external'->>'residue_class',''),
        COALESCE(signals->'external'->>'vendor','')
-FROM verifications WHERE id=$1`
+FROM verify.verifications WHERE id=$1`
 	var vj VerdictJoin
 	err := p.pool.QueryRow(ctx, q, verificationID).Scan(
 		&vj.Status, &vj.Reason, &vj.Confidence, &vj.MXProvider, &vj.FromCache, &vj.CreatedAt,
@@ -58,7 +58,7 @@ func (p *PG) AppendSendOutcome(ctx context.Context, row SendOutcomeRow) error {
 	// to retry). The classifier annotations are set AT INSERT (not a later UPDATE), so a duplicate can
 	// never reclassify an already-recorded outcome.
 	const q = `
-INSERT INTO send_outcomes (
+INSERT INTO verify.send_outcomes (
   id, verification_id, email_hash, domain, mx_provider, message_id, event, sent_at, occurred_at, raw,
   calibration_class, ingest_error, is_external_verified, residue_class, vendor, from_cache, ingested_at
 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
@@ -86,7 +86,7 @@ func (p *PG) HistoricalBounceCount(ctx context.Context, emailHash []byte) (int, 
 	// plain COUNT suffices, but COUNT(DISTINCT ...) is belt-and-suspenders against any pre-dedup rows.
 	const q = `
 SELECT COUNT(DISTINCT (message_id, event)), COALESCE(MAX(occurred_at), 'epoch'::timestamptz)
-FROM send_outcomes
+FROM verify.send_outcomes
 WHERE email_hash=$1 AND ingest_error IS NULL AND calibration_class='invalid_signal'`
 	var count int
 	var latest time.Time
@@ -110,8 +110,8 @@ func (p *PG) BucketAggregatesSince(ctx context.Context, since, now time.Time) ([
 SELECT v.reason, COALESCE(o.mx_provider,''), COALESCE(o.vendor,''), COALESCE(o.residue_class,''),
        COUNT(*) AS qualifying_n,
        COUNT(*) FILTER (WHERE o.calibration_class='invalid_signal') AS invalid_n
-FROM send_outcomes o
-JOIN verifications v ON v.id = o.verification_id
+FROM verify.send_outcomes o
+JOIN verify.verifications v ON v.id = o.verification_id
 WHERE o.occurred_at >= $1 AND o.occurred_at <= $2
   AND o.ingest_error IS NULL
   AND o.from_cache = false
@@ -140,7 +140,7 @@ func (p *PG) GetEffectiveCalibration(ctx context.Context, reason, mxProvider, ve
 	const q = `
 SELECT id, reason, mx_provider, COALESCE(vendor,''), COALESCE(residue_class,''), confidence, sample_n,
        version, mode, approved, effective_from, COALESCE(effective_to, 'epoch'::timestamptz), created_at
-FROM calibration
+FROM verify.calibration
 WHERE reason=$1 AND mx_provider=$2 AND COALESCE(vendor,'')=$3 AND COALESCE(residue_class,'')=$4
   AND effective_from IS NOT NULL AND effective_to IS NULL
 ORDER BY version DESC LIMIT 1`
@@ -183,13 +183,13 @@ func (p *PG) AppendCalibrationVersion(ctx context.Context, row CalibrationRow) (
 func insertCalibrationVersionTx(ctx context.Context, tx pgx.Tx, row CalibrationRow) (int, error) {
 	var version int
 	const nextV = `
-SELECT COALESCE(MAX(version),0)+1 FROM calibration
+SELECT COALESCE(MAX(version),0)+1 FROM verify.calibration
 WHERE reason=$1 AND mx_provider=$2 AND COALESCE(vendor,'')=$3 AND COALESCE(residue_class,'')=$4`
 	if err := tx.QueryRow(ctx, nextV, row.Reason, row.MXProvider, row.Vendor, row.ResidueClass).Scan(&version); err != nil {
 		return 0, fmt.Errorf("store: calibration next version: %w", err)
 	}
 	const ins = `
-INSERT INTO calibration (
+INSERT INTO verify.calibration (
   id, reason, mx_provider, vendor, residue_class, confidence, sample_n, version, mode, approved,
   effective_from, effective_to, created_at
 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`
@@ -212,8 +212,8 @@ func (p *PG) ApproveCalibration(ctx context.Context, calibrationID string, at ti
 	// Close the prior effective row for the SAME bucket, then stamp this one effective — atomically
 	// (§5.4). Idempotent: if the target is already effective or unknown, the updates are no-ops.
 	const closePrior = `
-UPDATE calibration prior SET effective_to=$2
-FROM calibration target
+UPDATE verify.calibration prior SET effective_to=$2
+FROM verify.calibration target
 WHERE target.id=$1 AND target.effective_from IS NULL
   AND prior.reason=target.reason AND prior.mx_provider=target.mx_provider
   AND COALESCE(prior.vendor,'')=COALESCE(target.vendor,'')
@@ -222,7 +222,7 @@ WHERE target.id=$1 AND target.effective_from IS NULL
 	if _, err := tx.Exec(ctx, closePrior, calibrationID, at.UTC()); err != nil {
 		return fmt.Errorf("store: approve close-prior: %w", err)
 	}
-	const stamp = `UPDATE calibration SET effective_from=$2, approved=true WHERE id=$1 AND effective_from IS NULL`
+	const stamp = `UPDATE verify.calibration SET effective_from=$2, approved=true WHERE id=$1 AND effective_from IS NULL`
 	if _, err := tx.Exec(ctx, stamp, calibrationID, at.UTC()); err != nil {
 		return fmt.Errorf("store: approve stamp: %w", err)
 	}
@@ -238,7 +238,7 @@ func (p *PG) AccuracyByProvider(ctx context.Context, since, now time.Time) ([]Ac
 	const q = `
 WITH valids AS (
   SELECT v.id, COALESCE(v.mx_provider,'') AS mx_provider
-  FROM verifications v
+  FROM verify.verifications v
   WHERE v.status='valid' AND v.checked_at >= $1 AND v.checked_at <= $2
 ),
 outs AS (
@@ -247,7 +247,7 @@ outs AS (
          bool_or(o.ingest_error IS NULL AND o.from_cache=false
                  AND o.calibration_class IN ('invalid_signal','valid_signal')) AS calibratable,
          bool_or(o.calibration_class='invalid_signal' AND o.ingest_error IS NULL) AS false_valid
-  FROM send_outcomes o
+  FROM verify.send_outcomes o
   WHERE o.occurred_at >= $1 AND o.occurred_at <= $2
   GROUP BY o.verification_id, COALESCE(o.vendor,''), COALESCE(o.residue_class,'')
 )
@@ -280,7 +280,7 @@ func (p *PG) LeaseRecalibration(ctx context.Context, run RecalRun) (string, erro
 		return "", fmt.Errorf("store: recalibration lease requires an id")
 	}
 	const q = `
-INSERT INTO recalibration_runs (id, status, leased_by, leased_at, window_from, window_to, buckets_touched, buckets_at_max, brake_held)
+INSERT INTO verify.recalibration_runs (id, status, leased_by, leased_at, window_from, window_to, buckets_touched, buckets_at_max, brake_held)
 VALUES ($1,'leased',$2,$3,$4,$5,0,0,false)`
 	if _, err := p.pool.Exec(ctx, q, run.ID, run.LeasedBy, run.LeasedAt.UTC(), run.WindowFrom.UTC(), run.WindowTo.UTC()); err != nil {
 		return "", fmt.Errorf("store: lease recalibration: %w", err)
@@ -300,7 +300,7 @@ func (p *PG) CommitRecalibration(ctx context.Context, runID, leasedBy string, ve
 	// written (the calibration inserts below never run). The CAS, not the lease, is the exactly-once
 	// guarantee — settle-once (P5) → spend-once (P6) → recalibrate-once (P7), the invariant's 3rd use.
 	const cas = `
-UPDATE recalibration_runs SET status='committed', buckets_touched=$3, buckets_at_max=$4, brake_held=$5, committed_at=$6
+UPDATE verify.recalibration_runs SET status='committed', buckets_touched=$3, buckets_at_max=$4, brake_held=$5, committed_at=$6
 WHERE id=$1 AND leased_by=$2 AND status='leased'`
 	tag, err := tx.Exec(ctx, cas, runID, leasedBy, bucketsTouched, bucketsAtMax, brakeHeld, now.UTC())
 	if err != nil {
@@ -324,7 +324,7 @@ func (p *PG) RecentRecalRuns(ctx context.Context, limit int) ([]RecalRun, error)
 	}
 	const q = `
 SELECT id, status, leased_by, leased_at, window_from, window_to, buckets_touched, buckets_at_max, brake_held
-FROM recalibration_runs WHERE status='committed'
+FROM verify.recalibration_runs WHERE status='committed'
 ORDER BY leased_at DESC LIMIT $1`
 	rows, err := p.pool.Query(ctx, q, limit)
 	if err != nil {
@@ -344,7 +344,7 @@ ORDER BY leased_at DESC LIMIT $1`
 
 func (p *PG) GetOutcomeCursor(ctx context.Context, sourceKey string) (string, bool, error) {
 	var cursor string
-	err := p.pool.QueryRow(ctx, `SELECT cursor FROM outcome_ingest_cursor WHERE source_key=$1`, sourceKey).Scan(&cursor)
+	err := p.pool.QueryRow(ctx, `SELECT cursor FROM verify.outcome_ingest_cursor WHERE source_key=$1`, sourceKey).Scan(&cursor)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", false, nil
 	}
@@ -356,7 +356,7 @@ func (p *PG) GetOutcomeCursor(ctx context.Context, sourceKey string) (string, bo
 
 func (p *PG) SetOutcomeCursor(ctx context.Context, sourceKey, cursor string, at time.Time) error {
 	const q = `
-INSERT INTO outcome_ingest_cursor (source_key, cursor, updated_at) VALUES ($1,$2,$3)
+INSERT INTO verify.outcome_ingest_cursor (source_key, cursor, updated_at) VALUES ($1,$2,$3)
 ON CONFLICT (source_key) DO UPDATE SET cursor=EXCLUDED.cursor, updated_at=EXCLUDED.updated_at`
 	if _, err := p.pool.Exec(ctx, q, sourceKey, cursor, at.UTC()); err != nil {
 		return fmt.Errorf("store: set outcome cursor: %w", err)
