@@ -29,8 +29,10 @@ jobs:
     # succeeds proves nothing here — it always skips. Two tests were written that way and always
     # skipped while this comment claimed the enforcement was proven. The grant tests now live in
     # internal/store/pg_grants_test.go and run every forbidden statement inside a transaction that
-    # has `SET LOCAL ROLE cp_runtime`, which drops superuser for the duration. cp_runtime therefore
-    # stays NOLOGIN (0005_grants.sql) and needs no CI password. TestPGGrants_RoleSwitchActuallyBites
+    # has `SET LOCAL ROLE verify_app`, which drops superuser for the duration. (Migration 0016 renamed
+    # the runtime role cp_runtime -> verify_app and moved module 1 into schema verify; verify_app is a
+    # LOGIN role, and TestRuntimeAsVerifyApp ALSO drives the real store through a verify_app login, with
+    # a password the test sets itself, so a missing grant fails there too.) TestPGGrants_RoleSwitchActuallyBites
     # is the control: it fails if the role switch ever stops dropping privilege, so the other grant
     # tests cannot go quietly vacuous the way their predecessors did.
     services:
