@@ -40,9 +40,15 @@ BEGIN
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'verify_admin') THEN
         CREATE ROLE verify_admin NOLOGIN;
     END IF;
-    -- ALTER ... OWNER TO needs the migrating role to be able to SET ROLE to the new owner. A superuser always can; on Supabase the migrator is `postgres`
-    -- (not a superuser), which created verify_owner above and so may grant it to itself.
-    IF NOT pg_has_role(current_user, 'verify_owner', 'MEMBER') THEN
+    -- CREATE SCHEMA ... AUTHORIZATION, ALTER ... OWNER TO and CREATE in the new schema need the migrating role to be able to SET ROLE to verify_owner AND to inherit its
+    -- privileges. A superuser always can. On Supabase the migrator is `postgres` (not a superuser): on PG 16+ the creator of a role gets only ADMIN OPTION on it - no SET, no
+    -- INHERIT - so the statements fail with "must be able to SET ROLE" (measured on supabase/postgres 17.12 by the platform's supabase job). A role holding ADMIN may grant
+    -- itself both. (PG 15 and earlier have no per-grant SET/INHERIT options: a plain GRANT does it.)
+    IF current_setting('server_version_num')::int >= 160000 THEN
+        IF NOT (pg_has_role(current_user, 'verify_owner', 'USAGE') AND pg_has_role(current_user, 'verify_owner', 'SET')) THEN
+            EXECUTE format('GRANT verify_owner TO %I WITH INHERIT TRUE, SET TRUE', current_user);
+        END IF;
+    ELSIF NOT pg_has_role(current_user, 'verify_owner', 'USAGE') THEN
         EXECUTE format('GRANT verify_owner TO %I', current_user);
     END IF;
 END
