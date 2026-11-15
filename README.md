@@ -89,8 +89,9 @@ done
 # Run the full suite against real Postgres:
 TM_TEST_DATABASE_URL='postgres://postgres:dev@localhost:5432/cptest' go test -shuffle=on ./...
 
-# Run the brain (cheap-verification-ready with a DB + a pepper; listens on :8080):
+# Run the brain (a DB + a pepper serve /v1/verify; /readyz also needs the queue key, else 503 not_ready; listens on :8080):
 TM_DATABASE_URL='postgres://postgres:dev@localhost:5432/cptest' TM_PEPPER='<32-bytes-of-entropy>' \
+  TM_QUEUE_ADDR_KEY="$(openssl rand -hex 32)" \
   go run ./cmd/control-plane
 ```
 
@@ -106,7 +107,7 @@ bash bin/assert-gem-unmodified.sh    # the Door-5 gem-unmodified assertion
 
 ## Deployment prerequisites
 
-The brain runs cheap-verification-only with just a database and a pepper. Each further capability
+The brain runs cheap-verification-only with just a database and a pepper (it reports `/readyz` ready only once the queue key below is also set). Each further capability
 is switched on when its prerequisite is in place — an operator action, config, or (for the vendor
 and outcome-feed tiers) a pluggable adapter dropped into an existing interface seam; the brain's
 decision code is never touched. Satisfy them in order (each is detailed, with verification
@@ -116,7 +117,7 @@ or not built yet — in the [go-live checklist](Docs/go-live-checklist.md)):
 | Capability | Prerequisite | Switched on with |
 |---|---|---|
 | **Cheap verification** | a Postgres instance + an email-hash pepper | `TM_DATABASE_URL`, `TM_PEPPER` |
-| **Bulk / async jobs** | an at-rest encryption key for the queue | `TM_QUEUE_ADDR_KEY` (bulk endpoints stay 503 without it — the queue never stores plaintext unencrypted) |
+| **Bulk / async jobs** | an at-rest encryption key for the queue | `TM_QUEUE_ADDR_KEY` (bulk endpoints stay 503 without it — the queue never stores plaintext unencrypted — and `/readyz` reports `not_ready` with the reason, so a module whose job routes cannot work is not sent traffic) |
 | **SMTP verification** | a port-25-capable host with a settable PTR on a clean IP (vet V1–V5) | the node descriptor + `TM_SMTP_MODE=enabled` |
 | **Paid fallback** | a verification vendor + a signed DPA | a vendor adapter at the `external.Vendor` seam + `TM_EXTERNAL_DPA_CONFIRMED=true` + `TM_FALLBACK_MODE=enabled` + a vendor key |
 | **Confidence calibration** | an authenticated (mTLS) real send-outcome feed | an mTLS client at the `OutcomeSource` seam + the trust anchor/credential; promote the mutators when ready |

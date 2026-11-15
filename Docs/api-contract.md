@@ -44,7 +44,14 @@ Every route this module serves. `{id}` is a ServeMux wildcard.
 | `GET` | `/v1/jobs/{id}` | per-caller key **required** (PN-13) | Job progress counts, scoped to the owning caller (D1 tenancy) |
 | `GET` | `/v1/jobs/{id}/results` | per-caller key **required** (PN-13) | Settled verdicts, cursor-paginated; each is the `/v1/verify` object |
 | `GET` | `/healthz` | none | Liveness: the process is up. Additive `at` timestamp (item 10) |
-| `GET` | `/readyz` | none | Readiness with secret PRESENCE only, never values |
+| `GET` | `/readyz` | none | Readiness with secret PRESENCE only, never values. 503 `not_ready` unless `pepper`, `db` and (once declared) `queue` are all true; a not-ready queue adds `reasons` (below) |
+
+**`/readyz` body.** `status` (`ready`/`not_ready`), `ready` (bool, the same answer), `checks{}` (booleans: `pepper`,
+`db`, and `queue` on a process whose boot reached the queue wiring), `at`, and the older `config`, `pepper`,
+`supabaseKey`, all unchanged. When the queue is declared not ready (no `TM_QUEUE_ADDR_KEY`, a key that does not
+build the cipher, or a drainer that cannot be built) the body also carries an additive top-level
+`"reasons": ["queue: <why>"]`, a JSON array of strings that is **omitted entirely** when there is nothing to say.
+The exact reason texts are in [`operator-runbook.md`](operator-runbook.md) §6.1.
 
 **The `/v1` prefix is LOCKED** (build-plan §1.1, URI-path versioning). A breaking change means
 `/v2`, never an in-place edit — which is the same rule `verdict.APIVersion` enforces on the body.

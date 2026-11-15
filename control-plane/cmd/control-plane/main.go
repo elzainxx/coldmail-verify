@@ -195,15 +195,30 @@ func buildAPI(appCtx context.Context, cfg config.Config, sec *secrets.Secrets, h
 // (harden-toward-safety: never store the queue's plaintext exception unencrypted) — the bulk
 // endpoints stay 503. The lease TTL must exceed the brain's max SMTP deadline (GAP-37); NewDrainer
 // fails fast otherwise and we log + skip the queue rather than run with a race-prone lease.
+//
+// READINESS (WithQueueStatus). buildQueue is the only place that knows whether the queue came up, so it
+// DECLARES the answer on every path out — and /readyz reports it. Each of the three early returns used
+// to leave /readyz saying `ready` while the bulk/job routes answered 503 (or enqueued without
+// draining): the process looked serviceable to an orchestrator and was not. The reason strings are
+// operator-facing and are served unauthenticated, so they name the missing or broken input and never a
+// secret value (the cipher error carries a length, never key bytes — pinned by a test). They are also
+// the text Docs/operator-runbook.md §6.1 tells the operator to look for; TestBuildQueue_ReasonsAreInTheRunbook
+// keeps the two in step.
+//
+// Paths that never reach buildQueue (no pepper, no DSN, store open failed, policy load/seed failed)
+// need no declaration: buildAPI returns before WithPinger on every one of them, so /readyz is already
+// not-ready there with db:false.
 func buildQueue(appCtx context.Context, cfg config.Config, sec *secrets.Secrets, pg *store.PG, orch *orchestrator.Orchestrator, hasher *hash.Hasher, def *policy.Definition, srv *api.Server, cfgFingerprint string) {
 	key, prev, ok := sec.QueueAddrKey()
 	if !ok {
 		log.Printf("queue: %s not set — bulk endpoint disabled (won't store plaintext without the DR-4 key)", secrets.EnvQueueAddrKey)
+		srv.WithQueueStatus(false, secrets.EnvQueueAddrKey+" is not set: the bulk and job routes answer 503 until it is")
 		return
 	}
 	cipher, err := queue.NewAddrCipher(key, prev)
 	if err != nil {
 		log.Printf("queue: DR-4 cipher init failed (%v) — bulk endpoint disabled", err)
+		srv.WithQueueStatus(false, fmt.Sprintf("DR-4 cipher init failed: %v", err))
 		return
 	}
 	bulkMax := 0 // 0 => the handler's built-in safe hard cap applies (§7.5 dial is owner-OQ/UNSET)
@@ -242,6 +257,7 @@ func buildQueue(appCtx context.Context, cfg config.Config, sec *secrets.Secrets,
 	})
 	if err != nil {
 		log.Printf("queue: drainer init failed (%v) — bulk submissions will enqueue but NOT drain until fixed", err)
+		srv.WithQueueStatus(false, fmt.Sprintf("drainer init failed: %v; bulk submissions would enqueue but not drain", err))
 		return
 	}
 	log.Printf("queue: bulk endpoint wired; drainer starting (lease_ttl=%s max_smtp=%s max_attempts=%d max_age=%s)",
@@ -253,6 +269,7 @@ func buildQueue(appCtx context.Context, cfg config.Config, sec *secrets.Secrets,
 			cfg.KillSwitch.FrontDoor)
 	}
 	go drainer.Run(appCtx)
+	srv.WithQueueStatus(true, "")
 }
 
 // buildExternal wires the P6 third-party-fallback stage — but ONLY when it is DELIBERATELY enabled:

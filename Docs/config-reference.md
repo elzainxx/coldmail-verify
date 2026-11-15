@@ -32,7 +32,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | front-door bearer token(s) (caller → brain) | scheme decided (bearer, OQ-13); P1 accepts static token from config | P1 §3.1.1, §3.5.4, §5.2, OQ-13 |
 | node token / rack `ACCESS_TOKENS` (brain → box) | UNSET value; in secrets mgr, referenced by id, never plaintext in `nodes` | P1 §3.5.4, §4.5, OQ-13 |
 | Supabase service-role key | service-role only in P1; RLS deferred (OQ-20) | P1 §4, OQ-20 |
-| `TM_QUEUE_ADDR_KEY` (+`_PREV`) (DR-4 at-rest key) | UNSET ⇒ queue subsystem refuses to start (bulk 503); key ≠ pepper, 32 bytes | P5 §3.3, ADR-0011, DR-4 |
+| `TM_QUEUE_ADDR_KEY` (+`_PREV`) (DR-4 at-rest key) | UNSET ⇒ queue subsystem refuses to start (bulk 503) and `/readyz` goes `not_ready` naming the key; key ≠ pepper, 32 bytes | P5 §3.3, ADR-0011, DR-4 |
 | vendor API key (per adapter) | UNSET — held brain-side in secrets, rotated (§7.4) | P6 §7.2, §7.4, §8.3 |
 | node token (brain→box) | no rotation *cadence*; revoke-vs-drain ordering at queue scale unspecified (security F-1) | no rotation *cadence*; revoke-vs-drain ordering at queue scale unspecified (security F-1) |
 | vendor API key (P6) | no rotation story; leak = budget-DoS + billed enumeration oracle (security F-6) | no rotation story; leak = budget-DoS + billed enumeration oracle (security F-6) |

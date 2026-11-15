@@ -367,7 +367,7 @@ These promote the §5.2/§5.3 dials from `buildQueue` code-defaults to readable 
 
 | name | type | default | mis-setting effect | blast radius | source |
 |---|---|---|---|---|---|
-| **`TM_QUEUE_ADDR_KEY`** (+`_PREV`) (DR-4 at-rest key) | secret | UNSET ⇒ queue subsystem refuses to start (bulk 503); key ≠ pepper, 32 bytes | absent ⇒ no bulk; wrong ⇒ cipher init fails, bulk disabled | privacy / security | P5 §3.3, ADR-0011, DR-4 |
+| **`TM_QUEUE_ADDR_KEY`** (+`_PREV`) (DR-4 at-rest key) | secret | UNSET ⇒ queue subsystem refuses to start (bulk 503) and `/readyz` goes `not_ready` naming the key; key ≠ pepper, 32 bytes | absent ⇒ no bulk and `/readyz` `not_ready`; wrong ⇒ cipher init fails, bulk disabled and `/readyz` `not_ready` | privacy / security | P5 §3.3, ADR-0011, DR-4 |
 | **`TM_QUEUE_BACKOFF_BASE_SECONDS`** (attempt-0 greylist floor) | dial | 300 (5 min) | too fast → re-greylist; too slow → long tail | per-check / reputation | P5 §4.2, OQ-P5-2 |
 | **`TM_QUEUE_BACKOFF_FACTOR`** (exponential factor) | dial | 2 | — | per-check | P5 §4.2, OQ-P5-2 |
 | **`TM_QUEUE_BACKOFF_CAP_SECONDS`** (per-step ceiling) | dial | 3600 (60 min) | — | per-check | P5 §4.2, OQ-P5-2 |

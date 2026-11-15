@@ -61,7 +61,7 @@ Work top to bottom. Each tier assumes the previous one passed.
 | 1.4 | `go vet ./...` | clean |
 | 1.5 | Start Postgres 16 throwaway container | healthy, DSN noted |
 | 1.6 | Start app in production (`TM_ENV=production`) with `TM_PEPPER` **unset** | **refuses to start** (`secrets: TM_PEPPER is required`) — this is a pass |
-| 1.7 | Start app with pepper set | starts; `/healthz` 200 with `status`+`at`; `/readyz` carries `{"status":…,"checks":{"db":…,"pepper":…},"at":…}` and is **`ready`/200 only when BOTH checks are true** — with the DB down (or `TM_DATABASE_URL` unset) it is `not_ready`/503 even though the pepper is set |
+| 1.7 | Start app with pepper set | starts; `/healthz` 200 with `status`+`at`; `/readyz` carries `{"status":…,"checks":{"db":…,"pepper":…,"queue":…},"at":…}` and is **`ready`/200 only when ALL checks are true** — with the DB down (or `TM_DATABASE_URL` unset) it is `not_ready`/503 even though the pepper is set, and with `TM_QUEUE_ADDR_KEY` unset it is `not_ready`/503 with `"reasons":["queue: TM_QUEUE_ADDR_KEY is not set: …"]` |
 
 ---
 
@@ -157,14 +157,14 @@ middleware ordering, and TLS. **Expectation:** this is almost certainly a Window
 and will just work — but it is untested until here, so it is **verified at cutover, not assumed**.
 
 ```bash
-# 1. Start the control-plane bound to a real port (with a DB + pepper + front-door token):
+# 1. Start the control-plane bound to a real port (with a DB + pepper + queue key + front-door token):
 TM_ENV=production \
   TM_DATABASE_URL='postgres://…' TM_PEPPER='<32 bytes>' TM_FRONTDOOR_TOKEN='<token>' \
-  TM_LISTEN_ADDR=':8080' ./control-plane &
+  TM_QUEUE_ADDR_KEY='<32 bytes, hex>' TM_LISTEN_ADDR=':8080' ./control-plane &
 
 # 2. Health/readiness bind (proves the socket is really listening):
 curl -fsS http://127.0.0.1:8080/healthz          # 200 — liveness; stays 200 with every dependency down
-curl -fsS http://127.0.0.1:8080/readyz           # 200 only with BOTH db:true and pepper:true
+curl -fsS http://127.0.0.1:8080/readyz           # 200 only with db:true AND pepper:true AND queue:true
 
 # 2b. The readiness check is a LIVE ping, not a boot-time snapshot — prove it by stopping the DB
 #     container and re-probing without restarting the app. `-f` is wrong here (it exits non-zero on

@@ -25,7 +25,7 @@ citations resolve). In one table — each tier, what turns it on, and how you tu
 
 | Tier | Turned on by | Turned off by |
 |---|---|---|
-| Cheap verification | `TM_DATABASE_URL` + `TM_PEPPER` (+ `TM_FRONTDOOR_TOKEN`; install §3.1) | — (it is the floor) |
+| Cheap verification | `TM_DATABASE_URL` + `TM_PEPPER` (+ `TM_FRONTDOOR_TOKEN`; install §3.1). `/v1/verify` serves with just these, but `/readyz` reports `not_ready` until `TM_QUEUE_ADDR_KEY` is also set (§6.1) | — (it is the floor) |
 | Bulk / async | `TM_QUEUE_ADDR_KEY` + per-caller keys | `TM_FRONTDOOR_MODE=accept_and_defer` or `reject` (§3) |
 | SMTP verification | a vetted port-25 host, `TM_NODE_*`, `TM_SMTP_MODE=enabled` (install §3.2) | `TM_SMTP_MODE=disabled` or `TM_NODE_ENABLED=false` |
 | Paid fallback | vendor adapter + DPA + the three switches (install §3.3) | `TM_FALLBACK_MODE=off` |
@@ -182,6 +182,41 @@ brake (e.g. a fleet-brake fraction ≥ 100%) is a **startup error**, never a sil
 
 The **fleet-wide** alert is the one that must never be a mere dashboard number — it is the signal
 that the brake did its job and a human decision is required.
+
+### 6.1 `/readyz` says `not_ready` — which dependency, and what to do
+
+`GET /readyz` is the probe an orchestrator or the platform should act on. It answers **200 `ready` only
+when every check in `checks{}` is true, and 503 `not_ready` otherwise**; `ready` (bool) and `status`
+(word) always agree with the HTTP code. The checks are independent, so the one that is `false` is the
+one to fix:
+
+| `checks.…` | `false` means | Fix |
+|---|---|---|
+| `pepper` | no `TM_PEPPER` loaded: nothing can be hashed | set it (never rotate casually, install §3.1) and restart |
+| `db` | `TM_DATABASE_URL` unset, the store failed to open or seed, or the **live** 3 s ping failed | fix the database or the DSN; `db` recovers by itself once the ping succeeds |
+| `queue` | the bulk/job subsystem did not come up (below) | fix what `reasons` names, **then restart**: the queue's status is decided once at boot, unlike `db` |
+
+`queue` appears in `checks{}` only on a process whose boot reached the queue wiring, and only when it is
+`false` does the body gain a top-level `reasons` array of strings (omitted entirely when empty). Every
+other field of the body is unchanged. A not-ready queue says why, in these words:
+
+| `reasons` entry | Cause | Fix |
+|---|---|---|
+| `queue: TM_QUEUE_ADDR_KEY is not set: the bulk and job routes answer 503 until it is` | no DR-4 at-rest key, so the queue refuses to start rather than store plaintext; `POST /v1/verify/bulk` and `GET /v1/jobs/…` answer 503 `unavailable` to an authenticated caller | set `TM_QUEUE_ADDR_KEY` (32 bytes, hex or base64, **not** the pepper: `openssl rand -hex 32`) and restart |
+| `queue: DR-4 cipher init failed: …` | a key is set but it, or `TM_QUEUE_ADDR_KEY_PREV`, is not exactly 32 bytes after decoding (the text carries the length, never the key) | correct the key and restart |
+| `queue: drainer init failed: …; bulk submissions would enqueue but not drain` | the key is fine but the drainer refused to be built (both retry ceilings zero, or a lease TTL that does not exceed the SMTP deadline). Startup config validation rejects those inputs first, so this is a **second line of defence**: seeing it means a config path skipped validation | fix the dial the text names and restart, and report it; until then submissions are accepted and **never processed** |
+
+**A deployment that serves only `POST /v1/verify` and has no bulk caller still has to set
+`TM_QUEUE_ADDR_KEY` to be reported ready** — there is no "no bulk wanted" setting; the key is a boot-time
+precondition of the whole module being ready. (Rung 4 does not change this: a paused queue is still
+`ready`, because a pause is a deliberate state and not a missing dependency, §3.) A process that failed
+before the queue wiring (no pepper, no `TM_DATABASE_URL`, store open failed, policy load or seed failed)
+is already `not_ready` for `pepper`/`db` and carries no `queue` check. To check from a shell:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' localhost:8080/readyz   # 200 or 503
+curl -s localhost:8080/readyz | grep -o '"reasons":\[[^]]*\]'    # empty when ready
+```
 
 ---
 

@@ -104,6 +104,13 @@ type Server struct {
 	bulkMaxAddrs int           // §7.5 submission cap; 0 => the built-in safe hard cap (dial UNSET)
 	defPolicy    *policy.Definition
 	now          func() time.Time
+
+	// The queue part of readiness is DECLARED, never defaulted: queueDeclared is false on every server
+	// that never called WithQueueStatus, and such a server's /readyz is exactly what it was before this
+	// field existed (no `queue` check, no `reasons`). See WithQueueStatus.
+	queueDeclared bool
+	queueReady    bool
+	queueReason   string // why the queue is not ready; only read when queueDeclared && !queueReady
 }
 
 // New wires the server. A nil hasher/verifier is allowed for a build smoke (no pepper / no
@@ -148,6 +155,33 @@ func (s *Server) WithBulk(b BulkSubmitter, j JobReader, maxAddrs int) *Server {
 	if maxAddrs > 0 {
 		s.bulkMaxAddrs = maxAddrs
 	}
+	return s
+}
+
+// WithQueueStatus DECLARES that this server has a queue subsystem, and whether it is ready. Once
+// declared, /readyz carries `checks.queue`, `ready` additionally requires queueReady, and a not-ready
+// queue adds `"reasons": ["queue: <reason>"]` so the operator is told WHICH dependency is missing.
+//
+// WHY THIS EXISTS. buildQueue in main.go has three early returns (no TM_QUEUE_ADDR_KEY, cipher init
+// failed, drainer init failed). On each, the bulk/job routes are either unwired (503 `unavailable`
+// to an authenticated caller) or enqueue-without-draining, yet /readyz used to answer 200 `ready`,
+// because it only checked the pepper and the DB ping. Readiness is the predicate an orchestrator or
+// the platform acts on; one that says ready while the job routes cannot work is the same
+// readiness-vs-serving drift item 10 closed for the DB (see Pinger).
+//
+// WHY AN EXPLICIT DECLARATION RATHER THAN INFERRING FROM s.bulk != nil. A server that never had a
+// queue (every test that builds one by hand, a build smoke) must keep answering exactly as before;
+// "no bulk wired" is not by itself evidence that someone intended a queue. Only main.go's buildQueue
+// knows the queue was intended, so it is the one that says so. The status is fixed at boot (the key
+// and the drainer are boot-time facts), unlike the DB ping, which is live per request. A second call
+// replaces the first (last declaration wins).
+//
+// reason is operator-facing and is served on an UNAUTHENTICATED endpoint: it must name the missing
+// or broken input, never carry a secret value.
+func (s *Server) WithQueueStatus(ready bool, reason string) *Server {
+	s.queueDeclared = true
+	s.queueReady = ready
+	s.queueReason = reason
 	return s
 }
 
@@ -620,6 +654,13 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 // TestFrontDoorDefer_SummaryNamesTheRung, so removing or nesting it would break a procedure an
 // operator runs during an incident. `ready` stays as the boolean it always was, and `status` is its
 // word form — a monitor reading either gets the same answer, which is the property the test pins.
+//
+// THE QUEUE (additive, only on a server that DECLARED it — see WithQueueStatus). A declared queue adds
+// `checks.queue` and joins the AND that decides `ready`; when it is not ready the body also gains a
+// top-level `"reasons": ["queue: <why>"]` (a JSON array of strings, OMITTED entirely when empty, so it
+// never appears on a ready body). A server that never declared a queue emits neither `checks.queue`
+// nor `reasons`, and its `ready` is unchanged. The checks stay independent: a missing pepper
+// is reported as pepper:false whether or not the queue is fine, and vice versa.
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	pepperOK := s.secrets != nil && s.secrets.HasPepper()
 
@@ -631,27 +672,48 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	dbOK := s.pinger != nil && s.pinger.Ping(ctx) == nil
 
+	checks := map[string]bool{
+		"pepper": pepperOK,
+		"db":     dbOK,
+	}
 	ready := pepperOK && dbOK
+
+	// The queue joins only if it was declared. Not declared => no key, no effect on `ready`.
+	var reasons []string
+	if s.queueDeclared {
+		checks["queue"] = s.queueReady
+		ready = ready && s.queueReady
+		if !s.queueReady {
+			why := s.queueReason
+			if why == "" {
+				why = "not ready" // never emit a bare "queue: ": the operator must be told something
+			}
+			reasons = append(reasons, "queue: "+why)
+		}
+	}
+
 	code := http.StatusOK
 	if !ready {
 		// No pepper => cannot hash; no DB => cannot log a verdict, and Door 2 forbids a verdict we
-		// cannot log. Either way this process cannot do its job, so it must not be sent traffic.
+		// cannot log; a declared queue that is not ready => the bulk/job routes cannot work. In each
+		// case this process cannot do its job, so it must not be sent traffic.
 		code = http.StatusServiceUnavailable
 	}
-	writeJSON(w, code, map[string]any{
+	body := map[string]any{
 		// The contract envelope (item 10).
 		"status": readyWord(ready),
-		"checks": map[string]bool{
-			"pepper": pepperOK,
-			"db":     dbOK,
-		},
-		"at": s.now().UTC().Format(time.RFC3339),
+		"checks": checks,
+		"at":     s.now().UTC().Format(time.RFC3339),
 		// Pre-existing fields, retained verbatim — see the additive-only note above.
 		"ready":       ready,
 		"config":      s.cfg.Summary(),
 		"pepper":      boolPresent(pepperOK),
 		"supabaseKey": boolPresent(s.secrets != nil && s.secrets.HasSupabaseKey()),
-	})
+	}
+	if len(reasons) > 0 {
+		body["reasons"] = reasons // additive; omitted when empty
+	}
+	writeJSON(w, code, body)
 }
 
 // readyWord is the contract's §1.9 status word. Deliberately not named statusWord (the senders'

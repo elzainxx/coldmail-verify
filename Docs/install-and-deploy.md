@@ -8,7 +8,8 @@
 
 The system is two programs: the **control-plane** (Go — needs Postgres and a few secrets) and the
 **verifier-node** (Ruby, containerised — needs a port-25-capable host). The control-plane runs
-cheap-verification-only with just a database and a pepper; SMTP probing, the paid fallback and the
+cheap-verification-only with just a database and a pepper (`/readyz` additionally wants `TM_QUEUE_ADDR_KEY`,
+§3.1, or it reports `not_ready`); SMTP probing, the paid fallback and the
 calibration feed are each switched on when their prerequisite is in place. **Turning a capability on
 is always config or an operator action — never a code change or a redeploy.**
 
@@ -41,8 +42,9 @@ done
 # Run the full suite against real Postgres (the PG-tagged tests RUN, not skip):
 TM_TEST_DATABASE_URL='postgres://postgres:dev@localhost:5432/cptest' go test -shuffle=on ./...
 
-# Run the control-plane (cheap-verification-ready with a DB + a pepper):
+# Run the control-plane (a DB + a pepper serve /v1/verify; /readyz also needs the queue key, else 503 not_ready):
 TM_DATABASE_URL='postgres://postgres:dev@localhost:5432/cptest' TM_PEPPER='<32-bytes-of-entropy>' \
+  TM_QUEUE_ADDR_KEY="$(openssl rand -hex 32)" \
   go run ./cmd/control-plane          # listens on :8080 (TM_LISTEN_ADDR to change it)
 ```
 
@@ -146,7 +148,7 @@ see [`security-posture.md`](security-posture.md) §2):
 | `TM_FRONTDOOR_TOKEN` | for the sync endpoint | legacy bearer for `POST /v1/verify`; the bulk endpoints need a per-caller key (rows in `api_callers`) |
 | `TM_ENV` | recommended | `production` makes the core secrets mandatory (the process refuses to start without them); `development` is the only mode where an unconfigured front door is open |
 | `TM_SUPABASE_KEY` | **when `TM_ENV=production`** | presence-checked at boot and shown by `/readyz` as `supabaseKey`; **nothing reads its value** — Postgres access uses `TM_DATABASE_URL`. Set any non-empty value on plain Postgres (retiring it is [`future-work.md`](future-work.md) FW-5) |
-| `TM_QUEUE_ADDR_KEY` | for bulk | 32 bytes, hex or base64 (`openssl rand -hex 32`); **a different secret from the pepper**. Without it the queue refuses to start and the bulk endpoints stay 503. `TM_QUEUE_ADDR_KEY_PREV` holds the previous key during a rotation overlap |
+| `TM_QUEUE_ADDR_KEY` | for bulk, and for `/readyz` to say `ready` | 32 bytes, hex or base64 (`openssl rand -hex 32`); **a different secret from the pepper**. Without it the queue refuses to start, the bulk and job endpoints stay 503, **and `/readyz` answers 503 `not_ready`** with `reasons` naming the key ([`operator-runbook.md`](operator-runbook.md) §6.1). `TM_QUEUE_ADDR_KEY_PREV` holds the previous key during a rotation overlap |
 | `TM_LISTEN_ADDR` | no | default `:8080` |
 | `TM_CACHE_TTL_SECONDS` | no | unset ⇒ no verdict caching (never a guessed expiry) |
 
@@ -170,7 +172,7 @@ The control plane writes every statement `verify.`-qualified and sets no `search
 **Verify:**
 
 ```bash
-curl -s localhost:8080/readyz     # {"status":"ready","checks":{"db":true,"pepper":true},…}  — 503 if EITHER is down
+curl -s localhost:8080/readyz     # {"status":"ready","checks":{"db":true,"pepper":true,"queue":true},…}  — 503 if ANY is down; a not-ready queue adds "reasons":["queue: …"]
 curl -s localhost:8080/healthz    # liveness: 200 while the process is up, even with every dependency down
 curl -s -H "authorization: Bearer $TM_FRONTDOOR_TOKEN" \
      -d '{"email":"someone@example.com"}' localhost:8080/v1/verify
@@ -306,11 +308,11 @@ host, run this against a live server and confirm the results match the in-proces
 ```bash
 # 1. Start the control-plane on a real port:
 TM_ENV=production TM_DATABASE_URL='postgres://…' TM_PEPPER='<32 bytes>' TM_FRONTDOOR_TOKEN='<token>' \
-  TM_SUPABASE_KEY='<any non-empty value>' TM_LISTEN_ADDR=':8080' ./control-plane &
+  TM_QUEUE_ADDR_KEY='<32 bytes, hex>' TM_SUPABASE_KEY='<any non-empty value>' TM_LISTEN_ADDR=':8080' ./control-plane &
 
-# 2. The socket really listens, and readiness is a LIVE ping (not a boot-time snapshot):
+# 2. The socket really listens, and the DB part of readiness is a LIVE ping (not a boot-time snapshot):
 curl -fsS http://127.0.0.1:8080/healthz                            # 200 even with every dependency down
-curl -fsS http://127.0.0.1:8080/readyz                             # 200 only with db:true AND pepper:true
+curl -fsS http://127.0.0.1:8080/readyz                             # 200 only with db:true AND pepper:true AND queue:true
 docker stop <pg-container>
 curl -sS -w ' <- %{http_code}\n' http://127.0.0.1:8080/readyz      # not_ready, db:false, 503   (no -f: we assert the 503)
 docker start <pg-container>
