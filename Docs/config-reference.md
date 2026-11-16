@@ -13,18 +13,18 @@ Regenerate on any manifest change; CI verifies this file is up to date
 
 | bucket | count |
 |---|---|
-| secrets | 9 |
-| feature-flags | 149 |
+| secrets | 10 |
+| feature-flags | 150 |
 | dials | 125 |
 | other/uncategorized | 2 |
-| **total knobs** | **285** |
+| **total knobs** | **287** |
 
 > One-way doors are **not** dials: the frozen contracts (response shape, LOG, hashing,
 > vocabulary, never-fork) live in code (`control-plane/internal/{vocab,hash,verdict,store,router}`),
 > not in this toggle list. A dial that *feeds* a door (e.g. a `confidence` number vs. the
 > `confidence` int-0–100 *type*) is a dial; the type it feeds is frozen.
 
-## Secrets (9)
+## Secrets (10)
 
 | knob | default / state | source |
 |---|---|---|
@@ -32,13 +32,14 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | front-door bearer token(s) (caller → brain) | scheme decided (bearer, OQ-13); P1 accepts static token from config | P1 §3.1.1, §3.5.4, §5.2, OQ-13 |
 | node token / rack `ACCESS_TOKENS` (brain → box) | UNSET value; in secrets mgr, referenced by id, never plaintext in `nodes` | P1 §3.5.4, §4.5, OQ-13 |
 | Supabase service-role key | service-role only in P1; RLS deferred (OQ-20) | P1 §4, OQ-20 |
+| `TM_MIGRATE_DATABASE_URL` (the migrating identity's DSN; read by `cmd/migrate` only, never by the control plane) | UNSET ⇒ `migrate` exits 64 naming the variable; nothing else is affected | FW-3, `control-plane/migrations/README.md` |
 | `TM_QUEUE_ADDR_KEY` (+`_PREV`) (DR-4 at-rest key) | UNSET ⇒ queue subsystem refuses to start (bulk 503) and `/readyz` goes `not_ready` naming the key; key ≠ pepper, 32 bytes | P5 §3.3, ADR-0011, DR-4 |
 | vendor API key (per adapter) | UNSET — held brain-side in secrets, rotated (§7.4) | P6 §7.2, §7.4, §8.3 |
 | node token (brain→box) | no rotation *cadence*; revoke-vs-drain ordering at queue scale unspecified (security F-1) | no rotation *cadence*; revoke-vs-drain ordering at queue scale unspecified (security F-1) |
 | vendor API key (P6) | no rotation story; leak = budget-DoS + billed enumeration oracle (security F-6) | no rotation story; leak = budget-DoS + billed enumeration oracle (security F-6) |
 | front-door bearer token | no per-caller scoping/rotation brain-side; guards bulk-PII endpoint by P5 (security F-20) | no per-caller scoping/rotation brain-side; guards bulk-PII endpoint by P5 (security F-20) |
 
-## Feature-flags (149)
+## Feature-flags (150)
 
 | knob | default / state | source |
 |---|---|---|
@@ -70,6 +71,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | `/verify` echo raw vs normalized email | echo raw (OQ-4) | P1 §3.3.7, OQ-4 |
 | `provider_canonical_hash` populate | define + populate from row #1 (OQ-2) | P1 §3.3.5, OQ-2 |
 | `TM_DATABASE_URL` (Postgres/Supabase DSN) | empty ⇒ `/v1/verify` not-ready (503); health still served | P1 §5.6 |
+| `TM_MIGRATIONS_DIR` (directory of `NNNN_*.sql` the runner reads) | `migrations` (relative to the working directory) | FW-3, `control-plane/migrations/README.md` |
 | `smtp_safe_check` (engine) | OFF (OQ-P2-7) | P2 §6.8, OQ-P2-7, App A.1 |
 | `smtp_fail_fast` (engine) | false (gem default) | P2 §6.7, App A.1 |
 | `smtp_port` (engine) | 25 (mock port in P2) | P2 §6.7, App A.1 |

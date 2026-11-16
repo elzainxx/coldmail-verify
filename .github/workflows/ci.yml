@@ -58,9 +58,36 @@ jobs:
         run: |
           # Apply every migration in lexical order (0001, 0002, …) so new migrations are picked up
           # without editing this list. `sort` on the zero-padded prefixes gives the correct order.
+          # This is the OLD psql loop, kept on purpose: the platform harness still builds M1 this way,
+          # so every migration (0017 included) must stay harmless under it. It is valid here ONLY
+          # because cptest is empty; it records nothing (the next step shows what that means).
           for f in $(ls migrations/[0-9][0-9][0-9][0-9]_*.sql | sort); do
             PGPASSWORD=ci psql -h localhost -U postgres -d cptest -v ON_ERROR_STOP=1 -f "$f"
           done
+      # FW-3: the migration runner (cmd/migrate) over the database the loop above just built. The loop
+      # leaves the tracker table (0017) present and EMPTY, so `status` shows every file pending, the
+      # first `up` ADOPTS 0001..0017 (it must replay none of them: 0001..0015 would re-create empty
+      # tables in public), applies only what the loop could not have known about (nothing today), and
+      # the second `up` is a no-op. The fresh-install, upgrade, refusal and lock proofs are Go tests
+      # (internal/migrate, cmd/migrate) that build their own databases; this step proves the real
+      # binary and its summary line on a database the loop made.
+      - name: migration runner (adopts the loop-built database, then a no-op)
+        env:
+          TM_MIGRATE_DATABASE_URL: postgres://postgres:ci@localhost:5432/cptest
+          TM_MIGRATIONS_DIR: migrations
+        run: |
+          bin="$RUNNER_TEMP/migrate"
+          go build -o "$bin" ./cmd/migrate
+          n="$(ls migrations/[0-9][0-9][0-9][0-9]_*.sql | wc -l | tr -d ' ')"
+          test "$n" -ge 17
+          out="$("$bin" status)"; echo "$out"
+          test "$(printf '%s\n' "$out" | grep -c ' pending ')" -eq "$n"
+          out="$("$bin" up)"; echo "$out"
+          printf '%s\n' "$out" | grep -qx "migrate: applied $((n - 17)), adopted 17, already applied 0, total $n"
+          out="$("$bin" up)"; echo "$out"
+          printf '%s\n' "$out" | grep -qx "migrate: applied 0, adopted 0, already applied $n, total $n"
+          out="$("$bin" status)"; echo "$out"
+          test "$(printf '%s\n' "$out" | grep -cE '^[0-9]{4} (applied|adopted) [0-9a-f]{8}$')" -eq "$n"
       # The GAP harness tests SKIP with PENDING reasons — that is expected and honest
       # (behavioral layer scaffolded, not faked). -v so the SKIP reasons are visible.
       # TM_TEST_DATABASE_URL is set so the store's PG integration tests RUN (not skip).

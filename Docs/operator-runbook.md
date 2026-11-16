@@ -208,7 +208,7 @@ other field of the body is unchanged. A not-ready queue says why, in these words
 
 **A deployment that serves only `POST /v1/verify` and has no bulk caller still has to set
 `TM_QUEUE_ADDR_KEY` to be reported ready** — there is no "no bulk wanted" setting; the key is a boot-time
-precondition of the whole module being ready. (Rung 4 does not change this: a paused queue is still
+precondition of the whole module being ready. **Why it is all-or-nothing:** the platform always submits bulk jobs, so a deployment without the queue key can never serve it; a verify-only mode is not offered. (Rung 4 does not change this: a paused queue is still
 `ready`, because a pause is a deliberate state and not a missing dependency, §3.) A process that failed
 before the queue wiring (no pepper, no `TM_DATABASE_URL`, store open failed, policy load or seed failed)
 is already `not_ready` for `pepper`/`db` and carries no `queue` check. To check from a shell:
@@ -288,15 +288,15 @@ rolling forward. (Originally written 2026-08-07 as `history/go-live-rollback-pos
 
 ### 9.1 The measured facts
 
-Measured against the tree — the migration and `REVOKE` rows re-measured on 2026-11-15 over 16 migrations, the others on 2026-11-13; not inferred:
+Measured against the tree — the migration and tracker rows on 2026-11-16 over 17 migrations, the `REVOKE` row on 2026-11-15 (`0017` adds none), the others on 2026-11-13; not inferred:
 
 | Fact | Value |
 |---|---|
-| Migrations | **16** (`0001` … `0016`), applied by `for f in $(ls migrations/[0-9][0-9][0-9][0-9]_*.sql \| sort); do psql -f "$f"; done`, the same way CI does it |
+| Migrations | **17** (`0001` … `0017`), applied by the runner, `cmd/migrate up` (§9.6). CI builds its test database with the old loop (`for f in $(ls migrations/[0-9][0-9][0-9][0-9]_*.sql \| sort); do psql -f "$f"; done`, valid on an EMPTY database only) and then runs the runner over it |
 | `.down.sql` files, or any other rollback mechanism | **0** — none |
-| A `schema_migrations` / version-tracking table | **none** (`migrations/README.md` only recommends one) |
+| A `schema_migrations` / version-tracking table | **`verify.schema_migrations`**, created by `0017` and filled by the runner: one row per file (`version`, sha256 `checksum`, `how` = `applied` or `adopted`, `applied_at`, `applied_by`). `verify_app` holds no privilege on it; `verify_admin` may `SELECT` (FW-3, closed) |
 | `REVOKE` statements | **22** in 11 files (`grep -cE '^\s*REVOKE\b' migrations/*.sql`): 17 are `REVOKE … FROM cp_runtime` tightenings (the least-privilege pattern: `GRANT SELECT, INSERT … TO cp_runtime; REVOKE UPDATE, DELETE … FROM cp_runtime;`), 2 (in `0014`) remove the default `PUBLIC` execute on two functions, and 3 (in `0016`) remove the default `PUBLIC` access to schema `verify` and to the two functions that file creates (`cp_runtime` is the role `0016` renames to `verify_app`) |
-| Re-running `0001` … `0015` on a database that already ran `0016` | **not supported**: they are unqualified and `IF NOT EXISTS`, so they re-create empty module-1 tables in `public`; `0016` then stops with SQLSTATE `42P07` naming the table, before moving anything. Check the `public` copy is empty, drop it, re-run `0016` |
+| Re-running `0001` … `0015` on a database that already ran `0016` | **never done by the runner** (it adopts those versions instead, and refuses a database that also holds `public.verifications`). By hand it is **not supported**: they are unqualified and `IF NOT EXISTS`, so they re-create empty module-1 tables in `public`; `0016` then stops with SQLSTATE `42P07` naming the table, before moving anything. Check the `public` copy is empty, drop it, re-run `0016` |
 | `ALTER TABLE … DROP CONSTRAINT` | **4**: `0008` (`nodes.valid_status`), `0012` (`send_outcomes.send_outcome_calibration_class`), `0015` (`verifications.valid_reason` and `cache.valid_reason`) — each drops, then recreates a **widened** constraint |
 
 The 2026-08-07 write-up reported "15 REVOKE across 8 migrations, 2 DROP CONSTRAINT" at 13 migrations; that figure
@@ -309,9 +309,10 @@ as the record. Forward-only is deliberate: `migrations/README.md` §"No Down Mig
 Measured 2026-08-07 on two databases built from the same repo, differing only in whether `0013_job_owner.sql` ran:
 the one that ran it has `api_callers.user_id`, `jobs.owner_user_id` and `idx_jobs_owner`; the other does not.
 `git revert` deletes the migration **file** and executes nothing against a database that already ran it. After a
-revert a *new* environment is built from the older schema while an *existing* one keeps the columns — and **nothing
-in either database records which it is**, because there is no tracking table. Two environments, one tree, divergent
-schemas. The hazard applies to every migration in the repo.
+revert a *new* environment is built from the older schema while an *existing* one keeps the columns. Since `0017` the database does record what it ran,
+so the divergence is no longer invisible: the existing database holds a recorded version the reverted tree has no file for, and the runner refuses
+it ("the database is ahead of this checkout") instead of carrying on. It is still two environments with divergent schemas, and a refusal is not a rollback.
+The hazard applies to every migration in the repo.
 
 ### 9.3 Where the append-only rationale does not reach
 
@@ -325,8 +326,8 @@ schemas. The hazard applies to every migration in the repo.
 
 ### 9.4 What to do — in order
 
-1. **Adopt migration version tracking before a second environment exists** ([`future-work.md`](future-work.md) FW-3, 🔧
-   not built). With one database the gap is invisible; with two it is the difference between a query and archaeology.
+1. **Apply migrations only with the runner** (§9.6; migration version tracking, [`future-work.md`](future-work.md) FW-3, is built and closed). With two
+   databases the difference between a query (`migrate status`) and archaeology is exactly this tracker.
 2. **Treat `git revert` of a migration as not a rollback.** To undo applied DDL write a **new forward migration** that
    reverses it explicitly (`DROP COLUMN`, `DROP INDEX`, re-`GRANT`), reviewed like any other and applied the same way.
 3. **Before deploying a migration, know its reverse** — and whether it loses data. `ADD COLUMN` reverses cleanly;
@@ -339,7 +340,34 @@ schemas. The hazard applies to every migration in the repo.
 
 ### 9.5 What this does not claim
 
-It does not claim a migration is broken — all 16 apply cleanly, in order, on a fresh database, in CI on every push. It
-does not claim forward-only is the wrong design. And it does not propose 16 `.down.sql` files: most would be trivial or
+It does not claim a migration is broken — all 17 apply cleanly, in order, on a fresh database, in CI on every push (by the old loop and by the runner). It
+does not claim forward-only is the wrong design. And it does not propose 17 `.down.sql` files: most would be trivial or
 dishonest (a down-migration of a partitioned append-only table is a data-loss script wearing a rollback costume). The
-actionable item is tracking, so you always know what a given database has run.
+actionable item was tracking, so you always know what a given database has run; it is now built (§9.6).
+
+### 9.6 Applying and checking migrations: the runner
+
+Since `0017` there is one way to apply migrations to a database you keep: `control-plane/cmd/migrate` (design and proof: [`../control-plane/migrations/README.md`](../control-plane/migrations/README.md) "The runner and the tracker"). It needs the **migrating** identity's DSN (a superuser on stock Postgres, `postgres` on Supabase, never `verify_app`) on a direct or session-mode connection, and the migrations directory:
+
+```bash
+cd control-plane
+export TM_MIGRATE_DATABASE_URL='postgres://postgres:<password>@<host>:5432/<db>' TM_MIGRATIONS_DIR=migrations
+go run ./cmd/migrate status      # one line per file: NNNN applied|adopted|pending <checksum8>; changes nothing, takes no lock
+go run ./cmd/migrate up          # migrate: applied N, adopted M, already applied K, total T
+```
+
+Run `status` first on any database you have not looked at. **Stop the control plane for an upgrade of an old database** (`0016` moves every table to schema `verify`).
+
+| Exit | Message | What it means and what to do |
+|---|---|---|
+| `0` | `migrate: applied 0, adopted 0, already applied T, total T` | nothing to do; running it again is always safe |
+| `0` | `adopted M` > 0 | the database was migrated by the old loop; the runner recorded those versions without running them |
+| `2` | `migration NNNN changed after it was applied: recorded <8 hex>, on disk <8 hex>` | someone edited an applied file. Revert the edit and put the change in a **new** migration. Nothing was changed |
+| `2` | `migration NNNN is recorded … but there is no file for it: the database is ahead of this checkout` | this host's code is older than the database (a rollback of the code, a stale deploy). Deploy the newer checkout; do not edit the tracker. Nothing was changed |
+| `2` | `migration NNNN is not applied but a later one (MMMM) is` | the history has a hole (a row deleted, or a file applied out of order by hand). Find out what happened, restore the row only if the file's effect is really present; nothing was changed |
+| `2` | `verify.verifications and public.verifications both exist` | `0001`–`0015` were re-run by hand on a migrated database; check the `public` copy is empty, drop it (§9.1) |
+| `2` | `no migration files`, `migration NNNN is missing`, `has 2 files`, `not named NNNN_name.sql` | the migrations directory is wrong or malformed (a numbering gap, two files with one number, a misnamed file that would never run) |
+| `1` | `another migration runner holds the advisory lock …` | another `up` is running on this database (or crashed with its connection still open). Wait, or find it with `SELECT pid, application_name, state FROM pg_stat_activity WHERE application_name = 'tm-migrate'`; a dead runner releases the lock when its connection ends |
+| `1` | `migration NNNN_x.sql failed and was rolled back` | that file's SQL failed; its transaction rolled back and nothing after it ran, everything before it stays recorded. Fix the cause in a new forward migration if the file is wrong, or fix the environment, and run `up` again: it repeats the same file |
+
+A database a `psql` loop (or the Supabase SQL editor) migrated has an empty or missing tracker: the first `up` adopts it. After that, apply migrations **only** with the runner: a file applied by hand is not recorded and the next `up` would apply it again.

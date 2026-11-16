@@ -26,8 +26,8 @@ The pool/queue/audit LOGIC is built and tested against simulated nodes + a contr
 | B8 | **DR-4 backup/PITR restore drill** | the at-rest ciphertext + transactional purge, proven locally (dump-the-row → ciphertext only) | a real snapshot restore-into-isolation | a real backup/PITR restore-into-isolation drill at go-live (ADR-0002 compliance test) | go-live infra |
 
 > **B8 got more load-bearing on 2026-08-07, so it should stop being the easy deferral.** The schema is
-> forward-only with **no** down-migration mechanism (measured 2026-08-07, re-measured 2026-11-13 over 15 migrations: 0 `.down.sql`, no version-tracking
-> table — [FW-3](#4-not-built-yet-inside-this-repo)), and the LOG tables are append-only with `verify_app` holding no `UPDATE`/`DELETE` on them by
+> forward-only with **no** down-migration mechanism (measured 2026-08-07, re-measured 2026-11-16 over 17 migrations: 0 `.down.sql`; a version-tracking
+> table has existed since `0017` and records what each database ran — [FW-3](#6-closed-since-this-register-was-written-2026-07-19--2026-11-16), closed), and the LOG tables are append-only with `verify_app` holding no `UPDATE`/`DELETE` on them by
 > construction. So for the LOG, **restore IS the only recovery path there is** — B8 is not one recovery
 > option among several, it is the whole set. Detail and the go-live checklist:
 > [`operator-runbook.md`](operator-runbook.md) §9 (the original 2026-08-07 write-up is kept in
@@ -82,15 +82,16 @@ This is **not** an un-mockable-behavior gap like §1–§3 (those wait on a real
 
 ## 4. Not built yet, inside this repo
 
-Everything in §1–3.5 waits on something *outside* this repo. These five do not: nothing external is missing, the work is simply unwritten. Each was checked absent on 2026-11-13 (the command is in the last column). They are build tasks, not decisions; none changes a door.
+Everything in §1–3.5 waits on something *outside* this repo. These four do not: nothing external is missing, the work is simply unwritten. Each was checked absent on 2026-11-13 (the command is in the last column). They are build tasks, not decisions; none changes a door.
 
 | ID | Task | What it blocks / why it matters | Fix shape | Verified absent by |
 |---|---|---|---|---|
 | **FW-1** | **DR-3 admin-audit log** — an append-only table with per-actor identity (who / what / when) that every manual control-plane action writes: node disable, global-fallback-kill, pause, shadow-mode promotion, budget change, breaker/brake confirm, privacy opt-out flip. Distinct from the verdict LOG. | Gates **go-live** ([`open-decisions.md`](open-decisions.md) §2, DR-3). Until it exists, "promote to `auto` is an admin-audited action" and "the fallback-kill is audited" are not true in code. | Reuse the `node_audits` / `work_item_attempts` append-only pattern (migrations 0007, 0009): table + `verify_app` INSERT/SELECT only + a typed writer every mutator calls. FW-2 is its first slice. | `grep -rniE "admin_audit\|AdminAudit" control-plane` → no hits; no migration 0001–0015 creates such a table. |
 | **FW-2** | **An operator command that sets `port25_open=true`.** `port25_open` is only ever *written false* (boot registration); there is no `TM_NODE_PORT25_OPEN`, no admin endpoint and no egress-test writer. | Without it a node can never become `:smtp`-eligible without an out-of-band DB write (the gate fails closed — nothing is faked). | The audited egress-test writer under FW-1 (smoke-test port 25 from the node, record the result, set the flag). Interim: as `verify_admin`, `UPDATE nodes SET port25_open=true WHERE id='…'`. | `grep -rn PORT25_OPEN control-plane` → no hits (no env var); `port25_open` is only read back unchanged by the re-audit scheduler (`internal/audit/scheduler.go`). |
-| **FW-3** | **Migration version tracking.** Migrations are applied with a shell loop; nothing records which a database has run (no `schema_migrations`), and there are no down-migrations (0 of 15). | Cheap before a second environment exists, archaeology afterwards ([`operator-runbook.md`](operator-runbook.md) §9). | A tracking table plus an apply script that skips what is recorded, or an off-the-shelf tool; keep forward-only. | `ls control-plane/migrations` (no `.down.sql`); `grep -rn schema_migrations control-plane` finds only the README's recommendation. |
-| **FW-4** | **Package the control-plane.** There is no Dockerfile or compose file for it (`control-plane/` holds `cmd config go.mod go.sum internal migrations test`); the verifier-node has both. | Deployment is `go build` + env + the migration loop today. Not a go-live blocker for a single host, but nothing builds a control-plane image. | A multi-stage Dockerfile pinned by digest; extend `check-base-image-pinned.sh` to cover it so it cannot be cache-only. | `ls control-plane`. |
+| **FW-4** | **Package the control-plane.** There is no Dockerfile or compose file for it (`control-plane/` holds `cmd config go.mod go.sum internal migrations test`); the verifier-node has both. | Deployment is `go build` + env + the migration runner (`cmd/migrate`) today. Not a go-live blocker for a single host, but nothing builds a control-plane image. | A multi-stage Dockerfile pinned by digest; extend `check-base-image-pinned.sh` to cover it so it cannot be cache-only. | `ls control-plane`. |
 | **FW-5** | **`TM_SUPABASE_KEY` has no consumer.** `secrets.Load` requires it when `TM_ENV=production` and `/readyz` reports it as `supabaseKey`, but nothing reads its value — the database connection uses `TM_DATABASE_URL`. | An operator on plain Postgres must set a meaningless secret to start in production. | Retire it (keep accepting it — additive only) or give it a real consumer. [`install-and-deploy.md`](install-and-deploy.md) §3.1 tells the operator what to do meanwhile. | `grep -rn "SupabaseKey()\|supabaseKey" control-plane --include=*.go` → only the presence check. |
+
+FW-3 (migration version tracking) stood in this table until 2026-11-16; it is built and closed, see §6.
 
 The two other in-repo seams are in §2 and §3 because they wait on an external party: the real vendor adapter (**V2**, needs a selected vendor) and the real mTLS client (**S2**, needs the sender).
 
@@ -111,7 +112,7 @@ The disclosure decisions OQ-P6-6 and OQ-P7-8 are *ruled* (disclose + opt-out; di
 
 ---
 
-## 6. Closed since this register was written (2026-07-19 → 2026-11-09)
+## 6. Closed since this register was written (2026-07-19 → 2026-11-16)
 
 Rows that used to be open here or in the go-live path, with the evidence that closed them. CI: every job green on `4b73326`, run [42633652063](https://github.com/elzainxx/coldmail-verify/actions/runs/42633652063).
 
@@ -128,6 +129,7 @@ Rows that used to be open here or in the go-live path, with the evidence that cl
 | Kill-switch Rung 4 was validated but never enforced | `TM_FRONTDOOR_MODE` moves both halves | [ADR-0015](adr/ADR-0015-rung4-pause-enforcement.md). |
 | A credential could reach a log line | Redaction + a gate that boots the real binary | [ADR-0016](adr/ADR-0016-no-credential-in-a-log-line.md); `check-no-secret-leak.sh`. |
 | The parked sub-decisions in `open-decisions.md` | Five closed with evidence, four moved to §5 above | `open-decisions.md` §5. |
+| **FW-3 — migration version tracking.** Migrations were applied by a shell loop and nothing recorded what a database had run (2026-11-16) | Owner ruling "M1 migration tracker: add one so migrations run exactly once and in order; the full chain twice must be a no-op; a fresh install must end in the same state as an upgraded one; prove both on the runner; keep 0016's refusal guard." Built as migration `0017` (`verify.schema_migrations`, `verify_app` holds nothing on it) plus the runner `control-plane/cmd/migrate` / `internal/migrate` (`up`, `status`; session advisory lock, one transaction per file, refusal on a changed file, a database ahead of the checkout, or a hole in the history). `0016`'s own guard is untouched. | Operator view: [`../control-plane/migrations/README.md`](../control-plane/migrations/README.md) "The runner and the tracker". **Proven in CI against a real Postgres** (`internal/migrate`, `cmd/migrate`): fresh install; the whole chain twice is a no-op (no row rewritten, catalog fingerprint unchanged); upgrade from a `0015`, a `0016` and a `0017` database left by the old loop each ends with the same catalog fingerprint and tracker `(version, checksum)` pairs as a fresh install, with a paired control showing the fingerprint changes and names the object when a table, column, grant or function body changes; `0001`–`0016` are never executed on a database that already ran `0016` (they are replaced by statements that raise); a changed file, a hole and an ahead-of-checkout database are refused leaving the database byte-identical; two runners at once are both seen blocked by the server and then yield one set of rows; a failing file stops the run and a rerun repeats the error; `0001`–`0016` are pinned by checksum. **Not proven:** the runner against Supabase's own `postgres` role (only the platform's supabase job exercises `0016`'s grant path for it); row data beyond one seeded row; an old-loop database that ran a non-idempotent migration *past* `0017` (the runner would apply it again: keep every migration idempotent). **Still open and unchanged:** there are no down-migrations (deliberate, `migrations/README.md`), and `git revert` of an applied migration is still not a rollback; the tracker only makes the divergence visible and refused. |
 
 ---
 

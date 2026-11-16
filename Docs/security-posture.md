@@ -37,6 +37,7 @@ by `Secrets.String()`. **No secret may reach a log line** ([ADR-0016](adr/ADR-00
 | Node tokens (per node) | `TM_NODE_TOKENS` (`nodeid=token,…`); the node's `ACCESS_TOKENS` | the brain cannot call that node | that node's wrapper is callable |
 | Vendor keys | `TM_VENDOR_KEYS` | the fallback stays off | spend and egress at the vendor |
 | Database DSN | `TM_DATABASE_URL` | the process is not ready | full data access |
+| Migrating identity's DSN | `TM_MIGRATE_DATABASE_URL` (migration runner only; the control plane never reads it) | migrations cannot be applied; the running service is unaffected | a superuser-grade credential (DDL, ownership, the whole database): custody like the break-glass role, never the runtime `verify_app`. The runner never prints it (driver errors that embed it are suppressed; `TestRun_NeverPrintsTheCredential`) |
 | Presence-checked secret | `TM_SUPABASE_KEY` | the process refuses to start when `TM_ENV=production` | nothing — it has no consumer (a known oddity, [`future-work.md`](future-work.md) FW-5) |
 | Future: mTLS trust anchor + client credential | not yet wired | feed stays fail-closed | the TB-7 threat model applies |
 
@@ -175,7 +176,6 @@ The node probes whatever mail host a user-supplied domain publishes, so its cont
 | **No admin-audit log** (DR-3) | Manual control-plane actions have no per-actor record | [`future-work.md`](future-work.md) FW-1; go-live G0.2 |
 | **No operator command for `port25_open`** | A node cannot become `:smtp`-eligible without a `verify_admin` write | FW-2 |
 | **A `verify_admin` holder can rewrite the LOG** | Immutability is by grant, not write-once media | FW-9 (owner decision) |
-| **No migration version tracking** | Which migrations a database has run is not recorded | FW-3 |
 | **Brakes have no timeout and no authenticated confirm** | They stay held until a human acts | FW-8 (owner decision) |
 | **The egress firewall and short hostname are not installed anywhere yet** | They are shipped and gated, but the real box does not exist | go-live G1.4, G1.5 |
 | **TLS termination is undecided** | Whether the app or a proxy terminates TLS is a deployment choice; neither has been exercised on a live host | go-live G1.11 |

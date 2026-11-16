@@ -4,6 +4,11 @@
 in the build. It records a property of the migration layer that an operator must know **before** the
 first non-local deploy, because the moment two databases exist the cheap fix stops being cheap.
 
+> **Update 2026-11-16 (this record is otherwise as written on 2026-08-07).** The tracking gap named below (no `schema_migrations`, no way to ask a database what it has run) is closed:
+> migration `0017` creates `verify.schema_migrations` and the runner `control-plane/cmd/migrate` records every file it applies or adopts, refuses a changed file, a hole or a
+> database ahead of the checkout, and is a no-op the second time. See [`../future-work.md`](../future-work.md) §6 (FW-3), [`../operator-runbook.md`](../operator-runbook.md) §9.6 and
+> `control-plane/migrations/README.md`. There are still **no down-migrations** and `git revert` of an applied migration is still not a rollback; only the divergence is now visible and refused.
+
 **Why this file exists.** [`go-live-runbook.md`](../go-live-checklist.md) opens with "Each stage is
 independently reversible", and for what that sentence is about — flags, config, and env-gated layers —
 it is true and was designed that way (Door 5, GAP-21/31: every stage is a config flip, zero code

@@ -93,6 +93,8 @@ It does not resolve open questions or set UNSET values — those are owner decis
 | **`/verify` echo raw vs normalized email** | feature-flag | echo raw (OQ-4) | — | per-request (UX) | P1 §3.3.7, OQ-4 |
 | **`provider_canonical_hash` populate** | feature-flag | define + populate from row #1 (OQ-2) | — | data-integrity | P1 §3.3.5, OQ-2 |
 | **`TM_DATABASE_URL`** (Postgres/Supabase DSN) | feature-flag | empty ⇒ `/v1/verify` not-ready (503); health still served | missing ⇒ no verify; wrong ⇒ no state | brain-wide | P1 §5.6 |
+| **`TM_MIGRATE_DATABASE_URL`** (the migrating identity's DSN; read by `cmd/migrate` only, never by the control plane) | secret | UNSET ⇒ `migrate` exits 64 naming the variable; nothing else is affected | wrong ⇒ the runner cannot connect and changes nothing. It is a superuser-grade credential (a superuser, or Supabase `postgres`): custody like the break-glass role, never the runtime `verify_app`, never printed | data-integrity / security | FW-3, `control-plane/migrations/README.md` |
+| **`TM_MIGRATIONS_DIR`** (directory of `NNNN_*.sql` the runner reads) | feature-flag | `migrations` (relative to the working directory) | wrong ⇒ the runner refuses (no files, a gap, a duplicate) and changes nothing; a directory from an older checkout ⇒ refused as "ahead of this checkout" | data-integrity | FW-3, `control-plane/migrations/README.md` |
 
 ---
 

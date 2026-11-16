@@ -82,9 +82,8 @@ go build ./... && go vet ./...
 
 # A Postgres for state + the append-only integration tests:
 docker run -d --name cp-pg -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=cptest -p 5432:5432 postgres:16-alpine
-for f in $(ls migrations/[0-9][0-9][0-9][0-9]_*.sql | sort); do
-  docker exec -i cp-pg psql -U postgres -d cptest -v ON_ERROR_STOP=1 -f - < "$f"
-done
+# Apply every migration, once and in order, with the runner (records them in verify.schema_migrations; a second run is a no-op):
+TM_MIGRATE_DATABASE_URL='postgres://postgres:dev@localhost:5432/cptest' go run ./cmd/migrate up
 
 # Run the full suite against real Postgres:
 TM_TEST_DATABASE_URL='postgres://postgres:dev@localhost:5432/cptest' go test -shuffle=on ./...
@@ -95,7 +94,7 @@ TM_DATABASE_URL='postgres://postgres:dev@localhost:5432/cptest' TM_PEPPER='<32-b
   go run ./cmd/control-plane
 ```
 
-The migration loop applies all 16 (`0001`–`0016`; once — re-running `0001`–`0015` on a migrated database is not supported, see `control-plane/migrations/README.md`). A production start (`TM_ENV=production`) also needs
+The runner applies all 17 (`0001`–`0017`) exactly once each and records them; running it again changes nothing, and it refuses a changed file, a database ahead of the checkout or a hole in the history (see `control-plane/migrations/README.md` "The runner and the tracker"; a plain `psql` loop is valid only on an empty database). A production start (`TM_ENV=production`) also needs
 `TM_SUPABASE_KEY` (and `TM_FRONTDOOR_TOKEN` to call the sync endpoint) — see [`Docs/install-and-deploy.md`](Docs/install-and-deploy.md) §3.1.
 
 Build the box (no Ruby on the host — it's containerized), from the repo root:
@@ -124,6 +123,8 @@ or not built yet — in the [go-live checklist](Docs/go-live-checklist.md)):
 
 These are setup steps, like provisioning a database — not caveats. Until a tier is configured, the
 system simply returns its honest verdict from the layers it *can* run.
+
+**Why `/readyz` is all-or-nothing on `TM_QUEUE_ADDR_KEY`.** `POST /v1/verify` serves with just a database and a pepper, yet `/readyz` answers `503 not_ready` until the queue key is set too, and there is no setting that says "no bulk wanted". That is deliberate: the platform always submits bulk jobs, so a deployment without the queue key can never serve it; a verify-only mode is not offered. Readiness is what an orchestrator reads to decide whether to send traffic, so a module whose job routes can only answer 503 must not report `ready` (the body's `reasons` names the missing key; [`Docs/operator-runbook.md`](Docs/operator-runbook.md) §6.1). Behaviour is unchanged by this note.
 
 ## Where to go next
 

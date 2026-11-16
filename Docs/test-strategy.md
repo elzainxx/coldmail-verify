@@ -96,7 +96,14 @@ Per PROJECT_RULES.md §7, every change runs (see [`../.github/workflows/ci.yml`]
    roles and schema ACL, every pre-`0016` privilege carried over plus exactly the two declared additions) and
    `internal/store/verify_runtime_test.go` drives the real store over a real `verify_app` LOGIN, each with a paired control.
    They are not build-tagged and run whenever `TM_TEST_DATABASE_URL` is set. Roles are cluster-wide, so `testpg` holds one
-   `pg_advisory_lock` while migrations run and any test that reads or changes role state takes it too
+   `pg_advisory_lock` while migrations run and any test that reads or changes role state takes it too.
+   `internal/migrate` and `cmd/migrate` (the migration runner, FW-3) pin the tracker: a fresh install, the full chain twice
+   (a no-op), upgrades from `0015` / `0016` / `0017` that must end with the same catalog fingerprint as a fresh install (with a
+   paired control that the fingerprint changes and names the object), `0001`–`0016` never executed on a database that already ran
+   `0016`, refusals that leave the database unchanged, two runners at once, a failing file, and the checksums of `0001`–`0016`.
+   A database left at `0015` is created and finished inside one hold of the migration lock, because it still depends on the
+   cluster-wide role `cp_runtime` that other packages assert is gone (`testpg.ScratchUnderLock`). There is no per-package test
+   count to register: `check-test-execution.sh` derives every package's roster from `go test -list` and fails on any skip
 2. **every declared test actually EXECUTED** — a skip is a shortfall, not a pass; two-tiered so the
    PENDING GAP harness below stays legal and everything else must run
    (`scripts/check-test-execution.sh`, plus its paired self-test)

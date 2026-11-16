@@ -1,7 +1,7 @@
 # Install and deploy — from a clean checkout to a running system
 
 **Status:** LIVE. Commands, env var names, ports and counts were checked against the code on
-2026-11-13 (control-plane default listen `:8080`, node `:3000`); the migration count (16) and the database roles were brought up to migration `0016` on 2026-11-15. Read
+2026-11-13 (control-plane default listen `:8080`, node `:3000`); the migration count (17), the database roles and the migration runner were brought up to migration `0017` on 2026-11-16 (roles: `0016`, 2026-11-15). Read
 [`architecture.md`](architecture.md) first for what you are installing; operate it with
 [`operator-runbook.md`](operator-runbook.md); follow the ordered, status-marked path to live in
 [`go-live-checklist.md`](go-live-checklist.md). The deep per-phase design is in [`history/`](history/).
@@ -34,10 +34,10 @@ go vet ./...
 
 # A throwaway Postgres for the store + append-only integration tests:
 docker run -d --name cp-pg -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=cptest -p 5432:5432 postgres:16-alpine
-# Apply every migration in order (0001 … 0016), ONCE (re-running 0001–0015 on a migrated database is not supported, see migrations/README.md):
-for f in $(ls migrations/[0-9][0-9][0-9][0-9]_*.sql | sort); do
-  docker exec -i cp-pg psql -U postgres -d cptest -v ON_ERROR_STOP=1 -f - < "$f"
-done
+# Apply every migration (0001 … 0017) with the runner: once each, in order, recorded in verify.schema_migrations; a second run is a no-op.
+# TM_MIGRATE_DATABASE_URL is the MIGRATING identity (here the superuser), never the runtime verify_app. See migrations/README.md "The runner and the tracker".
+TM_MIGRATE_DATABASE_URL='postgres://postgres:dev@localhost:5432/cptest' go run ./cmd/migrate status
+TM_MIGRATE_DATABASE_URL='postgres://postgres:dev@localhost:5432/cptest' go run ./cmd/migrate up
 
 # Run the full suite against real Postgres (the PG-tagged tests RUN, not skip):
 TM_TEST_DATABASE_URL='postgres://postgres:dev@localhost:5432/cptest' go test -shuffle=on ./...
@@ -148,14 +148,16 @@ see [`security-posture.md`](security-posture.md) §2):
 | `TM_FRONTDOOR_TOKEN` | for the sync endpoint | legacy bearer for `POST /v1/verify`; the bulk endpoints need a per-caller key (rows in `api_callers`) |
 | `TM_ENV` | recommended | `production` makes the core secrets mandatory (the process refuses to start without them); `development` is the only mode where an unconfigured front door is open |
 | `TM_SUPABASE_KEY` | **when `TM_ENV=production`** | presence-checked at boot and shown by `/readyz` as `supabaseKey`; **nothing reads its value** — Postgres access uses `TM_DATABASE_URL`. Set any non-empty value on plain Postgres (retiring it is [`future-work.md`](future-work.md) FW-5) |
-| `TM_QUEUE_ADDR_KEY` | for bulk, and for `/readyz` to say `ready` | 32 bytes, hex or base64 (`openssl rand -hex 32`); **a different secret from the pepper**. Without it the queue refuses to start, the bulk and job endpoints stay 503, **and `/readyz` answers 503 `not_ready`** with `reasons` naming the key ([`operator-runbook.md`](operator-runbook.md) §6.1). `TM_QUEUE_ADDR_KEY_PREV` holds the previous key during a rotation overlap |
+| `TM_QUEUE_ADDR_KEY` | for bulk, and for `/readyz` to say `ready` | 32 bytes, hex or base64 (`openssl rand -hex 32`); **a different secret from the pepper**. Without it the queue refuses to start, the bulk and job endpoints stay 503, **and `/readyz` answers 503 `not_ready`** with `reasons` naming the key ([`operator-runbook.md`](operator-runbook.md) §6.1). `TM_QUEUE_ADDR_KEY_PREV` holds the previous key during a rotation overlap. **Why `/readyz` is all-or-nothing on it:** the platform always submits bulk jobs, so a deployment without the queue key can never serve it; a verify-only mode is not offered |
 | `TM_LISTEN_ADDR` | no | default `:8080` |
 | `TM_CACHE_TTL_SECONDS` | no | unset ⇒ no verdict caching (never a guessed expiry) |
+| `TM_MIGRATE_DATABASE_URL` | for `cmd/migrate` only | the DSN of the **migrating** identity (a superuser on stock Postgres, `postgres` on Supabase), **not** the runtime `verify_app`, which has no privilege on the tracker. A direct or session-mode connection (the run holds a session advisory lock). Read by the migration runner, never by the control plane; never printed |
+| `TM_MIGRATIONS_DIR` | no | the directory of `NNNN_*.sql` the runner reads; default `migrations` (relative to the working directory) |
 
 A template with every secret and non-secret knob is `control-plane/config/secrets.example.env`; the full
 list of every dial and flag is [`config-reference.md`](config-reference.md) (generated).
 
-Apply the migrations **in order, `0001` … `0016`** (the loop in §2), then start the control-plane.
+Apply the migrations with the runner (`go run ./cmd/migrate up`, §2: all of `0001` … `0017`, once each, in order; `TM_MIGRATE_DATABASE_URL` is the migrating identity and `TM_MIGRATIONS_DIR` the directory, default `migrations`), then start the control-plane. A plain `psql` loop is valid only on an empty database and records nothing; the runner adopts such a database on its first run ([`operator-runbook.md`](operator-runbook.md) §9.6).
 
 **The runtime login (since `0016`).** The migrations create module 1's tables in schema `verify`, owned by the no-login role `verify_owner`, and make `verify_app` a `LOGIN` role holding only the runtime privileges. Give it a password **out of band** (never in a migration) and point `TM_DATABASE_URL` at it:
 

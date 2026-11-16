@@ -19,7 +19,7 @@
 // ADMIN connection (database `postgres`, so every caller contends on the same key) from before the first
 // file until after the last, and a test that reads cluster-wide role state takes the same lock with
 // LockMigrations. Never call Scratch or Apply while holding LockMigrations in the same test: they would
-// wait on each other.
+// wait on each other (ScratchUnderLock is the variant for a caller that already holds the lock).
 package testpg
 
 import (
@@ -136,9 +136,19 @@ func ScratchSelect(t testing.TB, include func(n int) bool) string {
 	return scratch(t, include, "select")
 }
 
-func scratch(t testing.TB, include func(n int) bool, what string) string {
+// Empty creates a throwaway database with NO migration applied (not even 0001), returns a superuser DSN to it, and drops it on cleanup. It exists for the
+// migration runner's tests (internal/migrate), which must start from a database nothing has touched. Creating a database does not touch roles, so it does
+// not take the migration lock; applying migrations to it afterwards does (hold LockMigrations around the run, and never call Scratch or Apply meanwhile).
+func Empty(t testing.TB) string {
 	t.Helper()
-	admin := AdminDSN(t)
+	dsn, _ := createDatabase(t, AdminDSN(t))
+	return dsn
+}
+
+// createDatabase creates one empty database (CREATE DATABASE needs a superuser DSN), registers its DROP on cleanup, and returns a DSN to it and the
+// DSN of the `postgres` maintenance database every caller uses for the cluster-wide migration lock.
+func createDatabase(t testing.TB, admin string) (dsn, adminDB string) {
+	t.Helper()
 	ctx := context.Background()
 
 	var b [5]byte
@@ -171,10 +181,38 @@ func scratch(t testing.TB, include func(n int) bool, what string) string {
 		}
 	})
 
-	dsn, err := withDB(admin, name)
+	dsn, err = withDB(admin, name)
 	if err != nil {
 		t.Fatalf("testpg: %v", err)
 	}
+	return dsn, adminDB
+}
+
+func scratch(t testing.TB, include func(n int) bool, what string) string {
+	t.Helper()
+	return scratchWith(t, include, what, false)
+}
+
+// ScratchUnderLock is Scratch for a caller that ALREADY holds LockMigrations: it applies the migrations without taking the migration lock itself (taking
+// it would wait on the caller for ever). It exists so a test can build a database in a state that still depends on the cluster-wide role cp_runtime
+// (migrated through 0015) and finish migrating it inside ONE hold of the lock: while such a database exists the cluster still has that role, and tests in
+// other packages read role state under the same lock and assert it is gone. Lock, create, migrate, unlock: no other test may see the half-way state.
+func ScratchUnderLock(t testing.TB, through int) string {
+	t.Helper()
+	return scratchWith(t, func(n int) bool { return through <= 0 || n <= through }, fmt.Sprintf("through=%d", through), true)
+}
+
+func scratchWith(t testing.TB, include func(n int) bool, what string, callerHoldsLock bool) string {
+	t.Helper()
+	admin := AdminDSN(t)
+	ctx := context.Background()
+
+	dsn, adminDB := createDatabase(t, admin)
+	ac, err := pgx.Connect(ctx, adminDB)
+	if err != nil {
+		t.Fatalf("testpg: connect admin: %v", err)
+	}
+	defer ac.Close(ctx)
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
 		t.Fatalf("testpg: connect scratch: %v", err)
@@ -189,8 +227,10 @@ func scratch(t testing.TB, include func(n int) bool, what string) string {
 
 	// Held on the admin connection from before the first file until after the last (see the package comment). The deferred ac.Close also
 	// releases it if a Fatalf below unwinds this function.
-	if err := lockMigrations(ctx, ac); err != nil {
-		t.Fatalf("testpg: %v", err)
+	if !callerHoldsLock {
+		if err := lockMigrations(ctx, ac); err != nil {
+			t.Fatalf("testpg: %v", err)
+		}
 	}
 	applied := 0
 	for _, f := range files {
@@ -208,7 +248,9 @@ func scratch(t testing.TB, include func(n int) bool, what string) string {
 		}
 		applied++
 	}
-	unlockMigrations(ctx, t, ac)
+	if !callerHoldsLock {
+		unlockMigrations(ctx, t, ac)
+	}
 	if applied == 0 {
 		t.Fatalf("testpg: applied 0 migrations (%s)", what)
 	}

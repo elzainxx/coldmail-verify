@@ -1,7 +1,7 @@
 # Architecture — how the system is built
 
 **Status:** LIVE. Every count, name and route below was checked against the code on 2026-11-13 (migrations and roles brought up to `0016` on 2026-11-15)
-(24 control-plane packages, 6 control-plane routes, 16 migrations, 21 ADRs, 11 CI jobs). If you change
+(25 control-plane packages, 6 control-plane routes, 17 migrations, 21 ADRs, 11 CI jobs). If you change
 the system, change this file in the same commit ([`../PROJECT_RULES.md`](../PROJECT_RULES.md) §8).
 This is the map; the design authority for any one capability is its ADR ([`adr/`](adr/)) and, for depth
 and history, the phase specs under [`history/`](history/).
@@ -136,8 +136,8 @@ frozen ([ADR-0018](adr/ADR-0018-verifier-node-base-image.md)). The node's own sa
 
 ## 6. Data model
 
-Postgres 16, 16 forward-only migrations (`control-plane/migrations/0001…0016`, no down-migrations —
-[`operator-runbook.md`](operator-runbook.md) §9). Everything lives in schema `verify` (since `0016`; nothing of module 1 is in `public`). Three roles: `verify_owner` (owns every object; no login), `verify_app` (the service; the only login) and `verify_admin`
+Postgres 16, 17 forward-only migrations (`control-plane/migrations/0001…0017`, no down-migrations —
+[`operator-runbook.md`](operator-runbook.md) §9), applied once each, in order, by the runner `cmd/migrate` (`internal/migrate`) and recorded in `verify.schema_migrations` (`0017`; the control plane never reads it). Everything lives in schema `verify` (since `0016`; nothing of module 1 is in `public`). Three roles: `verify_owner` (owns every object; no login), `verify_app` (the service; the only login) and `verify_admin`
 (break-glass table privileges, no login; DDL needs `verify_owner`).
 
 | Group | Tables | Posture |
