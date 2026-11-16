@@ -28,7 +28,7 @@ citations resolve). In one table — each tier, what turns it on, and how you tu
 | Cheap verification | `TM_DATABASE_URL` + `TM_PEPPER` (+ `TM_FRONTDOOR_TOKEN`; install §3.1). `/v1/verify` serves with just these, but `/readyz` reports `not_ready` until `TM_QUEUE_ADDR_KEY` is also set (§6.1) | — (it is the floor) |
 | Bulk / async | `TM_QUEUE_ADDR_KEY` + per-caller keys | `TM_FRONTDOOR_MODE=accept_and_defer` or `reject` (§3) |
 | SMTP verification | a vetted port-25 host, `TM_NODE_*`, `TM_SMTP_MODE=enabled` (install §3.2) | `TM_SMTP_MODE=disabled` or `TM_NODE_ENABLED=false` |
-| Paid fallback | vendor adapter + DPA + the three switches (install §3.3) | `TM_FALLBACK_MODE=off` |
+| Paid fallback | a ZeroBounce key + DPA + the three switches + a daily spend cap above 0 (install §3.3; the adapter ships disabled) | `TM_FALLBACK_MODE=off` |
 | Calibration | an authenticated outcome feed (install §3.4) | leave the mutators `recommend-only`; unset the opt-in flags |
 
 ---
@@ -177,6 +177,8 @@ brake (e.g. a fleet-brake fraction ≥ 100%) is a **startup error**, never a sil
 | **block-spike** (single node) | one node's block-rate crossed the threshold | it quarantines (if A1 promoted) or recommends; check that IP's reputation |
 | **fleet-wide** | a majority of nodes tripped at once — systemic | **the fleet brake has held the pool** — this needs a human; do not drain, find the common cause (a routing change, a shared upstream) |
 | **recovering** | a quarantined node is on its canary trickle | informational; watch for clean cycles |
+| **`unknown_error`** (a verdict `reason`, not an alert) with `signals.error_capped = true` | an item could not be computed — its policy could not be resolved, its address could not be decrypted (a missing or rotated-out `TM_QUEUE_ADDR_KEY`), or `ComputeForQueue` returned an error — on `TM_QUEUE_ERROR_MAX_ATTEMPTS` attempts (default 5, about 30 s apart), so the queue settled it instead of retrying forever. It is `failure_origin: own`, terminal (the item is `dead`, it appears in the job's results and the job completes) and never cached | the cause is on our side: read the drainer log (`queue drainer: addr decrypt failed …`, `item … failed N times (last: …)`), fix it (restore the key, restore the policy), and re-submit the affected addresses in a new job. Many of these at once after a key rotation means the previous key was dropped too early (`TM_QUEUE_ADDR_KEY_PREV`) |
+| **`smtp_skipped_reason = smtp_unwired`** | the SMTP stage is not wired in this process (SMTP disabled, or no node or engine config could be fetched at boot): every residue address is answered by the cheap layers alone, labelled `failure_origin: own`, and not cached | expected on a deliberate cheap-layers-only deployment; otherwise find why boot logged `staying cheap-layers-only` (node list, token, `/v1/config` fetch) |
 | **rate-saturation** | demand is exceeding paced capacity | add a node, or route more through the queue |
 | **pool-eligible-low** | the eligible node set is near the floor | you are one quarantine from cheap-only; add capacity |
 
@@ -288,11 +290,11 @@ rolling forward. (Originally written 2026-08-07 as `history/go-live-rollback-pos
 
 ### 9.1 The measured facts
 
-Measured against the tree — the migration and tracker rows on 2026-11-16 over 17 migrations, the `REVOKE` row on 2026-11-15 (`0017` adds none), the others on 2026-11-13; not inferred:
+Measured against the tree — the migration row on 2026-11-17 over 18 migrations, the tracker row on 2026-11-16, the `REVOKE` row on 2026-11-15 (`0017` and `0018` add none), the others on 2026-11-13; not inferred:
 
 | Fact | Value |
 |---|---|
-| Migrations | **17** (`0001` … `0017`), applied by the runner, `cmd/migrate up` (§9.6). CI builds its test database with the old loop (`for f in $(ls migrations/[0-9][0-9][0-9][0-9]_*.sql \| sort); do psql -f "$f"; done`, valid on an EMPTY database only) and then runs the runner over it |
+| Migrations | **18** (`0001` … `0018`), applied by the runner, `cmd/migrate up` (§9.6). CI builds its test database with the old loop (`for f in $(ls migrations/[0-9][0-9][0-9][0-9]_*.sql \| sort); do psql -f "$f"; done`, valid on an EMPTY database only) and then runs the runner over it |
 | `.down.sql` files, or any other rollback mechanism | **0** — none |
 | A `schema_migrations` / version-tracking table | **`verify.schema_migrations`**, created by `0017` and filled by the runner: one row per file (`version`, sha256 `checksum`, `how` = `applied` or `adopted`, `applied_at`, `applied_by`). `verify_app` holds no privilege on it; `verify_admin` may `SELECT` (FW-3, closed) |
 | `REVOKE` statements | **22** in 11 files (`grep -cE '^\s*REVOKE\b' migrations/*.sql`): 17 are `REVOKE … FROM cp_runtime` tightenings (the least-privilege pattern: `GRANT SELECT, INSERT … TO cp_runtime; REVOKE UPDATE, DELETE … FROM cp_runtime;`), 2 (in `0014`) remove the default `PUBLIC` execute on two functions, and 3 (in `0016`) remove the default `PUBLIC` access to schema `verify` and to the two functions that file creates (`cp_runtime` is the role `0016` renames to `verify_app`) |
@@ -340,8 +342,8 @@ The hazard applies to every migration in the repo.
 
 ### 9.5 What this does not claim
 
-It does not claim a migration is broken — all 17 apply cleanly, in order, on a fresh database, in CI on every push (by the old loop and by the runner). It
-does not claim forward-only is the wrong design. And it does not propose 17 `.down.sql` files: most would be trivial or
+It does not claim a migration is broken — all 18 apply cleanly, in order, on a fresh database, in CI on every push (by the old loop and by the runner). It
+does not claim forward-only is the wrong design. And it does not propose 18 `.down.sql` files: most would be trivial or
 dishonest (a down-migration of a partitioned append-only table is a data-loss script wearing a rollback costume). The
 actionable item was tracking, so you always know what a given database has run; it is now built (§9.6).
 

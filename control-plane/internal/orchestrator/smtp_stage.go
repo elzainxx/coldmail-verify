@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/coldmail-verify/control-plane/internal/failureorigin"
 	"github.com/coldmail-verify/control-plane/internal/node"
 	"github.com/coldmail-verify/control-plane/internal/policy"
 	"github.com/coldmail-verify/control-plane/internal/ratelimit"
@@ -93,7 +94,11 @@ func smtpEligible(v policy.Verdict) bool {
 // keeps the honest cheap verdict.
 func (o *Orchestrator) runSMTP(ctx context.Context, normalized, domain, requestID string, cheap policy.Verdict) smtpStageOutcome {
 	if o.smtp == nil || o.smtp.Client == nil || o.smtp.Registry == nil {
-		return smtpStageOutcome{} // SMTP not wired → cheap verdict stands (no skip signal in P1/Rung3)
+		// SMTP is not wired in this process (disabled, or buildSMTP returned nil: no node / no config could be fetched). The cheap
+		// verdict stands — but it used to stand with NO token, indistinguishable from a genuine cheap-layers answer (M1-G6). Say so:
+		// smtp_skipped_reason="smtp_unwired", PROVISIONAL (our own degraded state is not an answer: never cached). compute() keeps the
+		// queue class QSettled for this token — nothing in this process will ever change it, so it must settle, not wait.
+		return smtpStageOutcome{SkipReason: reasonSMTPUnwired, Provisional: true}
 	}
 
 	// §4.4 eligibility gate + Door-5 routing: only nodes that are active ∧ green ∧ port25_open ∧
@@ -201,8 +206,8 @@ func (o *Orchestrator) runSMTP(ctx context.Context, normalized, domain, requestI
 
 	var wr smtp.WrapperResponse
 	if err := json.Unmarshal(raw, &wr); err != nil {
-		// Unparseable node response → unknown/smtp_error (never a guessed verdict).
-		return smtpStageOutcome{Ran: true, Result: unknownResult(vocab.ReasonSMTPError), RawBlob: raw, NodeID: n.ID, VerifierIP: verifierIP}
+		// Unparseable node response → unknown/smtp_error (never a guessed verdict). Our node's answer is not the wrapper's JSON: own.
+		return smtpStageOutcome{Ran: true, Result: unknownResultCause(vocab.ReasonSMTPError, failureorigin.CauseNodeBadResponse), RawBlob: raw, NodeID: n.ID, VerifierIP: verifierIP}
 	}
 
 	// ADR-0021: the node's destination guard refused to open a session (the domain's mail host resolves to a non-public address).
@@ -267,44 +272,51 @@ func (o *Orchestrator) sleep(d time.Duration) {
 // reasonWarmupCap / reasonSMTPSkipped is the signals.smtp_skipped_reason enum (additive to the open
 // signals bag — Door 1). P3 shipped four tokens; P4 adds ONE additive value: rate_limited (§4.6/§9,
 // the phase's only Door-adjacent addition — an additive value on the already-open string enum, NOT a
-// new key/reason/status). Only these five tokens are ever written.
+// new key/reason/status); the P2-research close-out adds smtp_unwired (M1-G6). Only these six tokens
+// are ever written. They are declared ONCE, in vocab (vocab.SkipTokens enumerates them for the tests);
+// the names below are this package's handles on them.
 const (
-	reasonNoEligibleNode = "no_eligible_node"
-	reasonAuditRed       = "audit_red"
-	reasonProviderMX     = "provider_mx_routed"
-	reasonWarmupCap      = "warmup_cap"
-	reasonRateLimited    = "rate_limited" // P4 §4.6: every eligible node at its per-provider cap
-	signalSMTPSkipped    = "smtp_skipped_reason"
+	reasonNoEligibleNode = vocab.SkipNoEligibleNode
+	reasonAuditRed       = vocab.SkipAuditRed
+	reasonProviderMX     = vocab.SkipProviderMX
+	reasonWarmupCap      = vocab.SkipWarmupCap
+	reasonRateLimited    = vocab.SkipRateLimited // P4 §4.6: every eligible node at its per-provider cap
+	reasonSMTPUnwired    = vocab.SkipSMTPUnwired // M1-G6: the SMTP stage is not wired in this process
+	signalSMTPSkipped    = vocab.SignalSMTPSkippedReason
 )
 
 // smtpFromNodeError maps a node call failure to an honest unknown (§4.1 failure modes / §6.5):
 // a transport timeout → smtp_timeout; a non-2xx HTTP status → connection_failed/unknown. It never
 // fabricates valid/invalid. The cheap verdict's provider signal is preserved for provenance.
+//
+// Every branch here is a failure of OUR node (or of our client talking to it), so every branch records an own-side cause
+// (failure_origin=own): no transcript exists, the recipient's server was never involved as far as M1 can see.
 func (o *Orchestrator) smtpFromNodeError(err error, cheap policy.Verdict) smtp.Result {
 	var transport *node.TransportError
 	if errors.As(err, &transport) {
-		return unknownResult(vocab.ReasonSMTPTimeout)
+		return unknownResultCause(vocab.ReasonSMTPTimeout, failureorigin.CauseNodeTransport)
 	}
 	var status *node.HTTPStatusError
 	if errors.As(err, &status) {
 		if status.Status == 401 || status.Status == 400 {
 			// Auth/protocol bug — not a verdict; degrade to unknown, surfaced in logs.
-			return unknownResult(vocab.ReasonSMTPError)
+			return unknownResultCause(vocab.ReasonSMTPError, failureorigin.CauseNodeRejected)
 		}
-		return unknownResult(vocab.ReasonConnectionFailed)
+		return unknownResultCause(vocab.ReasonConnectionFailed, failureorigin.CauseNodeHTTPStatus)
 	}
-	return unknownResult(vocab.ReasonSMTPError)
+	return unknownResultCause(vocab.ReasonSMTPError, failureorigin.CauseNodeClientError)
 }
 
-// unknownResult builds a non-cacheable unknown SMTP result (harden-toward-unknown). retry_eligible
-// is marked for the transient classes so a P5 queue can act (nothing retries in P2).
-func unknownResult(reason vocab.Reason) smtp.Result {
+// unknownResultCause builds a non-cacheable unknown SMTP result (harden-toward-unknown). retry_eligible
+// is marked for the transient classes so a P5 queue can act (nothing retries in P2). cause is the
+// evidence for signals.failure_origin (never serialised itself; "" → undetermined).
+func unknownResultCause(reason vocab.Reason, cause failureorigin.Cause) smtp.Result {
 	signals := map[string]any{}
 	switch reason {
 	case vocab.ReasonSMTPTimeout, vocab.ReasonConnectionFailed:
 		signals["retry_eligible"] = true
 	}
-	return smtp.Result{Status: vocab.StatusUnknown, Reason: reason, Confidence: 10, Signals: signals, Cacheable: false}
+	return smtp.Result{Status: vocab.StatusUnknown, Reason: reason, Confidence: 10, Signals: signals, Cacheable: false, Cause: cause}
 }
 
 func boolSignal(signals map[string]any, key string) bool {

@@ -1,7 +1,7 @@
 # Architecture — how the system is built
 
-**Status:** LIVE. Every count, name and route below was checked against the code on 2026-11-13 (migrations and roles brought up to `0016` on 2026-11-15)
-(25 control-plane packages, 6 control-plane routes, 17 migrations, 21 ADRs, 11 CI jobs). If you change
+**Status:** LIVE. Every count, name and route below was checked against the code on 2026-11-13 (migrations and roles brought up to `0016` on 2026-11-15; `0018` and the queue row added 2026-11-17)
+(27 control-plane packages, 6 control-plane routes, 18 migrations, 21 ADRs, 11 CI jobs). If you change
 the system, change this file in the same commit ([`../PROJECT_RULES.md`](../PROJECT_RULES.md) §8).
 This is the map; the design authority for any one capability is its ADR ([`adr/`](adr/)) and, for depth
 and history, the phase specs under [`history/`](history/).
@@ -74,7 +74,9 @@ nothing but itself. The naming ("brain"/"box" in the design docs) is fixed by
 7. **Assemble, log, return.** The verdict is appended to the LOG (`verifications` + the raw sidecar)
    *before* it is returned; cache hits are logged too.
 
-`POST /v1/verify/bulk` takes the same path asynchronously through the durable queue (§5). The
+`POST /v1/verify/bulk` takes the same path asynchronously through the durable queue (§5). Each input row keeps its ordinal and an
+optional caller `item_id`, identical addresses inside one job are checked once, and nothing is deduplicated across jobs or tenants
+([`bulk-item-identity.md`](bulk-item-identity.md)). The
 control-plane serves exactly six routes — `POST /v1/verify`, `POST /v1/verify/bulk`, `GET /v1/jobs/{id}`,
 `GET /v1/jobs/{id}/results`, `GET /healthz`, `GET /readyz` — and [`api-contract.md`](api-contract.md) is
 checked against that set by `TestRoutes_*` on every push.
@@ -102,12 +104,13 @@ which node was blocked.
 | `smtp` | brain-side SMTP surface: wrapper-response types, transcript parser, 5xx classifier, signal→verdict scoring, `probe_refused` |
 | `audit` | the node audit / eligibility gate (egress-IP invariant, staleness, the `resolver` warning) |
 | `queue` | the async bulk queue: lease/CAS idempotency, retry/backoff, the drainer, the at-rest address cipher |
-| `external` | the P6 third-party fallback: anti-laundering, spend breaker, `Vendor` interface (no real adapter yet) |
+| `external` | the P6 third-party fallback: anti-laundering, spend breaker, `Vendor` interface, and the ZeroBounce adapter behind it (built, ships disabled; [`vendor-zerobounce.md`](vendor-zerobounce.md)) |
+| `failureorigin` | who failed when M1 could not answer: the pure mapping behind `signals.failure_origin` (`own` / `remote` / `undetermined`), written only by `verdict.Assemble` ([`failure-origin.md`](failure-origin.md)) |
 | `flywheel` | the P7 loop: bounce classifier, recalibration + guards, promotion, weaning, `OutcomeSource` (`PullSource` fail-closed) |
 | `metrics` | pure derivation of block-rate, unknown-rate, latency and pool health from the LOG |
 | `secrets` · `config` | secret loading (redacted in any `String()`) and the readable config surface (defaults → env, validated at startup) |
 | `idgen` | time-ordered UUIDv7 for the LOG's primary key |
-| `dnsfixture` · `testpg` | test infrastructure only: an in-process authoritative DNS server, and a throwaway migrated Postgres |
+| `dnsfixture` · `testpg` · `zbtest` | test infrastructure only: an in-process authoritative DNS server, a throwaway migrated Postgres, and the finder and per-test counters of the ZeroBounce stand-in (`control-plane/test/zbstub`; a missing stand-in fails in CI, never skips) |
 
 The single entrypoint is `cmd/control-plane/main.go`; read `buildAPI`, `buildSMTP`, `buildQueue`,
 `buildExternal` and `buildFlywheel` to see exactly which switch gates each capability. Background
@@ -136,7 +139,7 @@ frozen ([ADR-0018](adr/ADR-0018-verifier-node-base-image.md)). The node's own sa
 
 ## 6. Data model
 
-Postgres 16, 17 forward-only migrations (`control-plane/migrations/0001…0017`, no down-migrations —
+Postgres 16, 18 forward-only migrations (`control-plane/migrations/0001…0018`, no down-migrations —
 [`operator-runbook.md`](operator-runbook.md) §9), applied once each, in order, by the runner `cmd/migrate` (`internal/migrate`) and recorded in `verify.schema_migrations` (`0017`; the control plane never reads it). Everything lives in schema `verify` (since `0016`; nothing of module 1 is in `public`). Three roles: `verify_owner` (owns every object; no login), `verify_app` (the service; the only login) and `verify_admin`
 (break-glass table privileges, no login; DDL needs `verify_owner`).
 
@@ -145,7 +148,7 @@ Postgres 16, 17 forward-only migrations (`control-plane/migrations/0001…0017`,
 | **The LOG** | `verifications`, `verification_raw` (monthly partitions, ADR-0017) | append-only: `verify_app` has INSERT+SELECT only (Door 2) |
 | **Cache, lists & policy** | `cache`, `disposable_domains`, `spam_trap_domains`, `catchall_domains`, `policies` | runtime-writable where the layer needs it |
 | **Pool** | `nodes`, `node_audits` (append-only), `node_warmup`, `rate_budgets` | the health-watcher is the single writer of node status |
-| **Queue** | `work_items` (the one bounded plaintext exception, encrypted), `jobs`, `work_item_attempts` (append-only) | lease/CAS-guarded |
+| **Queue** | `work_items` (the one bounded plaintext exception, encrypted; its idempotency key is unique **per job**, never across jobs or tenants), `jobs`, `job_rows` (one row per input row of a bulk job, with the caller's ordinal and `item_id`, `duplicate_of_ordinal` and, for a malformed row, the id of its own `invalid_syntax` LOG row; no address; append-only for `verify_app`, 0018), `work_item_attempts` (append-only) | lease/CAS-guarded |
 | **Auth** | `api_callers` (key hashes, validity windows) | runtime SELECT only |
 | **Fallback** | `external_calls` | append-only; `email_hash` only |
 | **Flywheel** | `send_outcomes` (append-only), `verification_outcomes`, `calibration`, `recalibration_runs`, `outcome_ingest_cursor` | versioned / CAS-guarded |

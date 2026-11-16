@@ -26,11 +26,13 @@
 | `0016_verify_schema.sql` | Platform Phase 1 (one schema per module) | Moves all 21 tables, every `verification_raw` partition and both partition functions from `public` into schema **`verify`**; renames `cp_runtime` → **`verify_app`** (now `LOGIN`) and `cp_admin` → **`verify_admin`**; creates **`verify_owner`** (owns the schema and everything in it); rebuilds the two partition functions for `verify`. Adds exactly two privileges: `INSERT` and `UPDATE (is_default)` on `verify.policies` for `verify_app` (startup `EnsurePolicy` needs them), plus `USAGE` on the schema. See "Since 0016" below. |
 | `0017_schema_migrations.sql` | Owner ruling "M1 migration tracker" ([`../../Docs/future-work.md`](../../Docs/future-work.md) FW-3) | Creates **`verify.schema_migrations`** (`version`, `checksum`, `how`, `applied_at`, `applied_by`), owned by `verify_owner`; `verify_app` holds nothing on it, `verify_admin` may `SELECT`. Idempotent and harmless under the old psql loop; it fails naming `0016` if `0016` has not run. The runner fills it. See "The runner and the tracker" below. |
 
+| `0018_per_job_dedup.sql` | Owner rulings A1 (per-item identity on bulk) and A2 (dedup scope); research gaps M1-G1, M1-G2. See [`../../Docs/bulk-item-identity.md`](../../Docs/bulk-item-identity.md) | Creates **`verify.job_rows`** (one row per INPUT row of a bulk job: `(job_id, ordinal)` PK, optional `item_id` unique per job, `work_item_id`, `duplicate_of_ordinal` (the first row with the same address), `malformed` with `verification_id` (the row's own `invalid_syntax` LOG row); CHECKs, NULL-safe: `ordinal >= 0`, a malformed row has a `verification_id` and no work item and every other row the reverse, `duplicate_of_ordinal` is below the ordinal and never on a malformed row, `item_id` 1..200 bytes; no address and no hash), owned by `verify_owner`; `verify_app` holds `SELECT, INSERT` only, `verify_admin` `ALL`. **Backfills** one row per work item for every job that has none yet (legacy jobs keep serving results). Replaces the **global** `UNIQUE` on `work_items.idempotency_key` (`work_items_idempotency_key_key`, from `0009`) by uniqueness **per job**: partial unique index `uq_work_items_job_idem (job_id, idempotency_key) WHERE job_id IS NOT NULL` and `uq_work_items_unjobbed_idem (idempotency_key) WHERE job_id IS NULL` (a job-less check keeps its old semantics). Idempotent; refuses (SQLSTATE `55000`) where `0009`/`0016` have not run; ends with a self-check that no global unique index on the key survives. Adds **no** `REVOKE`. See "Since 0018" below. |
+
 Rows `0005`–`0015` describe those files as they were written, so they still say `cp_runtime` / `cp_admin` and unqualified table names; `0016` is what renames the roles and moves the tables.
 
 > **Migration `0009_work_items_jobs.sql` (P5 queue tables) is added by task #84** — it applies before `0010` in lexical order. `0010` (auth) is independent of `0009` and lands first in the P5 gate sequence (PN-13 before the bulk endpoint).
 
-**Apply order:** zero-padded filename order (`0001` → … → `0017`). **The way to apply them is the runner, `cmd/migrate` (see "The runner and the tracker" and "How to Apply" below):** it applies each file exactly once, in order, and records it. A plain `psql` loop over `NNNN_*.sql` is still valid, but **only on an empty database** (CI uses it that way to build its test database, and then runs the runner over it); it records nothing and cannot tell what a database has already run. A new migration is picked up by both automatically.
+**Apply order:** zero-padded filename order (`0001` → … → `0018`). **The way to apply them is the runner, `cmd/migrate` (see "The runner and the tracker" and "How to Apply" below):** it applies each file exactly once, in order, and records it. A plain `psql` loop over `NNNN_*.sql` is still valid, but **only on an empty database** (CI uses it that way to build its test database, and then runs the runner over it); it records nothing and cannot tell what a database has already run. A new migration is picked up by both automatically.
 
 ---
 
@@ -51,6 +53,32 @@ After `0016`, **nothing of module 1 is left in `public`** (that schema belongs t
 - **Counts:** `0016` has 3 top-level `REVOKE` statements (`PUBLIC` on the schema and on each of the two functions; all three on objects it creates itself) and 5 top-level `GRANT` statements (schema `USAGE`, `EXECUTE` on each of the two functions, and the two `policies` privileges). The `GRANT`/`REVOKE` that section 6b issues through `EXECUTE format(…)` are not counted: they only copy privileges that `0005`–`0014` already granted. All 22 `REVOKE`s of the 16 files (19 before `0016`) are accounted for in "No Down Migrations" below.
 
 ---
+
+## Since 0018: `verify.job_rows` and the dedup scope
+
+Two rulings, one migration (details and the API contract: [`../../Docs/bulk-item-identity.md`](../../Docs/bulk-item-identity.md)).
+
+* **The idempotency key is unique per JOB, not globally.** Until `0018`, `work_items.idempotency_key` was `UNIQUE` across all jobs and
+  owners, so an address any tenant had ever enqueued produced no work item in a later job (M1-G2). After it, identical addresses
+  **within one job** share one work item (the enqueuer points the later rows at the first row's work item), and a different job, of any
+  owner, always gets its own. `EnqueueWorkItem` names its arbiter (`ON CONFLICT (job_id, idempotency_key) WHERE job_id IS NOT NULL`,
+  or `(idempotency_key) WHERE job_id IS NULL` for a job-less check), so a primary-key collision on `id` is never swallowed as a "duplicate".
+* **`verify.job_rows` records every input row** of a bulk job with the caller's own ordinal and optional `item_id`, malformed rows
+  included. The results are joined through it (so they come back in ordinal order and one per input row), and the status counts
+  (`settled`, `pending`) are computed from it. A row that repeats an earlier address carries `duplicate_of_ordinal` (the first such
+  row), which the API serves as `duplicate_of` so the platform can charge the address once.
+* **A malformed row has its own LOG row (Door 2).** The control plane appends one `verify.verifications` row per malformed row (the
+  `invalid_syntax` row with a NULL hash that the sync path writes, `from_cache` false) and points the job row at it
+  (`verification_id`); the result is served from it. The enqueuer writes the job, all its rows **and those LOG rows in ONE
+  transaction** (`Store.RecordJob`, in `INSERT`s of at most 1000 job rows or 500 LOG rows each), then the work items. The migration
+  only creates the column and the CHECK; `verify_app` already held `INSERT` on `verifications`.
+* **Upgrading.** The backfill inserts one row per work item for jobs with no rows yet, in work-item id order (UUIDv7: submission order),
+  so jobs submitted before `0018` still serve their results; their `ordinal` is synthetic, they have no `item_id`, and their
+  `jobs.total_count` keeps the old meaning (it can exceed their rows). It is a no-op on a replay (the old psql loop may apply the file
+  twice; the runner records it once). Stop the control plane while upgrading, as for any migration here: `CREATE UNIQUE INDEX` on
+  `work_items` takes a lock that blocks writes while it builds.
+* **Privileges.** `verify_app` gets exactly `SELECT` and `INSERT` on `job_rows` (the code appends rows and reads them; nothing updates
+  or deletes them). `0018` adds no `REVOKE`, so the counts in "Since 0016" and "No Down Migrations" are unchanged.
 
 ## The runner and the tracker (since 0017)
 
@@ -117,7 +145,7 @@ for f in $(ls control-plane/migrations/[0-9][0-9][0-9][0-9]_*.sql | sort); do
 done
 ```
 
-A database built that way has an empty tracker; the first `up` over it adopts `0001`–`0017` (nothing is replayed).
+A database built that way has an empty tracker; the first `up` over it adopts `0001`–`0017` (nothing is replayed) and, because the runner cannot know whether the loop ran anything later, applies `0018` once more: it is idempotent, and a re-run adds no row and changes no object.
 
 ### Supabase
 
@@ -285,4 +313,4 @@ All 25 open questions signed off (Appendix C). Key findings already resolved:
 
 ---
 
-**Ready to apply.** Run `go run ./cmd/migrate up` (see "The runner and the tracker") against your PostgreSQL 14+ / Supabase instance: it applies `0001` → `0017` in order, once, and is a no-op the next time.
+**Ready to apply.** Run `go run ./cmd/migrate up` (see "The runner and the tracker") against your PostgreSQL 14+ / Supabase instance: it applies `0001` → `0018` in order, once, and is a no-op the next time.

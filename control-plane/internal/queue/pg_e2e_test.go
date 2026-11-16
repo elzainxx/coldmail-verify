@@ -96,7 +96,7 @@ func TestPGE2E_SubmitDrainSettleResults_MasterInvariant(t *testing.T) {
 	// e2eOwner is the platform user the (notional) authenticated key acts for (0013). Every read
 	// below must pass it; passing "" would make the job unreadable, which is the point of the column.
 	const e2eOwner = "33333333-3333-4333-8333-333333333333"
-	res, err := enq.SubmitBulk(ctx, addrs, "cold-email", 1, "platform-ref-e2e", e2eOwner)
+	res, err := enq.SubmitBulk(ctx, addrs, &policy.Definition{Key: "cold-email", Version: 1}, "platform-ref-e2e", e2eOwner)
 	if err != nil {
 		t.Fatalf("SubmitBulk: %v", err)
 	}
@@ -109,6 +109,7 @@ func TestPGE2E_SubmitDrainSettleResults_MasterInvariant(t *testing.T) {
 		_, _ = pg.Pool().Exec(context.Background(), `DELETE FROM verify.work_item_attempts WHERE work_item_id IN (SELECT id FROM verify.work_items WHERE job_id=$1)`, jobID)
 		_, _ = pg.Pool().Exec(context.Background(), `DELETE FROM verify.verifications WHERE id IN (SELECT verification_id FROM verify.work_items WHERE job_id=$1 AND verification_id IS NOT NULL)`, jobID)
 		_, _ = pg.Pool().Exec(context.Background(), `DELETE FROM verify.work_items WHERE job_id=$1`, jobID)
+		_, _ = pg.Pool().Exec(context.Background(), `DELETE FROM verify.job_rows WHERE job_id=$1`, jobID)
 		_, _ = pg.Pool().Exec(context.Background(), `DELETE FROM verify.jobs WHERE id=$1`, jobID)
 	})
 

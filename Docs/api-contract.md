@@ -40,11 +40,23 @@ Every route this module serves. `{id}` is a ServeMux wildcard.
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | `POST` | `/v1/verify` | per-caller key **or** legacy static token | Verify one address synchronously; returns the Door-1 v1 response (P1 §3.1.3) |
-| `POST` | `/v1/verify/bulk` | per-caller key **required** (PN-13) | Submit a bulk job; returns a job handle (§7) |
-| `GET` | `/v1/jobs/{id}` | per-caller key **required** (PN-13) | Job progress counts, scoped to the owning caller (D1 tenancy) |
-| `GET` | `/v1/jobs/{id}/results` | per-caller key **required** (PN-13) | Settled verdicts, cursor-paginated; each is the `/v1/verify` object |
+| `POST` | `/v1/verify/bulk` | per-caller key **required** (PN-13) | Submit a bulk job as `addresses` **or** `items` (each row with a caller `item_id`); returns a job handle (§7). Row identity and dedup scope: [`bulk-item-identity.md`](bulk-item-identity.md) |
+| `GET` | `/v1/jobs/{id}` | per-caller key **required** (PN-13) | Job progress counts **over input rows** (`pending` reaches 0 when complete), scoped to the owning caller (D1 tenancy) |
+| `GET` | `/v1/jobs/{id}/results` | per-caller key **required** (PN-13) | One result per input row that has an outcome, **ordered by `ordinal`**, cursor-paginated (cursor = the last row returned); each is the `/v1/verify` object plus `ordinal` and `item_id` |
 | `GET` | `/healthz` | none | Liveness: the process is up. Additive `at` timestamp (item 10) |
 | `GET` | `/readyz` | none | Readiness with secret PRESENCE only, never values. 503 `not_ready` unless `pepper`, `db` and (once declared) `queue` are all true; a not-ready queue adds `reasons` (below) |
+
+**Bulk row identity and dedup scope (owner rulings A1/A2, migration 0018).** The bulk request takes exactly one of `addresses`
+(unchanged) or `items` (`[{"item_id": "...", "address": "..."}]`; `item_id` mandatory, non-blank, at most 200 bytes, no control
+characters, unique in the request). Every result element keeps all its Door-1 keys and gains `ordinal` (always), `item_id` (when the
+row had one) and, on a row that repeats an earlier address, `duplicate_of` (the ordinal of the first such row, so a duplicated
+address can be charged once); `email` stays blank. A malformed address keeps its ordinal, is listed in the 202's `malformed_rows`
+(at most 1000, with `malformed_rows_truncated`), is **logged before the 202 is returned** (its own `verifications` row, exactly as
+`/v1/verify` logs an un-addressable input) and is a result served from that row (`invalid` / `invalid_syntax`); a repeated malformed
+address is several malformed rows, never a duplicate. Identical addresses **within one job** are checked once and every row gets the
+result; **nothing is deduplicated across jobs or tenants**. Read results after `complete` is `true`. The whole contract, with
+examples, is [`bulk-item-identity.md`](bulk-item-identity.md); the pagination property is held by a walk over several page sizes
+that must return every ordinal exactly once, with paired controls (a look-ahead cursor, an unsorted listing).
 
 **`/readyz` body.** `status` (`ready`/`not_ready`), `ready` (bool, the same answer), `checks{}` (booleans: `pepper`,
 `db`, and `queue` on a process whose boot reached the queue wiring), `at`, and the older `config`, `pepper`,
@@ -162,7 +174,7 @@ the one log line an operator greps all name the same id.
 | Code | Status | Means |
 |---|---|---|
 | `unauthenticated` | 401 | Missing or invalid credentials |
-| `validation_failed` | 400 | A field is missing, malformed, or out of range |
+| `validation_failed` | 400 | A field is missing, malformed, or out of range. `details[].issue` is one of `required`, `malformed`, `out_of_range`, `not_found`, and (bulk, 0018) `conflict` (both `addresses` and `items` given) and `duplicate` (a repeated `item_id`; the field is `items[N].item_id`) |
 | `not_found` | 404 | No such resource — **or** it belongs to another caller (tenancy scoping, D1: the two are indistinguishable on purpose) |
 | `method_not_allowed` | 405 | A real path, a verb it does not serve |
 | `payload_too_large` | 413 | Over the §7.5 submission cap |
@@ -237,7 +249,10 @@ and "our own DNS failed" all come back `unknown` or `risky`. That protects you f
 - **catch_all / accept_all** — the domain accepts mail to every address, so this particular mailbox cannot be confirmed.
 - **provider_no_smtp** — a large mailbox provider that does not reveal whether a mailbox exists (A.4); we did not probe it.
 - **greylisted · smtp_blocked · smtp_timeout · smtp_error · connection_failed** — the probe could not get an answer
-  (`unknown`/`risky`); retry later.
+  (`unknown`/`risky`); retry later. Every one of them says **who** failed in `signals.failure_origin` (A.7).
+- **unknown_error** — we could not compute this address at all (our node, key or policy failed on it repeatedly), so
+  the item was settled as `unknown` rather than left pending forever. Always `signals.failure_origin = "own"` and
+  `signals.error_capped = true` (A.7).
 - **non_public_mx** — the domain's mail host resolves to a non-public address (loopback, a private range, cloud
   metadata, …). We refuse to connect to such an address, so the result is `risky`, never `invalid`, and is not cached.
 - **external_verified · historical_bounce** — provenance values for a rented third-party answer (capped at `risky`) and
@@ -282,5 +297,48 @@ It follows the status honestly and is checked in code (`vocab.ComposabilityOK`):
 
 > **status:** valid · **reason:** mailbox_full · **confidence:** 88 · **recommendation:** send
 > *The mailbox exists — it is over quota, which only a real mailbox can be. Safe; it may just be temporarily full.*
+
+### A.7 When an answer could not be produced: who failed, and why SMTP did not run
+
+Three additive keys in `signals` (Door 1: the bag is open, every consumer ignores keys it does not know). None of them
+changes a status, reason, confidence, recommendation, caching decision or retry; they only say more about a result.
+
+**`signals.failure_origin`** — present on **every `unknown`** result, in the response and in the log row. Exactly three values:
+
+| Value | Means | Typical cause |
+|---|---|---|
+| `own` | the cause is on our side of the wire | our verifier node unreachable or erroring, our resolver unreachable or timing out, a policy or reputation block against our IP, an item we could not compute |
+| `remote` | the recipient's side provably caused it | their server answered with an SMTP reply code (a 4xx greylist, an ambiguous 550), or accepted the connection and then did not answer; their domain's DNS failed behind a working resolver of ours (SERVFAIL) |
+| `undetermined` | M1 cannot prove either side | the connection never opened (our egress blocked and their refusal look identical), a session that dropped with no reply, an unclassifiable DNS error |
+
+The default for anything not proven is `undetermined`, never `remote`. A consumer must treat an unrecognised value as
+`undetermined`. The complete mapping — every code path that yields an `unknown`, the evidence it rests on, the file and line of
+the branch and the test that covers it — and the list of cases that cannot be classified honestly is
+[`failure-origin.md`](failure-origin.md).
+
+The key also appears, as `own`, on a non-`unknown` result that is a **degraded cheap-only fallback caused by us**: a `risky`
+answer whose `signals.smtp_skipped_reason` is one of `no_eligible_node`, `audit_red`, `warmup_cap`, `rate_limited` or
+`smtp_unwired`. It is never present on a normal answer.
+
+**`signals.smtp_skipped_reason`** — present when the SMTP probe did not run for a `risky/plausible` residue. An open, additive
+string enum; the tokens today:
+
+| Token | Meaning | Cached? |
+|---|---|---|
+| `no_eligible_node` | no verifier node is eligible for SMTP (health or routing gap) | no |
+| `audit_red` | the node pool is red | no |
+| `warmup_cap` | the node is at its warm-up cap | no |
+| `rate_limited` | every eligible node is at its per-provider cap | no |
+| `smtp_unwired` | the SMTP stage is not wired in this process at all (SMTP disabled, or no node or config could be fetched at boot). Before this token existed such a result was indistinguishable from a genuine cheap-layers answer | no |
+| `provider_mx_routed` | a large provider that is deliberately never probed (`risky/provider_no_smtp`): a settled answer, not a failure | yes |
+
+Every token except `provider_mx_routed` marks a result that is **not what a working M1 would have answered**; none of them is
+cached, so the address is probed afresh once the cause clears.
+
+**`signals.error_capped`** — `true` only on a result the queue settled because the item could not be computed (a policy,
+decryption or compute error) on `TM_QUEUE_ERROR_MAX_ATTEMPTS` attempts (default 5). Such a result is
+`unknown` / `unknown_error`, confidence 10, recommendation `review`, `failure_origin = "own"`, and is not cached. It is a
+terminal state: the item appears in the job's results and the job can complete, where before such an item was retried forever
+and the job never did.
 
 The principle behind all of it: **we tell you what we can prove, and tell you honestly when we cannot prove anything.**

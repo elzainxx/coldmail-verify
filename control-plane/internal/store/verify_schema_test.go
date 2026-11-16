@@ -221,6 +221,13 @@ func TestVerifySchema_NothingLeftInPublic(t *testing.T) {
 			t.Errorf("table verify.%s does not exist", name)
 		}
 	}
+	// Tables born AFTER the 0016 move (the migration tracker, 0017; the bulk job rows, 0018) are created in verify directly, so they are not in
+	// module1Tables (that is the list 0016 MOVES). The ownership judgement above reads every relation in the schema, so they only count if they are there.
+	for _, name := range []string{"schema_migrations", "job_rows"} {
+		if !have[name] {
+			t.Errorf("table verify.%s does not exist", name)
+		}
+	}
 
 	// PAIRED CONTROL: the same judgement on a 0001..0015 database. Everything must still be in public, there is no schema verify, and the
 	// functions are in public — so problems() must name each of them.

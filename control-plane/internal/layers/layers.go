@@ -14,6 +14,8 @@ import (
 	"context"
 	"net"
 	"sync"
+
+	"github.com/coldmail-verify/control-plane/internal/failureorigin"
 )
 
 // Result is a layer's finding (P1 §6.0).
@@ -44,6 +46,10 @@ type LayerOutput struct {
 	SeverityHint Severity
 	Value        any
 	Detail       string
+
+	// Cause is set only on a Result==Unknown output: the evidence the layer holds about WHY it could not answer (never serialised;
+	// the policy carries it to verdict.Assemble, which derives signals.failure_origin — Docs/failure-origin.md). Empty = no evidence.
+	Cause failureorigin.Cause
 }
 
 // Layer is the common interface each cheap layer implements. Run is pure w.r.t. the verdict:
@@ -99,6 +105,9 @@ type Evidence struct {
 	mxOnce    sync.Once
 	mxHosts   []MXHost  // MX records with a real target (null-MX sentinel removed)
 	mxOutcome mxOutcome // classified once
+	// mxCause is the evidence behind an mxError outcome (who failed: our resolver, or the domain's DNS behind a healthy resolver).
+	// Set once, inside mxOnce, only when mxOutcome == mxError; read only after mx() has returned.
+	mxCause failureorigin.Cause
 }
 
 // NewEvidence builds the per-request evidence. resolver/lists may be nil for layers that
@@ -116,9 +125,16 @@ func (ev *Evidence) mx(ctx context.Context) (hosts []MXHost, outcome mxOutcome) 
 	ev.mxOnce.Do(func() {
 		if ev.resolver == nil {
 			ev.mxOutcome = mxError // no resolver wired → cannot prove anything → unknown
+			ev.mxCause = failureorigin.CauseDNSNoResolver
 			return
 		}
-		ev.mxHosts, ev.mxOutcome = resolveMX(ctx, ev.resolver, ev.Domain)
+		// The recorder only REMEMBERS the last error the resolver returned; it changes no answer. resolveMX/impliedMX are untouched,
+		// so the classification (and every fixture and mutant that pins it) is exactly what it was.
+		rec := &causeRecorder{Resolver: ev.resolver}
+		ev.mxHosts, ev.mxOutcome = resolveMX(ctx, rec, ev.Domain)
+		if ev.mxOutcome == mxError {
+			ev.mxCause = dnsCause(rec.lastError())
+		}
 	})
 	return ev.mxHosts, ev.mxOutcome
 }

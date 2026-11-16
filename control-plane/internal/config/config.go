@@ -27,6 +27,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/coldmail-verify/control-plane/internal/external"
 )
 
 // ── Kill-switch ladder (history/kill-switch-ladder.md) ──────────────────────────────────────
@@ -208,6 +210,7 @@ type Dials struct {
 	QueueLeaseMarginSeconds   int  // §5.2/GAP-37 — lease TTL = max-SMTP-deadline + this margin (must be >0 so TTL > deadline); 120 (2m)
 	QueueDrainBatchSize       int  // §6 items leased per drain tick; 10
 	QueueDrainIdlePollSeconds int  // drain loop idle sleep when the queue is empty; 2
+	QueueErrorMaxAttempts     int  // M1-G7: how many times ONE item may fail to compute (policy/decrypt/compute error) before it settles unknown/unknown_error (own); 5, range 1..50
 	// §7.5 submission backpressure — owner OQ (manifest §8.2: "UNSET"). A Dial so it reads UNSET,
 	// never a guessed number; when UNSET the endpoint uses a safe built-in hard cap (documented) but
 	// the *tuned* value is deliberately the owner's, not invented here. This is the ONE backpressure
@@ -238,6 +241,19 @@ type Dials struct {
 	ExternalErrorRatePct      int  // §5.3 cond-2 error-rate trip threshold %; 0 => error-rate condition disabled
 	ExternalErrorMinSamples   int  // §5.3/GAP-27 min calls in the window before error-rate can trip; 20
 	ExternalBreakerCooldownSeconds int // §5.3 breaker open-duration before a half-open probe; 300 (5m)
+
+	// ZeroBounce vendor dials (Docs/vendor-zerobounce.md). The vendor ships DISABLED: these only matter once
+	// the kill-switch rung, the DPA flag and the vendor key are all affirmative.
+	//
+	// ExternalDailySpendCap is the HARD per-vendor daily spend ceiling in vendor credits
+	// (TM_EXTERNAL_DAILY_SPEND_CAP). 0 means NO CALLS ALLOWED (not "unset"), and 0 is the default, so
+	// enabling the vendor without choosing a cap sends nothing. It is checked IN ADDITION to the owner-OQ
+	// ExternalDailyCap above (unset => not enforced); whichever is lower wins. Consumed by
+	// external.Budget.VendorDailyCap via buildExternal.
+	ExternalDailySpendCap int
+	// ExternalZeroBounceTimeoutMS is the per-call timeout (TM_EXTERNAL_ZEROBOUNCE_TIMEOUT_MS); 8000,
+	// bounded 3000..60000 (ZeroBounce's own documented validation-timeout range is 3-60 seconds).
+	ExternalZeroBounceTimeoutMS int
 
 	// Phase 7 (§4.6/§5/§6) — the flywheel DIALs (existence locked; values tunable). The feedback-loop
 	// guards (§6) carry the spec's recommended defaults; the historical-bounce gate (§4.6) and the
@@ -312,6 +328,17 @@ type Config struct {
 	// the global-fallback-kill (Fallback==off) overrides all of them (§ kill-switch-ladder Global A).
 	ExternalDPAConfirmed bool
 
+	// ExternalZeroBounceKeyEnv is the NAME of the environment variable that holds the ZeroBounce API key
+	// (TM_EXTERNAL_ZEROBOUNCE_KEY_ENV; default ZEROBOUNCE_API_KEY). The dial NEVER holds the key value: the
+	// loader rejects anything that is not an upper-case environment-variable name, rejects the TM_ prefix
+	// (so it cannot be pointed at TM_PEPPER, TM_SUPABASE_KEY, ... and send that to the vendor), and never
+	// echoes the offending value in its error (a mistaken value could be the key itself).
+	ExternalZeroBounceKeyEnv string
+	// ExternalZeroBounceBaseURL is the vendor API host (TM_EXTERNAL_ZEROBOUNCE_BASE_URL; default
+	// https://api.zerobounce.net, scheme://host[:port] only). https is required; http is accepted only for a
+	// loopback / test-fixture host when TM_ENV is development or test.
+	ExternalZeroBounceBaseURL string
+
 	// Node registry is a LIST from config (Door 5 — never a single hardcoded endpoint).
 	// Phase 0 ships zero or one mock entry; the list shape is what matters.
 	Nodes []NodeDescriptor
@@ -379,6 +406,84 @@ func (c Config) QueueDrainIdlePoll() time.Duration {
 // duration; it also anchors the error-rate measurement window (external_stage.externalErrWindow).
 func (c Config) ExternalBreakerCooldown() time.Duration {
 	return time.Duration(c.Dials.ExternalBreakerCooldownSeconds) * time.Second
+}
+
+// DefaultZeroBounceKeyEnv is the default NAME of the environment variable holding the ZeroBounce key.
+const DefaultZeroBounceKeyEnv = "ZEROBOUNCE_API_KEY"
+
+// ZeroBounce timeout bounds in milliseconds (the default is 8000).
+const (
+	ZeroBounceTimeoutMinMS = 3000
+	ZeroBounceTimeoutMaxMS = 60000
+)
+
+// ExternalZeroBounceTimeout is the per-call vendor timeout as a duration (default 8s when unset).
+func (c Config) ExternalZeroBounceTimeout() time.Duration {
+	if c.Dials.ExternalZeroBounceTimeoutMS == 0 {
+		return 8 * time.Second
+	}
+	return time.Duration(c.Dials.ExternalZeroBounceTimeoutMS) * time.Millisecond
+}
+
+// ExternalZeroBounceKeyEnvName is the NAME of the env var holding the vendor key (default when unset).
+func (c Config) ExternalZeroBounceKeyEnvName() string {
+	if c.ExternalZeroBounceKeyEnv == "" {
+		return DefaultZeroBounceKeyEnv
+	}
+	return c.ExternalZeroBounceKeyEnv
+}
+
+// ExternalZeroBounceBase is the vendor base URL (default when unset). Validate has already accepted it.
+func (c Config) ExternalZeroBounceBase() string {
+	if c.ExternalZeroBounceBaseURL == "" {
+		return external.ZeroBounceDefaultBaseURL
+	}
+	return c.ExternalZeroBounceBaseURL
+}
+
+// ExternalAllowsLoopbackHTTP reports whether an http:// vendor base URL may be used for a loopback or
+// test-fixture host: only under TM_ENV=development or test, never in production.
+func (c Config) ExternalAllowsLoopbackHTTP() bool {
+	return c.Env == "development" || c.Env == "test"
+}
+
+// validZeroBounceKeyEnvName: an upper-case environment-variable NAME, not in the TM_ namespace. A real
+// API key (lower-case hex, base64, with punctuation) does not satisfy the character rule, and a name
+// under TM_ would let the dial point at one of our own secrets and send it to the vendor.
+func validZeroBounceKeyEnvName(s string) bool {
+	if s == "" || len(s) > 64 || strings.HasPrefix(s, "TM_") {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch {
+		case ch >= 'A' && ch <= 'Z', ch == '_':
+		case ch >= '0' && ch <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// validateZeroBounce checks the ZeroBounce dials. Empty/zero values mean "the default" (a Config not built
+// by Defaults/Load still validates). No error here ever echoes the offending value.
+func (c Config) validateZeroBounce() error {
+	if c.Dials.ExternalDailySpendCap < 0 {
+		return fmt.Errorf("config: TM_EXTERNAL_DAILY_SPEND_CAP must be a non-negative integer (0 = no vendor calls allowed)")
+	}
+	if ms := c.Dials.ExternalZeroBounceTimeoutMS; ms != 0 && (ms < ZeroBounceTimeoutMinMS || ms > ZeroBounceTimeoutMaxMS) {
+		return fmt.Errorf("config: TM_EXTERNAL_ZEROBOUNCE_TIMEOUT_MS must be in %d..%d", ZeroBounceTimeoutMinMS, ZeroBounceTimeoutMaxMS)
+	}
+	if c.ExternalZeroBounceKeyEnv != "" && !validZeroBounceKeyEnvName(c.ExternalZeroBounceKeyEnv) {
+		return fmt.Errorf("config: TM_EXTERNAL_ZEROBOUNCE_KEY_ENV must be the NAME of an environment variable (upper-case letters, digits and underscore, not starting with a digit or TM_); the dial never holds the key itself, and the value is not echoed")
+	}
+	if c.ExternalZeroBounceBaseURL != "" {
+		if _, err := external.ParseZeroBounceBaseURL(c.ExternalZeroBounceBaseURL, c.ExternalAllowsLoopbackHTTP()); err != nil {
+			return fmt.Errorf("config: invalid TM_EXTERNAL_ZEROBOUNCE_BASE_URL: %v", err)
+		}
+	}
+	return nil
 }
 
 // HistoricalBounceTTL / RecalCadence are the P7 §4.6/§5 DIALs as typed durations.
@@ -538,6 +643,7 @@ func Defaults() Config {
 			QueueLeaseMarginSeconds:   120,   // §5.2/GAP-37 lease TTL = maxSMTPdeadline + 2m (>0 so TTL > deadline)
 			QueueDrainBatchSize:       10,    // §6 items per drain tick
 			QueueDrainIdlePollSeconds: 2,     // idle sleep when the queue is empty
+			QueueErrorMaxAttempts:     5,     // M1-G7: five failed tries (policy/decrypt/compute error) and the item settles unknown_error instead of requeueing forever
 			QueueBulkMaxAddresses:     Dial{Set: false}, // §7.5 owner OQ — UNSET (safe hard cap applies)
 			// Phase-6 external-fallback dials (§5.2/§5.3). The spend ceilings are owner-OQ → UNSET
 			// (start conservative, raise from observed volume — never loosen blind). The breaker
@@ -551,6 +657,10 @@ func Defaults() Config {
 			ExternalErrorRatePct:           0,                // §5.3 cond-2 disabled until tuned (0 => off)
 			ExternalErrorMinSamples:        20,               // §5.3/GAP-27 sample gate (mirrors block-rate)
 			ExternalBreakerCooldownSeconds: 300,              // §5.3 5m open before a half-open probe
+			// ZeroBounce (Docs/vendor-zerobounce.md): the cap defaults to 0 = NO CALLS, so enabling the vendor
+			// without choosing a spend ceiling sends nothing.
+			ExternalDailySpendCap:       0,
+			ExternalZeroBounceTimeoutMS: 8000,
 			// Phase-7 flywheel dials (§4.6/§5/§6). Feedback-loop guards carry the spec's conservative
 			// defaults; the historical-bounce gate + recalibration cadence are owner/P7-time DIALs.
 			HistoricalBounceTTLDays: 270, // §4.6/OQ-P7-2 9-month TTL (within the 6–12mo band)
@@ -567,8 +677,10 @@ func Defaults() Config {
 			RawPartitionMonthsAhead:             3,     // ADR-0017: three months of headroom; a failing loop has ~3 months of warning in its logs before any write fails
 			RawPartitionMaintainIntervalSeconds: 21600, // ADR-0017: 6h — the call is idempotent and cheap, so frequent is fine and shortens recovery after an outage
 		},
-		Policy: Policy{DefaultPolicyKey: "cold-email"},
-		Nodes:  nil, // node LIST, empty at P0. Door 5: a list even when length 0/1.
+		Policy:                    Policy{DefaultPolicyKey: "cold-email"},
+		ExternalZeroBounceKeyEnv:  DefaultZeroBounceKeyEnv,
+		ExternalZeroBounceBaseURL: external.ZeroBounceDefaultBaseURL,
+		Nodes:                     nil, // node LIST, empty at P0. Door 5: a list even when length 0/1.
 	}
 }
 
@@ -702,12 +814,15 @@ func Load(getenv func(string) string) (Config, error) {
 		{"TM_QUEUE_LEASE_MARGIN_SECONDS", &c.Dials.QueueLeaseMarginSeconds, false},
 		{"TM_QUEUE_DRAIN_BATCH_SIZE", &c.Dials.QueueDrainBatchSize, false},
 		{"TM_QUEUE_DRAIN_IDLE_POLL_SECONDS", &c.Dials.QueueDrainIdlePollSeconds, false},
+		{"TM_QUEUE_ERROR_MAX_ATTEMPTS", &c.Dials.QueueErrorMaxAttempts, false}, // upper bound (50) is range-guarded in Validate
 		// Phase-6 external-fallback int dials (§5.3). ErrorRatePct 0 disables the error-rate breaker
 		// condition (budget ceilings still apply). Cooldown/samples 0 legal (degenerate; tests). All
 		// non-negative. (The §3.4 confidence cap is NOT here — it is the per-policy external.confidence_cap.)
 		{"TM_EXTERNAL_ERROR_RATE_PCT", &c.Dials.ExternalErrorRatePct, true},
 		{"TM_EXTERNAL_ERROR_MIN_SAMPLES", &c.Dials.ExternalErrorMinSamples, true},
 		{"TM_EXTERNAL_BREAKER_COOLDOWN_SECONDS", &c.Dials.ExternalBreakerCooldownSeconds, true},
+		// ZeroBounce hard daily spend cap (vendor credits): a non-negative integer, 0 = NO calls allowed.
+		{"TM_EXTERNAL_DAILY_SPEND_CAP", &c.Dials.ExternalDailySpendCap, true},
 		// Phase-7 flywheel int dials (§4.6/§5/§6). All non-negative; the brake fraction/window/up-step
 		// are additionally range-guarded in Validate (a silently-disabled brake is the P4 lesson-b hole).
 		{"TM_HISTORICAL_BOUNCE_TTL_DAYS", &c.Dials.HistoricalBounceTTLDays, true},
@@ -775,6 +890,23 @@ func Load(getenv func(string) string) (Config, error) {
 		c.ExternalDPAConfirmed = true
 	}
 
+	// ZeroBounce vendor dials (Docs/vendor-zerobounce.md). None of them enables anything: the vendor is
+	// still gated by the kill-switch rung, the DPA flag, the key and the spend cap above. Errors here never
+	// echo the value (a mistaken KEY_ENV value could be the key itself; a BASE_URL may carry credentials).
+	if v := getenv("TM_EXTERNAL_ZEROBOUNCE_TIMEOUT_MS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < ZeroBounceTimeoutMinMS || n > ZeroBounceTimeoutMaxMS {
+			return c, fmt.Errorf("config: invalid TM_EXTERNAL_ZEROBOUNCE_TIMEOUT_MS (must be an integer in %d..%d)", ZeroBounceTimeoutMinMS, ZeroBounceTimeoutMaxMS)
+		}
+		c.Dials.ExternalZeroBounceTimeoutMS = n
+	}
+	if v := getenv("TM_EXTERNAL_ZEROBOUNCE_KEY_ENV"); v != "" {
+		c.ExternalZeroBounceKeyEnv = v // validated (name shape, TM_ prefix) in Validate below
+	}
+	if v := getenv("TM_EXTERNAL_ZEROBOUNCE_BASE_URL"); v != "" {
+		c.ExternalZeroBounceBaseURL = v // validated (https; loopback http only under development/test) in Validate below
+	}
+
 	// Phase-7 flywheel live-path opt-ins (default FALSE — the fresh-system invariant / "enabling is
 	// explicit"). Only the exact string "true" turns each on. The gate short-circuits verdicts to
 	// invalid/historical_bounce; the calibrated read overrides the P1 baseline with an APPROVED version.
@@ -826,6 +958,9 @@ func (c Config) Validate() error {
 		return fmt.Errorf("config: raw_partition_months_ahead (%d) must be in 1..120 (0 would re-create the partition cliff at every month boundary)",
 			c.Dials.RawPartitionMonthsAhead)
 	}
+	if err := c.validateZeroBounce(); err != nil {
+		return err
+	}
 	if c.Dials.RawPartitionMaintainIntervalSeconds < 1 {
 		return fmt.Errorf("config: raw_partition_maintain_interval_seconds (%d) must be >= 1", c.Dials.RawPartitionMaintainIntervalSeconds)
 	}
@@ -864,6 +999,13 @@ func (c Config) Validate() error {
 	// OR age). The drainer enforces the same, but a startup guard is clearer than a runtime surprise.
 	if c.Dials.QueueMaxAttempts <= 0 && c.Dials.QueueMaxRetryAgeSeconds <= 0 {
 		return fmt.Errorf("config: at least one of queue_max_attempts / queue_max_retry_age_seconds must be > 0 (§4.5 — an item must have a retry ceiling)")
+	}
+	// M1-G7: the error-attempt cap must be a real, bounded number. 0 would mean "never settle an item that cannot be computed" — the very
+	// defect the cap exists to remove — and an unbounded one is the same thing in slow motion. Checked here as well as in Load so a Config
+	// built any other way (tests, a future file source) cannot carry it past startup.
+	if c.Dials.QueueErrorMaxAttempts < 1 || c.Dials.QueueErrorMaxAttempts > 50 {
+		return fmt.Errorf("config: queue_error_max_attempts (%d) must be in 1..50 (0 would let an item that can never be computed requeue forever)",
+			c.Dials.QueueErrorMaxAttempts)
 	}
 	// §6.4 (P7, the P4 fleet-brake lesson-b, applied to the recalibration cascade brake): a brake
 	// bucket-fraction outside 1..99 makes the systemic-swing brake mathematically unable to fire (>=100%

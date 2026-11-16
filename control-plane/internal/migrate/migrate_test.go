@@ -54,7 +54,7 @@ func asRefusal(t *testing.T, err error) *RefusalError {
 // the migration directory
 // ─────────────────────────────────────────────────────────────────────────────
 
-// frozen is the sha256 of migrations 0001..0016 as released (CRLF normalised, as the runner hashes them). Migrations are forward-only: a recorded
+// frozen is the sha256 of migrations 0001..0018 as released (CRLF normalised, as the runner hashes them). Migrations are forward-only: a recorded
 // checksum that differs from the file on disk makes the runner REFUSE on every database that already ran it, so editing one of these files is not a
 // fix, it is an outage with a delay. This fails the moment a byte changes, before any database sees it. A new migration adds a file; it never edits one.
 var frozen = map[string]string{
@@ -74,6 +74,8 @@ var frozen = map[string]string{
 	"0014": "cac68e65a69d01fd5a294c97bcd8c861e2f09f16097c10d00e8e15f4a701066a",
 	"0015": "818ff015670ee97165ad264ff8773eb5af7d4fc6cbfd1debcfa834a241cec653",
 	"0016": "3c4092d8dc6665393bbad112a58fdbcc7a2728c9483b27b92bb254e259f25079",
+	"0017": "f8c5bc5fa4da0725de120a8b9fe58189ec852ffd964d8c5112210e5f574c1d78",
+	"0018": "576235aa1a333030808f21488e7d78ba4819e642e5aa5a5bee928a249c502310",
 }
 
 // frozenViolations lists every released migration that is edited or gone.
@@ -89,7 +91,7 @@ func frozenViolations(files []File) []string {
 		case !ok:
 			out = append(out, fmt.Sprintf("migration %s, released and pinned, is gone", v))
 		case f.Checksum != want:
-			out = append(out, fmt.Sprintf("%s was EDITED after release: sha256 %s, released as %s. Migrations are forward-only (never edit 0001..0016): revert the edit and put the change in a new migration", f.Name, f.Checksum, want))
+			out = append(out, fmt.Sprintf("%s was EDITED after release: sha256 %s, released as %s. Migrations are forward-only (never edit 0001..0018): revert the edit and put the change in a new migration", f.Name, f.Checksum, want))
 		}
 	}
 	sort.Strings(out)
@@ -97,7 +99,7 @@ func frozenViolations(files []File) []string {
 }
 
 // TestLoadFiles_RealDirectory loads the repository's own migrations: a contiguous sequence from 0001, the tracker migration at its constant, valid
-// checksums, and 0001..0016 byte-for-byte as released. It fails if a file is edited, renamed, renumbered or removed.
+// checksums, and 0001..0018 byte-for-byte as released. It fails if a file is edited, renamed, renumbered or removed.
 func TestLoadFiles_RealDirectory(t *testing.T) {
 	files, err := LoadFiles(testpg.MigrationsDir())
 	if err != nil {

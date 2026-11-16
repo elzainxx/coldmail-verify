@@ -66,11 +66,11 @@ type CallerAuth interface {
 }
 
 // BulkSubmitter enqueues a bulk submission and returns a job handle + counts (§7.1, satisfied by
-// *queue.Enqueuer). callerRef is the opaque platform correlation string (§7.6). ownerUserID is the
-// authenticated key's platform user, stamped onto the job (0013). Injected so tests use a fake
-// without a real queue/DB.
+// *queue.Enqueuer). Each input row carries the caller's optional item_id (A1). callerRef is the opaque
+// platform correlation string (§7.6). ownerUserID is the authenticated key's platform user, stamped onto
+// the job (0013). Injected so tests use a fake without a real queue/DB.
 type BulkSubmitter interface {
-	SubmitBulk(ctx context.Context, addresses []string, policyKey string, policyVersion int, callerRef, ownerUserID string) (queue.BulkResult, error)
+	SubmitBulkRows(ctx context.Context, rows []queue.BulkRow, def *policy.Definition, callerRef, ownerUserID string) (queue.BulkResult, error)
 }
 
 // JobReader reads job progress + paginated results (§7.1, satisfied by store.Store). The results
@@ -375,14 +375,18 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// bulkRequest is the /v1/verify/bulk body. addresses is the work list; policy names the governing
-// policy (default when empty); caller_ref is an OPAQUE correlation string the brain echoes but
-// never interprets (§7.6/GAP-36 — NOT a user id; the platform maps its users↔caller_ref). There is
-// deliberately NO CSV, filename, credits, or per-row field here (the two-job boundary).
+// bulkRequest is the /v1/verify/bulk body. The work list is given as EXACTLY ONE of `addresses` (the
+// original shape: bare addresses, rows with no label) or `items` (each row an {item_id, address}, so the
+// caller can map every result back to its own row; A1 — see bulk_rows.go and Docs/bulk-item-identity.md);
+// policy names the governing policy (default when empty); caller_ref is an OPAQUE correlation string the
+// brain echoes but never interprets (§7.6/GAP-36 — NOT a user id; the platform maps its users↔caller_ref).
+// There is deliberately NO CSV, filename, or credits here (the two-job boundary); item_id is the caller's
+// own opaque row label, stored and echoed, never interpreted.
 type bulkRequest struct {
-	Addresses []string `json:"addresses"`
-	Policy    string   `json:"policy,omitempty"`
-	CallerRef string   `json:"caller_ref,omitempty"`
+	Addresses []string          `json:"addresses"`
+	Items     []bulkItemRequest `json:"items"`
+	Policy    string            `json:"policy,omitempty"`
+	CallerRef string            `json:"caller_ref,omitempty"`
 }
 
 // maxBulkAddresses is the built-in safe hard cap on one submission (§7.5 backpressure) used when the
@@ -426,17 +430,24 @@ func (s *Server) handleBulkSubmit(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, codeUnavailable, "orchestrator or policy not wired (no DB/pepper)")
 		return
 	}
-	// Bound the body (a 100k-address list of ~small strings; generous cap, still bounded).
+	// Bound the body (a 100k-row list; generous cap, still bounded — see maxBulkBodyBytes).
 	var req bulkRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<20)).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBulkBodyBytes)).Decode(&req); err != nil {
 		writeErr(w, codeValidationFailed, "bulk submit: body did not decode", fieldDetail{Field: "body", Issue: issueMalformed})
 		return
 	}
-	if len(req.Addresses) == 0 {
-		writeErr(w, codeValidationFailed, "bulk submit: addresses absent or empty", fieldDetail{Field: "addresses", Issue: issueRequired})
+	// Exactly one of `addresses` / `items` (A1). Both or neither is a 400 that names the fields; the
+	// original `addresses`-only request is unchanged (and an empty `addresses` is still `required`).
+	if details := bulkShapeErrors(req); details != nil {
+		writeErr(w, codeValidationFailed, "bulk submit: exactly one of addresses / items must be given and non-empty", details...)
 		return
 	}
-	if cap := s.bulkAddressCap(); len(req.Addresses) > cap {
+	// THE FIELD THE ROW COUNT BELONGS TO: the cap and its error name whichever shape was submitted.
+	rowsField, rowCount := "addresses", len(req.Addresses)
+	if req.Items != nil {
+		rowsField, rowCount = "items", len(req.Items)
+	}
+	if cap := s.bulkAddressCap(); rowCount > cap {
 		// THE SECOND SHAPE (audit classification 2.7). This was the one route answering in a
 		// different envelope entirely — `{error, max, got}` — so a client had to special-case it.
 		// The cap and the submitted count are genuinely useful to a caller, so they are not
@@ -444,13 +455,22 @@ func (s *Server) handleBulkSubmit(w http.ResponseWriter, r *http.Request) {
 		// learns WHICH field was out of range through details[], which is the envelope's own
 		// mechanism for exactly this. No free-text channel, no bespoke shape.
 		writeErr(w, codePayloadTooLarge,
-			fmt.Sprintf("bulk submit: %d addresses exceeds the cap of %d", len(req.Addresses), cap),
-			fieldDetail{Field: "addresses", Issue: issueOutOfRange})
+			fmt.Sprintf("bulk submit: %d %s exceeds the cap of %d", rowCount, rowsField, cap),
+			fieldDetail{Field: rowsField, Issue: issueOutOfRange})
 		return
 	}
 	if req.Policy != "" && req.Policy != s.defPolicy.Key {
 		writeErr(w, codeValidationFailed, "request named a policy this build does not serve", fieldDetail{Field: "policy", Issue: issueNotFound})
 		return
+	}
+	// item_id rules (non-blank, <= 200 bytes, no control characters, unique in the request). A bad
+	// item_id is a bad REQUEST (400, naming each offending ordinal); a bad ADDRESS never is — that row
+	// is reported as malformed with its ordinal and the rest of the job proceeds.
+	if req.Items != nil {
+		if details := validateItemIDs(req.Items); details != nil {
+			writeErr(w, codeValidationFailed, "bulk submit: item_id rejected on one or more rows", details...)
+			return
+		}
 	}
 	_ = callerID // authenticated principal; rate-limiting/attribution by caller_id is a later dial
 
@@ -465,13 +485,18 @@ func (s *Server) handleBulkSubmit(w http.ResponseWriter, r *http.Request) {
 	// rejection is not in play on this endpoint, so a `user_id` in the body is silently ignored
 	// today. That is the correct behaviour for a credential-based module, and the cross-tenant test
 	// asserts it stays that way.
-	res, err := s.bulk.SubmitBulk(r.Context(), req.Addresses, s.defPolicy.Key, s.defPolicy.Version, req.CallerRef, ownerUserID)
+	res, err := s.bulk.SubmitBulkRows(r.Context(), bulkRows(req), s.defPolicy, req.CallerRef, ownerUserID)
 	if err != nil {
 		writeErr(w, codeInternalError, "bulk submit: store write failed")
 		return
 	}
-	// 202 Accepted + the handle. counts.total is the accepted (normalizable) set; malformed inputs
-	// are reported, not silently dropped (§7.6 boundary — the platform decides how to present them).
+	// 202 Accepted + the handle. counts are over INPUT ROWS and add up (A2): total = enqueued +
+	// duplicate + malformed, where `duplicate` is a row that shared an earlier row's check IN THIS JOB
+	// (never another job's). Malformed inputs are reported, not silently dropped (§7.6 boundary — the
+	// platform decides how to present them): counts.malformed is the exact number, malformed_rows names
+	// up to 1000 of them by ordinal (and item_id), and malformed_rows_truncated says whether that list
+	// was cut. Every malformed row is ALSO a result (invalid / invalid_syntax) in GET .../results, served
+	// from its own LOG row, which SubmitBulkRows has already committed (Door 2: logged before returned).
 	//
 	// processing_paused is the Rung-4 accept-and-defer disclosure (fix-plan item 4): the work is
 	// stored, and the drainer is stopped, so this job will report zero progress until the rung is
@@ -480,13 +505,19 @@ func (s *Server) handleBulkSubmit(w http.ResponseWriter, r *http.Request) {
 	// Deriving it is the load-bearing choice twice over: a stored flag would still read "paused"
 	// after the rung was released (a job would lie about the present), and a hardcoded false would be
 	// the same class of inert control this item exists to remove.
+	malformedRows := make([]malformedRowJSON, len(res.MalformedRows)) // never null: an empty list is []
+	for i, m := range res.MalformedRows {
+		malformedRows[i] = malformedRowJSON{Ordinal: m.Ordinal, ItemID: m.ItemID}
+	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"job_id": res.JobID,
 		"status": "accepted",
 		"counts": map[string]int{
 			"total": res.Total, "enqueued": res.Enqueued, "duplicate": res.Duplicate, "malformed": res.Malformed,
 		},
-		"processing_paused": s.cfg.KillSwitch.VerdictProductionPaused(),
+		"malformed_rows":           malformedRows,
+		"malformed_rows_truncated": res.MalformedRowsTruncated,
+		"processing_paused":        s.cfg.KillSwitch.VerdictProductionPaused(),
 	})
 }
 
@@ -535,6 +566,12 @@ func (s *Server) handleJobStatus(w http.ResponseWriter, r *http.Request) {
 	// one-way door — to express a transient operational state. A pause is not a state the job is IN;
 	// it is a statement about the system the job is waiting on, which is why the same key with the
 	// same derivation also appears on the 202 submit envelope.
+	//
+	// counts are over INPUT ROWS (0018, A2): total = every row of the submission (malformed and duplicate
+	// rows included), settled = the rows that have an outcome (their work item is terminal, or they are
+	// malformed), pending = total - settled. Duplicates inside one job share a work item, so they settle
+	// with it and pending reaches 0 exactly when the job is complete (it used to stay above 0 for ever on a
+	// job with duplicates). A job submitted before 0018 keeps its old total, which can exceed its rows.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"job_id":     jobID,
 		"status":     status,
@@ -562,17 +599,26 @@ func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jobID := r.PathValue("id")
-	if _, known, err := s.jobs.GetJob(r.Context(), jobID, ownerUserID); err != nil {
+	_, known, err := s.jobs.GetJob(r.Context(), jobID, ownerUserID)
+	if err != nil {
 		writeErr(w, codeInternalError, "job read: store query failed")
 		return
-	} else if !known {
+	}
+	if !known {
 		// Same 404 for absent and not-yours (see handleJobStatus). ListJobResults below ALSO carries
 		// the owner predicate, so a non-owner is stopped twice: once on the shape of the response,
 		// once in the query. Belt and braces, on the one route whose payload is the PII.
 		writeErr(w, codeNotFound, "job absent, or owned by a different caller (tenancy scoping, D1)")
 		return
 	}
+	// The cursor is OPAQUE to callers and issued only by this service (today: the ordinal of the last row
+	// of the previous page). Anything else — including a work-item uuid from a pre-0018 listing — is a
+	// 400, not a guess at a position. Checked AFTER the tenancy 404, so a stranger learns nothing from it.
 	cursor := r.URL.Query().Get("cursor")
+	if _, cerr := store.ParseResultsCursor(cursor); cerr != nil {
+		writeErr(w, codeValidationFailed, "job results: the cursor is not one this service issued", fieldDetail{Field: "cursor", Issue: issueMalformed})
+		return
+	}
 	limit := 100
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 1000 {
@@ -581,6 +627,10 @@ func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, next, err := s.jobs.ListJobResults(r.Context(), jobID, ownerUserID, cursor, limit)
 	if err != nil {
+		if errors.Is(err, store.ErrBadCursor) {
+			writeErr(w, codeValidationFailed, "job results: the cursor is not one this service issued", fieldDetail{Field: "cursor", Issue: issueMalformed})
+			return
+		}
 		writeErr(w, codeInternalError, "job results: page query failed")
 		return
 	}
@@ -596,7 +646,14 @@ func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
 	// verdictFromRow because that function returns a value, not an error, and the useful thing to do on
 	// a bad row is fail the PAGE with a coded 500 — a caller must not receive a page that silently
 	// omitted the rows that were off-contract, which is what per-row skipping would do.
-	results := make([]verdict.Response, 0, len(rows))
+	//
+	// A1/A2 (0018): every element is ONE INPUT ROW, in ordinal order, and carries the row's `ordinal`, (when
+	// it had one) `item_id` and (when it repeats an earlier row's address) `duplicate_of` as ADDITIVE keys
+	// beside the unchanged verdict object. EVERY element is served from a LOG row, none is made up: a work
+	// item's verdict for an addressable row, and for a MALFORMED row its own invalid / invalid_syntax LOG
+	// row written at submit (Door 2). A row whose LOG row is missing has an empty verdict, fails Valid()
+	// below, and fails the page rather than being papered over. `email` stays blank for every row (Door 3).
+	results := make([]bulkResultElement, 0, len(rows))
 	for _, row := range rows {
 		v := verdictFromRow(row.Verdict)
 		if !v.Valid() {
@@ -610,7 +667,7 @@ func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
 				"a stored verification row failed Valid() — it cannot be served as an on-contract verdict")
 			return
 		}
-		results = append(results, v)
+		results = append(results, bulkResultElement{Response: v, ItemID: row.ItemID, Ordinal: row.Ordinal, DuplicateOf: row.DuplicateOf})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"job_id":      jobID,

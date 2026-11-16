@@ -43,10 +43,13 @@ type MemStore struct {
 	callers map[string]callerRow
 
 	// Phase 5 (§3.3/§5/§7) — the durable async queue. workItems keyed by id; idemKeys maps
-	// hex(idempotency_key) -> id for dedup; jobs keyed by id; attempts is the append-only transcript.
+	// jobID + "\x00" + hex(idempotency_key) -> id for dedup PER JOB (0018; a job-less item uses the empty
+	// job id, so it dedups against other job-less items only); jobs keyed by id; attempts is the
+	// append-only transcript. jobRows is verify.job_rows (0018): the input rows of each job, by job id.
 	workItems map[string]WorkItemRow
 	idemKeys  map[string]string
 	jobs      map[string]JobRow
+	jobRows   map[string][]JobRowEntry
 	attempts  []WorkItemAttemptRow
 
 	// Phase 6 (§5/§6) — the append-only external-verifier call log (spend + provenance). Tests read
@@ -91,20 +94,21 @@ func NewMem(now func() time.Time) *MemStore {
 		now = time.Now
 	}
 	return &MemStore{
-		now:        now,
-		cache:      map[string]CachedVerdict{},
-		disposable: map[string]struct{}{},
-		spamTrap:   map[string]struct{}{},
-		catchall:   map[string]bool{},
-		policies:   map[string]PolicyRow{},
-		health:     map[string]NodeHealth{},
-		registered: map[string]struct{}{},
-		warmup:     map[string]warmupWindow{},
-		rateBudget: map[string]rateBucket{},
-		callers:    map[string]callerRow{},
-		workItems:  map[string]WorkItemRow{},
-		idemKeys:   map[string]string{},
-		jobs:       map[string]JobRow{},
+		now:          now,
+		cache:        map[string]CachedVerdict{},
+		disposable:   map[string]struct{}{},
+		spamTrap:     map[string]struct{}{},
+		catchall:     map[string]bool{},
+		policies:     map[string]PolicyRow{},
+		health:       map[string]NodeHealth{},
+		registered:   map[string]struct{}{},
+		warmup:       map[string]warmupWindow{},
+		rateBudget:   map[string]rateBucket{},
+		callers:      map[string]callerRow{},
+		workItems:    map[string]WorkItemRow{},
+		idemKeys:     map[string]string{},
+		jobs:         map[string]JobRow{},
+		jobRows:      map[string][]JobRowEntry{},
 		outcomeDedup: map[string]struct{}{},
 		cursors:      map[string]string{},
 	}
@@ -488,12 +492,14 @@ func (m *MemStore) ResetWarmup(_ context.Context, nodeID string, windowStart tim
 
 // ── Phase 5 (§3.3/§5/§7) — the durable async queue (Mem parity; CAS/lease faithfully reproduced) ──
 
-// EnqueueWorkItem inserts a work-item, deduping on idempotency_key (mirrors PG ON CONFLICT DO
-// NOTHING): a duplicate key is a no-op returning alreadyExists=true.
+// EnqueueWorkItem inserts a work-item, deduping on idempotency_key WITHIN ITS JOB (mirrors PG's
+// per-job partial unique indexes and ON CONFLICT DO NOTHING, 0018): a duplicate key in the SAME job is a
+// no-op returning alreadyExists=true and the id of the work item that holds the key. A different job
+// never collides; a job-less item (item.JobID == "") dedups against other job-less items only.
 func (m *MemStore) EnqueueWorkItem(_ context.Context, item WorkItemRow) (string, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	key := hex.EncodeToString(item.IdempotencyKey)
+	key := item.JobID + "\x00" + hex.EncodeToString(item.IdempotencyKey)
 	if existing, ok := m.idemKeys[key]; ok {
 		return existing, true, nil // dedup (§5.5)
 	}
@@ -506,6 +512,68 @@ func (m *MemStore) EnqueueWorkItem(_ context.Context, item WorkItemRow) (string,
 	m.workItems[item.ID] = item
 	m.idemKeys[key] = item.ID
 	return item.ID, false, nil
+}
+
+// RecordJob creates a job, records its input rows and appends the LOG rows of its malformed rows (mirrors
+// PG's single transaction, 0018, INCLUDING the constraints the database enforces: a fake laxer than the real
+// store is how a defect stays invisible to the suite). ALL-OR-NOTHING, like the transaction: every check runs
+// before anything is stored, so a refused batch leaves no job, no row and no LOG row.
+//
+//   - the job id is new (jobs_pkey) and every reject LOG id is new (verifications_pkey);
+//   - (job_id, ordinal) is unique and ordinal >= 0;
+//   - (job_id, item_id) is unique where item_id is non-empty, and item_id is at most MaxItemIDBytes;
+//   - a malformed row carries a verification_id and no work item; any other row a work item and no verification_id;
+//   - duplicate_of is below the row's ordinal and never set on a malformed row;
+//   - the rows and the rejects agree (checkRejectLinks, the one rule the database cannot see).
+func (m *MemStore) RecordJob(_ context.Context, job JobRow, rows []JobRowEntry, rejects []VerificationRow) error {
+	if err := checkRejectLinks(rows, rejects); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.jobs[job.ID]; exists {
+		return fmt.Errorf("store: record job: job %s already exists (jobs_pkey)", job.ID)
+	}
+	haveLog := make(map[string]bool, len(m.Log))
+	for _, r := range m.Log {
+		haveLog[r.ID] = true
+	}
+	for _, r := range rejects {
+		if haveLog[r.ID] {
+			return fmt.Errorf("store: record job: LOG row %s already exists (verifications_pkey)", r.ID)
+		}
+	}
+	haveOrdinal := make(map[int]bool, len(rows))
+	haveItem := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		switch {
+		case r.Ordinal < 0:
+			return fmt.Errorf("store: record job: ordinal %d is negative (job_rows_ordinal_nonneg)", r.Ordinal)
+		case haveOrdinal[r.Ordinal]:
+			return fmt.Errorf("store: record job: ordinal %d recorded twice (job_rows_pkey)", r.Ordinal)
+		case len(r.ItemID) > MaxItemIDBytes:
+			return fmt.Errorf("store: record job: item_id of row %d is %d bytes, over %d (job_rows_item_id_shape)", r.Ordinal, len(r.ItemID), MaxItemIDBytes)
+		case r.ItemID != "" && haveItem[r.ItemID]:
+			return fmt.Errorf("store: record job: item_id of row %d is already used in the job (uq_job_rows_item_id)", r.Ordinal)
+		case r.Malformed && (r.WorkItemID != "" || r.VerificationID == ""):
+			return fmt.Errorf("store: record job: malformed row %d must carry a verification and no work item (job_rows_outcome_shape)", r.Ordinal)
+		case !r.Malformed && (r.WorkItemID == "" || r.VerificationID != ""):
+			return fmt.Errorf("store: record job: row %d must carry a work item and no verification (job_rows_outcome_shape)", r.Ordinal)
+		case r.DuplicateOf != nil && (r.Malformed || *r.DuplicateOf < 0 || *r.DuplicateOf >= r.Ordinal):
+			return fmt.Errorf("store: record job: row %d: duplicate_of must be an earlier ordinal and never on a malformed row (job_rows_duplicate_of_shape)", r.Ordinal)
+		}
+		haveOrdinal[r.Ordinal] = true
+		if r.ItemID != "" {
+			haveItem[r.ItemID] = true
+		}
+	}
+	if job.Status == "" {
+		job.Status = "submitted"
+	}
+	m.jobs[job.ID] = job
+	m.Log = append(m.Log, rejects...)
+	m.jobRows[job.ID] = append([]JobRowEntry(nil), rows...)
+	return nil
 }
 
 // DequeueReady leases up to `limit` ready items in group-by-domain order (§6.2). The MemStore's
@@ -754,18 +822,41 @@ func (m *MemStore) JobCompletion(_ context.Context, jobID, ownerUserID string) (
 			break
 		}
 	}
-	return complete, j.TotalCount, j.SettledCount, nil
+	// settled counts ROWS (mirrors PG, 0018): input rows whose work item is terminal, plus the malformed
+	// rows (they have no work item to wait for). Computed on read, not from j.SettledCount.
+	settled := 0
+	for _, r := range m.jobRows[jobID] {
+		if r.Malformed {
+			settled++
+			continue
+		}
+		if w, ok := m.workItems[r.WorkItemID]; ok && (w.Status == "settled" || w.Status == "dead") {
+			settled++
+		}
+	}
+	return complete, j.TotalCount, settled, nil
 }
 
-// ListJobResults returns settled items for a job joined to their verdicts, cursor-paginated by id.
+// ListJobResults returns the input rows of a job that have an outcome, joined to their verdicts,
+// ORDERED BY ORDINAL and cursor-paginated by ordinal (mirrors PG, 0018). A row has an outcome when its
+// work item is settled|dead or when it is malformed; identical addresses in one job share a work item,
+// so their rows share a verdict and keep their own ordinal and item_id.
 // SCOPED TO ITS OWNER (0013 / item 1) — the path that leaked the actual verdicts under D1. A
 // non-owner gets ZERO ROWS and an empty cursor, mirroring PG's inner join back to jobs: the owner
 // check happens BEFORE pagination, so no cursor/limit combination walks another tenant's results.
+//
+// The cursor is the ordinal of the LAST ROW RETURNED. The page is built by scanning rows in ordinal order
+// and stopping at limit; "is there a next page" is learnt by finding one more qualifying row, whose
+// ordinal is NEVER used as the cursor (that is the defect M2's campaign report had, M2-G5).
 func (m *MemStore) ListJobResults(_ context.Context, jobID, ownerUserID, cursor string, limit int) ([]WorkItemResult, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if limit <= 0 {
 		limit = 100
+	}
+	after, cerr := ParseResultsCursor(cursor)
+	if cerr != nil {
+		return nil, "", cerr
 	}
 	if _, ok := m.jobOwnedBy(jobID, ownerUserID); !ok {
 		return nil, "", nil // not yours (or absent) — an empty page, never a partial one
@@ -774,20 +865,31 @@ func (m *MemStore) ListJobResults(_ context.Context, jobID, ownerUserID, cursor 
 	for _, r := range m.Log {
 		logByID[r.ID] = r
 	}
-	var ids []string
-	for id, w := range m.workItems {
-		if w.JobID == jobID && (w.Status == "settled" || w.Status == "dead") && w.VerificationID != "" && id > cursor {
-			ids = append(ids, id)
-		}
-	}
-	sort.Strings(ids)
+	rows := append([]JobRowEntry(nil), m.jobRows[jobID]...)
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Ordinal < rows[j].Ordinal })
+
 	var out []WorkItemResult
-	for _, id := range ids {
-		if len(out) >= limit {
-			return out, out[len(out)-1].WorkItemID, nil
+	for _, r := range rows {
+		if r.Ordinal <= after {
+			continue
 		}
-		w := m.workItems[id]
-		out = append(out, WorkItemResult{WorkItemID: id, EmailHash: w.EmailHash, Verdict: logByID[w.VerificationID]})
+		res := WorkItemResult{Ordinal: r.Ordinal, ItemID: r.ItemID, Malformed: r.Malformed, DuplicateOf: r.DuplicateOf}
+		if r.Malformed {
+			// A malformed row is answered by its OWN LOG row, written at submit (Door 2): served like every other result.
+			res.Verdict = logByID[r.VerificationID]
+		} else {
+			w, ok := m.workItems[r.WorkItemID]
+			if !ok || (w.Status != "settled" && w.Status != "dead") || w.VerificationID == "" {
+				continue // no outcome yet
+			}
+			res.WorkItemID, res.EmailHash, res.Verdict = w.ID, w.EmailHash, logByID[w.VerificationID]
+		}
+		if len(out) == limit {
+			// One more qualifying row exists, so another page does too. The cursor is the last row
+			// RETURNED (out's tail), never this look-ahead row.
+			return out, FormatResultsCursor(out[len(out)-1].Ordinal), nil
+		}
+		out = append(out, res)
 	}
 	return out, "", nil
 }

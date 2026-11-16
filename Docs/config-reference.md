@@ -13,18 +13,18 @@ Regenerate on any manifest change; CI verifies this file is up to date
 
 | bucket | count |
 |---|---|
-| secrets | 10 |
-| feature-flags | 150 |
-| dials | 125 |
+| secrets | 11 |
+| feature-flags | 151 |
+| dials | 130 |
 | other/uncategorized | 2 |
-| **total knobs** | **287** |
+| **total knobs** | **294** |
 
 > One-way doors are **not** dials: the frozen contracts (response shape, LOG, hashing,
 > vocabulary, never-fork) live in code (`control-plane/internal/{vocab,hash,verdict,store,router}`),
 > not in this toggle list. A dial that *feeds* a door (e.g. a `confidence` number vs. the
 > `confidence` int-0–100 *type*) is a dial; the type it feeds is frozen.
 
-## Secrets (10)
+## Secrets (11)
 
 | knob | default / state | source |
 |---|---|---|
@@ -35,11 +35,12 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | `TM_MIGRATE_DATABASE_URL` (the migrating identity's DSN; read by `cmd/migrate` only, never by the control plane) | UNSET ⇒ `migrate` exits 64 naming the variable; nothing else is affected | FW-3, `control-plane/migrations/README.md` |
 | `TM_QUEUE_ADDR_KEY` (+`_PREV`) (DR-4 at-rest key) | UNSET ⇒ queue subsystem refuses to start (bulk 503) and `/readyz` goes `not_ready` naming the key; key ≠ pepper, 32 bytes | P5 §3.3, ADR-0011, DR-4 |
 | vendor API key (per adapter) | UNSET — held brain-side in secrets, rotated (§7.4) | P6 §7.2, §7.4, §8.3 |
+| `ZEROBOUNCE_API_KEY` (or the variable named by `TM_EXTERNAL_ZEROBOUNCE_KEY_ENV`) — the vendor key value | unset — the layer stays off | vendor-zerobounce.md §3, §7 |
 | node token (brain→box) | no rotation *cadence*; revoke-vs-drain ordering at queue scale unspecified (security F-1) | no rotation *cadence*; revoke-vs-drain ordering at queue scale unspecified (security F-1) |
 | vendor API key (P6) | no rotation story; leak = budget-DoS + billed enumeration oracle (security F-6) | no rotation story; leak = budget-DoS + billed enumeration oracle (security F-6) |
 | front-door bearer token | no per-caller scoping/rotation brain-side; guards bulk-PII endpoint by P5 (security F-20) | no per-caller scoping/rotation brain-side; guards bulk-PII endpoint by P5 (security F-20) |
 
-## Feature-flags (150)
+## Feature-flags (151)
 
 | knob | default / state | source |
 |---|---|---|
@@ -124,6 +125,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | HELO/verifier rotation granularity | per-node single audited identity; multi-identity a DIAL (OQ-P4-4) | P4 §4.5, OQ-P4-4, GAP-22 |
 | rate limits scope (policy vs global) | global pool config + optional per-policy override (OQ-P4-5) | P4 §4.7, OQ-P4-5 |
 | `smtp_skipped_reason:"rate_limited"` (new enum value) | additive to P3 enum | P4 §4.6, §9 |
+| `smtp_skipped_reason:"smtp_unwired"` (new enum value) | additive to the P3/P4 enum: the SMTP stage is not wired in this process (SMTP disabled, or buildSMTP returned nil); the cheap residue stands, is non-cacheable (our own degraded state), and carries `failure_origin: own` | P2-research M1-G6 |
 | rate-saturation degrade | degrade to cheap, non-cacheable, never queue/invalid (P4); queue absorbs in P5 | P4 §4.6 |
 | block-rate numerator reasons | `smtp_blocked` primary; timeout/connection_failed secondary separately-thresholded; `greylisted` NOT counted (OQ-P4-6) | P4 §5.2, OQ-P4-6 |
 | block-rate query filter (`from_cache=false ∧ verifier_ip=node ∧ SMTP ran`) | LOCKED (PB1) | P4 §5.2 (PB1) |
@@ -194,7 +196,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | TM_FLYWHEEL_GATE_ENABLED | `false` (OFF — fresh-system invariant) | P7 §4.6, DR-2 |
 | TM_FLYWHEEL_CALIBRATION_ENABLED | `false` (OFF — P1 baseline stands) | P7 §5.4, DR-2 |
 
-## Dials (125)
+## Dials (130)
 
 | knob | default / state | source |
 |---|---|---|
@@ -283,6 +285,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | `TM_QUEUE_LEASE_MARGIN_SECONDS` (lease TTL = maxSMTPdeadline + this) | 120 (2 min); VALIDATED > 0 (GAP-37: TTL must EXCEED the deadline, else a slow attempt loses its lease and is double-run) | P5 §5.2, GAP-37, X-7 |
 | `TM_QUEUE_DRAIN_BATCH_SIZE` (items per drain tick) | 10 | P5 §6 |
 | `TM_QUEUE_DRAIN_IDLE_POLL_SECONDS` (idle sleep) | 2 | P5 §3 |
+| `TM_QUEUE_ERROR_MAX_ATTEMPTS` (error cap: how many times ONE item may fail to be computed — a policy-resolve, decrypt or compute error — before it settles `unknown/unknown_error`, `failure_origin: own`, `error_capped: true`, not cached) | 5 (range 1..50; 0 and >50 rejected at startup; unset in the drainer = 5, it cannot be disabled) | P2-research M1-G7 |
 | `TM_QUEUE_BULK_MAX_ADDRESSES` (submission cap, §7.5) | **UNSET — owner OQ** (built-in hard cap 100k applies until set) | P5 §7.5 |
 | `confidence_cap` (external valid) | 60 (anti-laundering) — a **per-policy** key in the policy JSON (`external.confidence_cap`), NOT an env var; the runtime reads it from the policy (external.Resolve). Different policies may cap differently. | P6 §3.2, §3.4, OQ-P6-1 |
 | vendor normalization table (raw status → system vocab) | per §8.2; unrecognized → `unknown` (never guess) | P6 §8.2 |
@@ -298,6 +301,10 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | `TM_EXTERNAL_ERROR_RATE_PCT` (breaker cond-2 trip %) | 0 (error-rate condition off; budget ceilings still apply) | P6 §5.3 |
 | `TM_EXTERNAL_ERROR_MIN_SAMPLES` (error-rate sample gate) | 20 | P6 §5.3, GAP-27 |
 | `TM_EXTERNAL_BREAKER_COOLDOWN_SECONDS` (open→half-open) | 300 (5 min) | P6 §5.3 |
+| `TM_EXTERNAL_DAILY_SPEND_CAP` (ZeroBounce hard cap, vendor credits per rolling 24 h) | **0 — no vendor calls allowed** (a non-negative integer; 0 is a closed door, not "unset") | vendor-zerobounce.md §3 |
+| `TM_EXTERNAL_ZEROBOUNCE_KEY_ENV` (the NAME of the env var holding the key) | `ZEROBOUNCE_API_KEY` — upper-case env-var name, not `TM_`-prefixed; **never the key itself** (a mistaken value is rejected and not echoed) | vendor-zerobounce.md §3 |
+| `TM_EXTERNAL_ZEROBOUNCE_TIMEOUT_MS` (per-call timeout) | 8000, bounded 3000–60000 | vendor-zerobounce.md §3 |
+| `TM_EXTERNAL_ZEROBOUNCE_BASE_URL` (vendor host) | `https://api.zerobounce.net` (`api-us` / `api-eu` are the published regional hosts); `scheme://host[:port]` only; **https** except a loopback / `zbstub` host over http under `TM_ENV=development` or `test` | vendor-zerobounce.md §3 |
 | DSN-code → event mapping | provider-specific, tunable; three-class taxonomy LOCKED | P7 §4.3 |
 | evidence-strength weights | ordering LOCKED (mailbox_full ≥ discriminating-delivery > catch-all-delivery ≈ 0); weights DIAL | P7 §4.5 |
 | historical-bounce TTL | 6–12 months on confirmed mailbox_not_found only, then degrades to penalty (OQ-P7-2) | P7 §4.6, OQ-P7-2, App C PB2 |

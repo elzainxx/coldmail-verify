@@ -181,7 +181,7 @@ func requireDetail(t *testing.T, body map[string]any, field, issue string) {
 	if !ok || len(raw) == 0 {
 		t.Fatalf("error carries no details[]; want field=%q issue=%q: %+v", field, issue, body)
 	}
-	allowed := map[string]bool{issueRequired: true, issueMalformed: true, issueOutOfRange: true, issueNotFound: true}
+	allowed := map[string]bool{issueRequired: true, issueMalformed: true, issueOutOfRange: true, issueNotFound: true, issueConflict: true, issueDuplicate: true}
 	for _, d := range raw {
 		m, ok := d.(map[string]any)
 		if !ok {
@@ -296,8 +296,8 @@ func TestErrorEnvelope_BulkCapNoLongerAnswersInASecondShape(t *testing.T) {
 // standing up a real Enqueuer.
 type nopSubmitter struct{}
 
-func (nopSubmitter) SubmitBulk(_ context.Context, addresses []string, _ string, _ int, _, _ string) (queue.BulkResult, error) {
-	return queue.BulkResult{JobID: "019fd000-0000-7000-8000-0000000000aa", Total: len(addresses), Enqueued: len(addresses)}, nil
+func (nopSubmitter) SubmitBulkRows(_ context.Context, rows []queue.BulkRow, _ *policy.Definition, _, _ string) (queue.BulkResult, error) {
+	return queue.BulkResult{JobID: "019fd000-0000-7000-8000-0000000000aa", Total: len(rows), Enqueued: len(rows)}, nil
 }
 
 // TestErrorEnvelope_RequestIDsAreUniquePerRequest — a correlation id that repeats correlates

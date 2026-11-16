@@ -8,13 +8,18 @@ package queue
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"time"
 
+	"github.com/coldmail-verify/control-plane/internal/failureorigin"
+	"github.com/coldmail-verify/control-plane/internal/hash"
 	"github.com/coldmail-verify/control-plane/internal/idgen"
 	"github.com/coldmail-verify/control-plane/internal/orchestrator"
 	"github.com/coldmail-verify/control-plane/internal/policy"
 	"github.com/coldmail-verify/control-plane/internal/store"
+	"github.com/coldmail-verify/control-plane/internal/verdict"
+	"github.com/coldmail-verify/control-plane/internal/vocab"
 )
 
 // Computer is the log-FREE compute path the drainer runs each item through — satisfied by
@@ -66,6 +71,15 @@ type Deps struct {
 	MaxAttempts int
 	MaxRetryAge time.Duration
 
+	// ErrorMaxAttempts caps how many times ONE item may fail to be computed at all — the policy cannot be resolved, the address cannot
+	// be decrypted, or ComputeForQueue returns an error (M1-G7). Before the cap those three paths requeued forever: no result, a job
+	// that never completes, no terminal state. At the cap the item SETTLES (the same compare-and-set settle path, terminal "dead", so it
+	// appears in the job's results) as unknown/unknown_error with signals.failure_origin=own and signals.error_capped=true, and is never
+	// cached. The count is the item's existing attempt column (bumped on every error requeue); the failing attempt that reaches the cap
+	// is the cap-th, so a cap of N means exactly N failed tries. <=0 means DefaultErrorMaxAttempts: the cap cannot be switched off by
+	// omission — "never settles" is the defect this exists to remove. Config: TM_QUEUE_ERROR_MAX_ATTEMPTS (default 5, range 1..50).
+	ErrorMaxAttempts int
+
 	// BatchSize is how many items the drainer leases per tick (§6); IdlePoll is the sleep when the
 	// queue is empty; ReclaimEvery gates how often the lease-reclaim sweep runs.
 	BatchSize    int
@@ -100,6 +114,10 @@ type Drainer struct {
 	pausedLast  bool // last observed pause state, so the transition is logged once, not per tick
 }
 
+// DefaultErrorMaxAttempts is the error-attempt cap a Drainer uses when Deps.ErrorMaxAttempts is unset. It mirrors
+// config.Defaults().Dials.QueueErrorMaxAttempts (TM_QUEUE_ERROR_MAX_ATTEMPTS); production passes the configured value.
+const DefaultErrorMaxAttempts = 5
+
 // ErrLeaseTTLTooShort is returned by NewDrainer when LeaseTTL <= MaxSMTPDeadline — the GAP-37
 // invariant. Refusing to start is the harden-toward-safety choice: a too-short lease silently
 // reintroduces the slow-drainer double-attempt race the CAS exists to close.
@@ -115,6 +133,9 @@ func NewDrainer(d Deps) (*Drainer, error) {
 	}
 	if d.WorkerID == "" {
 		return nil, errors.New("queue: WorkerID is required (the GAP-37 CAS lease-holder key)")
+	}
+	if d.ErrorMaxAttempts <= 0 {
+		d.ErrorMaxAttempts = DefaultErrorMaxAttempts
 	}
 	now := d.Now
 	if now == nil {
@@ -220,13 +241,15 @@ func (dr *Drainer) tick(ctx context.Context) bool {
 func (dr *Drainer) TickOnce(ctx context.Context) bool { return dr.tick(ctx) }
 
 // drainOne runs one leased item through the P4 gate path and applies the resulting transition via
-// the GAP-37 CAS. A compute error requeues as a short capacity wait (the item is not lost). An
-// ErrLeaseLost from the CAS is EXPECTED and benign (another attempt owns the item — GAP-37): we log
-// at debug level and move on; the item is NOT ours to transition.
+// the GAP-37 CAS. A policy / decrypt / compute error requeues on a short wait and COUNTS toward the
+// item's error cap (errorRetry): the item is not lost, but it can no longer retry forever — at the cap
+// it settles unknown/unknown_error (M1-G7). An ErrLeaseLost from the CAS is EXPECTED and benign
+// (another attempt owns the item — GAP-37): we log at debug level and move on; the item is NOT ours
+// to transition.
 func (dr *Drainer) drainOne(ctx context.Context, it store.WorkItemRow) {
 	def, err := dr.d.Policy.Resolve(ctx, it.PolicyKey, it.PolicyVersion)
 	if err != nil {
-		dr.requeueCapacity(ctx, it, "policy_unavailable")
+		dr.errorRetry(ctx, it, "policy_unavailable")
 		return
 	}
 	// DR-4: open the plaintext address for THIS attempt (AAD = the row id, anti-replay). The
@@ -234,16 +257,16 @@ func (dr *Drainer) drainOne(ctx context.Context, it store.WorkItemRow) {
 	addr, err := dr.d.Cipher.Open(it.AddrCiphertext, []byte(it.ID))
 	if err != nil {
 		// A decrypt failure (missing/rotated-out key, corrupt/moved ciphertext) can't run SMTP —
-		// requeue as a capacity wait so a transient key issue self-heals; if it persists the item
-		// eventually hits max_retry_age and settles unknown (never invalid, never a guessed verdict).
+		// retry on a short wait so a transient key issue self-heals; if it persists, the item hits
+		// the error cap and settles unknown/unknown_error (never invalid, never a guessed verdict).
 		log.Printf("queue drainer: addr decrypt failed for item %s (attempt %d): %v", it.ID, it.Attempt, err)
-		dr.requeueCapacity(ctx, it, "addr_undecryptable")
+		dr.errorRetry(ctx, it, "addr_undecryptable")
 		return
 	}
 
 	out, err := dr.d.Compute.ComputeForQueue(ctx, addr, def, it.JobID)
 	if err != nil {
-		dr.requeueCapacity(ctx, it, "compute_error")
+		dr.errorRetry(ctx, it, "compute_error")
 		return
 	}
 	dr.apply(ctx, it, out, addr, def)
@@ -335,18 +358,76 @@ func (dr *Drainer) requeue(ctx context.Context, it store.WorkItemRow, due time.T
 	}
 }
 
-// requeueCapacity is the short-backoff capacity wait used when the item couldn't even be computed
-// (policy/decrypt/compute error) — treated like QNoEligibleNode: wait, don't bump, don't lose.
-func (dr *Drainer) requeueCapacity(ctx context.Context, it store.WorkItemRow, reason string) {
-	now := dr.now()
-	if dr.d.MaxRetryAge > 0 && now.Sub(it.CreatedAt) >= dr.d.MaxRetryAge {
-		// Exhausted the wait window with no computable verdict — release the lease back to ready so
-		// the reclaim/next tick can retry; we do NOT fabricate a verdict here (harden-toward-unknown).
-		dr.requeue(ctx, it, now, reason, false)
+// errorRetry handles an item that could not even be computed (policy / decrypt / compute error). It used to requeue on a short
+// capacity wait WITHOUT counting, forever (M1-G7). Now each such error is one counted attempt of the item (the existing attempt column,
+// bumped by the requeue): the failure that is the ErrorMaxAttempts-th settles the item instead (settleErrorCapped); every earlier one
+// requeues on the same short wait as before. Nothing is fabricated: the settled verdict is an unknown that says it is our failure.
+func (dr *Drainer) errorRetry(ctx context.Context, it store.WorkItemRow, reason string) {
+	if it.Attempt+1 >= dr.d.ErrorMaxAttempts {
+		dr.settleErrorCapped(ctx, it, reason)
 		return
 	}
-	dr.requeue(ctx, it, now.Add(dr.d.Backoff.NextRateWait()), reason, false)
+	now := dr.now()
+	due := now.Add(dr.d.Backoff.NextRateWait())
+	if dr.d.MaxRetryAge > 0 && now.Sub(it.CreatedAt) >= dr.d.MaxRetryAge {
+		// Past the wait window with no computable verdict — release the lease back to ready so the next tick retries now (the cap, not
+		// the wait, is what bounds the item); we do NOT fabricate a verdict here (harden-toward-unknown).
+		due = now
+	}
+	dr.requeue(ctx, it, due, reason, true /* bump: every error counts toward the cap */)
 }
+
+// settleErrorCapped settles an item whose errors reached the cap: unknown / unknown_error, failure_origin=own, error_capped=true,
+// never cached, through the same CAS settle path as every other terminal (so it appears in the job's results and the job can complete).
+// Terminal "dead": the retry budget is spent, exactly like a retry-exhausted greylist.
+func (dr *Drainer) settleErrorCapped(ctx context.Context, it store.WorkItemRow, reason string) {
+	out, err := ErrorCappedOutcome(it, dr.now(), reason)
+	if err != nil {
+		// Cannot even build the row (id generation failed): leave the item to the next tick rather than lose it or fabricate a verdict.
+		log.Printf("queue drainer: item %s reached the error cap but its settle row could not be built (%v); will retry", it.ID, err)
+		dr.requeue(ctx, it, dr.now().Add(dr.d.Backoff.NextRateWait()), reason, false)
+		return
+	}
+	log.Printf("queue drainer: item %s failed %d times (last: %s) — settling unknown/unknown_error (failure_origin=own, error_capped)", it.ID, it.Attempt+1, reason)
+	dr.settle(ctx, it, "dead", out)
+}
+
+// ErrorCappedOutcome builds the settle outcome for an item that hit the error cap: the LOG row (id assigned) of an
+// unknown/unknown_error verdict carrying signals.error_capped=true and, via verdict.Assemble, signals.failure_origin=own. It carries NO
+// cache row (a cap is our own failure, never an answer) and no raw blob. The row is built from the work item alone — the address was
+// possibly never decryptable, and the plaintext is not needed: the item's email_hash and domain are the identity. Exported so the tests
+// can build the same row without a drainer.
+func ErrorCappedOutcome(it store.WorkItemRow, now time.Time, reason string) (orchestrator.QueueOutcome, error) {
+	rowID, err := idgen.NewV7String(now)
+	if err != nil {
+		return orchestrator.QueueOutcome{}, err
+	}
+	requestID, err := idgen.NewV7String(now)
+	if err != nil {
+		return orchestrator.QueueOutcome{}, err
+	}
+	core := verdict.Core{
+		Status: vocab.StatusUnknown, Reason: vocab.ReasonUnknownError,
+		Confidence: errorCappedConfidence, Recommendation: vocab.RecReview,
+		Flags:   map[string]bool{},
+		Signals: map[string]any{vocab.SignalErrorCapped: true},
+		Cause:   failureorigin.CauseErrorCapped,
+	}
+	prov := verdict.Provenance{
+		RequestID: requestID, CheckedAt: now,
+		PolicyKey: it.PolicyKey, PolicyVersion: it.PolicyVersion, ConfigFingerprint: it.ConfigFingerprint,
+		NormalizedDomain: it.Domain, EmailHash: it.EmailHash, HashScheme: hash.SchemeTag,
+	}
+	resp, row := verdict.Assemble(core, prov)
+	if !resp.Valid() { // never log an out-of-contract verdict (Door 1/4); unreachable unless a constant above is broken
+		return orchestrator.QueueOutcome{}, fmt.Errorf("queue: error-capped verdict is out of contract: %s/%s/%d/%s", resp.Status, resp.Reason, resp.Confidence, resp.Recommendation)
+	}
+	row.ID = rowID
+	return orchestrator.QueueOutcome{Class: orchestrator.QSettled, LastReason: reason, Row: row}, nil
+}
+
+// errorCappedConfidence is the confidence of an error-capped unknown: the same floor every other unknown carries (smtp.confUnknown).
+const errorCappedConfidence = 10
 
 // attemptRow builds the per-attempt transcript (OQ-P5-8). Node/verifier_ip come from the settled
 // verdict row when SMTP ran; reason is the attempt's outcome. Signals are omitted here (the verdict

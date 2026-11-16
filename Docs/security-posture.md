@@ -35,7 +35,7 @@ by `Secrets.String()`. **No secret may reach a log line** ([ADR-0016](adr/ADR-00
 | Front-door legacy bearer | `TM_FRONTDOOR_TOKEN` | sync callers on the legacy path 401 | anyone can call sync `/v1/verify` |
 | Per-caller API keys | stored **hashed** in `api_callers` (`key_sha256`) | issue a new key | rotate: windows overlap, then expire |
 | Node tokens (per node) | `TM_NODE_TOKENS` (`nodeid=token,…`); the node's `ACCESS_TOKENS` | the brain cannot call that node | that node's wrapper is callable |
-| Vendor keys | `TM_VENDOR_KEYS` | the fallback stays off | spend and egress at the vendor |
+| Vendor key (ZeroBounce) | the environment variable named by `TM_EXTERNAL_ZEROBOUNCE_KEY_ENV` (default `ZEROBOUNCE_API_KEY`); `TM_VENDOR_KEYS` is no longer read for the vendor | the fallback stays off | spend and egress at the vendor |
 | Database DSN | `TM_DATABASE_URL` | the process is not ready | full data access |
 | Migrating identity's DSN | `TM_MIGRATE_DATABASE_URL` (migration runner only; the control plane never reads it) | migrations cannot be applied; the running service is unaffected | a superuser-grade credential (DDL, ownership, the whole database): custody like the break-glass role, never the runtime `verify_app`. The runner never prints it (driver errors that embed it are suppressed; `TestRun_NeverPrintsTheCredential`) |
 | Presence-checked secret | `TM_SUPABASE_KEY` | the process refuses to start when `TM_ENV=production` | nothing — it has no consumer (a known oddity, [`future-work.md`](future-work.md) FW-5) |
@@ -68,8 +68,10 @@ memory, so host hardening and core-dump suppression are part of custody. The que
   external tamper-evidence checkpoint is an open owner decision ([`future-work.md`](future-work.md) FW-9);
   the audit of who used `verify_admin` depends on the unbuilt admin-audit log (FW-1).
 - **Third-party egress.** The vendor layer is *off*. It needs three independent affirmative switches
-  (`TM_EXTERNAL_DPA_CONFIRMED=true`, `TM_FALLBACK_MODE=enabled`, a `TM_VENDOR_KEYS` entry); any one
-  missing ⇒ no address leaves. `TM_FALLBACK_MODE=off` is the global panic button. `external_calls`
+  (`TM_EXTERNAL_DPA_CONFIRMED=true`, `TM_FALLBACK_MODE=enabled`, the vendor key present in the environment
+  variable named by `TM_EXTERNAL_ZEROBOUNCE_KEY_ENV`); any one missing ⇒ no address leaves, and even with all three on
+  nothing is sent until the hard daily spend cap `TM_EXTERNAL_DAILY_SPEND_CAP` is set above its default `0`. A
+  ZeroBounce adapter now ships behind this guard, disabled ([`vendor-zerobounce.md`](vendor-zerobounce.md)). `TM_FALLBACK_MODE=off` is the global panic button. `external_calls`
   stores only `email_hash` and is queryable by hash for subject-access and deletion requests
   ([ADR-0012](adr/ADR-0012-phase-6-external-fallback-additive-surface.md)).
 

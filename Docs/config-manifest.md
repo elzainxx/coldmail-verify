@@ -245,6 +245,7 @@ It does not resolve open questions or set UNSET values — those are owner decis
 | **HELO/verifier rotation granularity** | feature-flag/dial | per-node single audited identity; multi-identity a DIAL (OQ-P4-4) | per-check rotation → multiplies DNS/PTR/SPF surface | reputation | P4 §4.5, OQ-P4-4, GAP-22 |
 | **rate limits scope** (policy vs global) | feature-flag | global pool config + optional per-policy override (OQ-P4-5) | per-policy only → two policies exhaust same IP↔provider budget | pool / reputation | P4 §4.7, OQ-P4-5 |
 | **`smtp_skipped_reason:"rate_limited"`** (new enum value) | feature-flag | additive to P3 enum | — | data-integrity (log) | P4 §4.6, §9 |
+| **`smtp_skipped_reason:"smtp_unwired"`** (new enum value) | feature-flag | additive to the P3/P4 enum: the SMTP stage is not wired in this process (SMTP disabled, or buildSMTP returned nil); the cheap residue stands, is non-cacheable (our own degraded state), and carries `failure_origin: own` | a deployment that deliberately runs cheap-layers-only (kill-switch Rung 3, the shipped default) now sees the token and no verdict cache for residue | data-integrity (log) | P2-research M1-G6 |
 | **rate-saturation degrade** | feature-flag | degrade to cheap, non-cacheable, never queue/invalid (P4); queue absorbs in P5 | queue in P4 → out of scope | per-verdict | P4 §4.6 |
 
 ### 4.3 Health watcher & auto-quarantine (control-loop guards)
@@ -380,6 +381,7 @@ These promote the §5.2/§5.3 dials from `buildQueue` code-defaults to readable 
 | **`TM_QUEUE_LEASE_MARGIN_SECONDS`** (lease TTL = maxSMTPdeadline + this) | dial | 120 (2 min); VALIDATED > 0 (GAP-37: TTL must EXCEED the deadline, else a slow attempt loses its lease and is double-run) | ≤0 rejected at startup; too small → live attempt reclaimed under load | data-integrity | P5 §5.2, GAP-37, X-7 |
 | **`TM_QUEUE_DRAIN_BATCH_SIZE`** (items per drain tick) | dial | 10 | too high → burst; too low → slow drain | pool | P5 §6 |
 | **`TM_QUEUE_DRAIN_IDLE_POLL_SECONDS`** (idle sleep) | dial | 2 | too high → latency; too low → busy-poll | brain-wide | P5 §3 |
+| **`TM_QUEUE_ERROR_MAX_ATTEMPTS`** (error cap: how many times ONE item may fail to be computed — a policy-resolve, decrypt or compute error — before it settles `unknown/unknown_error`, `failure_origin: own`, `error_capped: true`, not cached) | dial | 5 (range 1..50; 0 and >50 rejected at startup; unset in the drainer = 5, it cannot be disabled) | 0 would let an item that can never be computed requeue forever (rejected); too high → a persistent fault holds items (and their encrypted plaintext) for cap × the short capacity wait (30 s by default); too low → a short outage settles items as `unknown_error` that a retry would have answered. The count is the item's existing attempt column, so error retries also consume `TM_QUEUE_MAX_ATTEMPTS` headroom | per-check / data-integrity | P2-research M1-G7 |
 | **`TM_QUEUE_BULK_MAX_ADDRESSES`** (submission cap, §7.5) | dial | **UNSET — owner OQ** (built-in hard cap 100k applies until set) | unbounded upload → brain/DB overload (bounded by the hard cap even when UNSET) | brain-wide | P5 §7.5 |
 | **`TM_FRONTDOOR_MODE`** (kill-switch Rung 4 — the pause) | feature-flag | `serving`; `accept_and_defer` = bulk still accepted, drainer STOPPED; `reject` = nothing accepted. Both pause sub-modes also 503 the sync `/v1/verify` (no deferred form of a synchronous answer) and disclose `processing_paused` on the bulk envelopes ([ADR-0015](adr/ADR-0015-rung4-pause-enforcement.md)) | left at a pause sub-mode → backlog grows in `work_items` with nothing draining; read at boot only, so a stale value survives until restart | brain-wide (availability) | kill-switch Rung 4, ADR-0015, audit D2 |
 
@@ -438,9 +440,13 @@ These promote the §5.2/§5.3 dials from `buildQueue` code-defaults to readable 
 ### 6.5 Concrete config keys (this build — the env vars the P6 code reads)
 These are the actual environment variables `internal/config` reads for the external-fallback layer.
 The layer is built DISABLED; egress requires **three** affirmative switches (`TM_FALLBACK_MODE=enabled`
-AND `TM_EXTERNAL_DPA_CONFIRMED=true` AND a `TM_VENDOR_KEYS` entry), and the global-fallback-kill
-(`TM_FALLBACK_MODE=off`) overrides all of them. `TM_FALLBACK_MODE` is the pre-existing kill-switch
-Rung-2 dial (see §1 kill-switch); `TM_VENDOR_KEYS` is the pre-existing vendor-key secret slot.
+AND `TM_EXTERNAL_DPA_CONFIRMED=true` AND the vendor key present in the environment variable named by
+`TM_EXTERNAL_ZEROBOUNCE_KEY_ENV`), and even then every call is refused until `TM_EXTERNAL_DAILY_SPEND_CAP` is set above
+its default of 0. The global-fallback-kill (`TM_FALLBACK_MODE=off`) overrides all of them. `TM_FALLBACK_MODE` is the
+pre-existing kill-switch Rung-2 dial (see §1 kill-switch). The vendor is ZeroBounce — the mapping, the gating order and the
+enablement runbook are in [`vendor-zerobounce.md`](vendor-zerobounce.md); there is **no separate "vendor enabled" flag**
+(the three switches above are it). `TM_VENDOR_KEYS` remains the pre-existing vendor-key secret slot but the ZeroBounce
+adapter does not read it.
 
 | name | type | default | mis-setting effect | blast radius | source |
 |---|---|---|---|---|---|
@@ -452,6 +458,11 @@ Rung-2 dial (see §1 kill-switch); `TM_VENDOR_KEYS` is the pre-existing vendor-k
 | **`TM_EXTERNAL_ERROR_RATE_PCT`** (breaker cond-2 trip %) | dial | 0 (error-rate condition off; budget ceilings still apply) | too low → trips on noise; disabled → pay for a degraded vendor until a budget cap | cost | P6 §5.3 |
 | **`TM_EXTERNAL_ERROR_MIN_SAMPLES`** (error-rate sample gate) | dial | 20 | zero → trips on 1–2 unlucky calls (GAP-27) | cost | P6 §5.3, GAP-27 |
 | **`TM_EXTERNAL_BREAKER_COOLDOWN_SECONDS`** (open→half-open) | dial | 300 (5 min) | too short → flapping; too long → slow recovery | cost | P6 §5.3 |
+| **`TM_EXTERNAL_DAILY_SPEND_CAP`** (ZeroBounce hard cap, vendor credits per rolling 24 h) | dial | **0 — no vendor calls allowed** (a non-negative integer; 0 is a closed door, not "unset") | too high → spend; left at 0 → the enabled vendor sends nothing. Checked **in addition** to the owner-OQ `TM_EXTERNAL_DAILY_CAP` (the lower wins) | cost | vendor-zerobounce.md §3 |
+| **`TM_EXTERNAL_ZEROBOUNCE_KEY_ENV`** (the NAME of the env var holding the key) | dial | `ZEROBOUNCE_API_KEY` — upper-case env-var name, not `TM_`-prefixed; **never the key itself** (a mistaken value is rejected and not echoed) | pointing it at another secret would send that secret to the vendor — hence the `TM_` rejection | privacy / security | vendor-zerobounce.md §3 |
+| **`TM_EXTERNAL_ZEROBOUNCE_TIMEOUT_MS`** (per-call timeout) | dial | 8000, bounded 3000–60000 | too short → non-answers (timeouts count toward the error-rate breaker); too long → a slow vendor holds the sync path | per-request | vendor-zerobounce.md §3 |
+| **`TM_EXTERNAL_ZEROBOUNCE_BASE_URL`** (vendor host) | dial | `https://api.zerobounce.net` (`api-us` / `api-eu` are the published regional hosts); `scheme://host[:port]` only; **https** except a loopback / `zbstub` host over http under `TM_ENV=development` or `test` | http to a real host would send the key in clear — refused | privacy / security | vendor-zerobounce.md §3 |
+| **`ZEROBOUNCE_API_KEY`** (or the variable named by `TM_EXTERNAL_ZEROBOUNCE_KEY_ENV`) — the vendor key value | secret | unset — the layer stays off | leaked → vendor spend and address validation on our account; never logged, never in an error, redacted from every `String`/`%#v` | privacy / cost | vendor-zerobounce.md §3, §7 |
 
 ---
 
@@ -538,7 +549,7 @@ These are surfaced for owner attention — **flagged, not resolved.** None rewri
 | X-5 | **Sample-size gate**: P4 `min_samples` (≥20, block-rate) vs P7 `min_bucket_samples` (~500, calibration). | Same instinct, wildly different defaults (20 vs 500) for different denominators — intentional but confusable. | P4 §5.3 · P7 §6.2 |
 | X-6 | **Lease+CAS exactly-once**: P5 settle-once, P6 spend-once, P7 calibration-write-once. | One invariant (lease TTL > max op deadline + CAS on holder), three sites, no shared config primitive. The load-bearing cross-phase invariant. | P5 GAP-37 · P6 GAP-42 · P7 GAP-53 |
 | X-7 | **Latent numeric coupling**: P5 lease TTL is LOCKED to "exceed the brain's max SMTP client deadline" — a value P2 §6.5 introduces but never numbers. | A LOCKED dependency anchored to an UNSET value. The SMTP deadline must be set *before* the lease TTL can be. | P2 §6.5 → P5 §5.2 |
-| X-8 | **`smtp_skipped_reason` enum** grows across P3 (4 values) + P4 (`rate_limited`). | Additive-by-design (open string enum), but the complete value set is defined across two phases. | P3 §8 · P4 §9 |
+| X-8 | **`smtp_skipped_reason` enum** grows across P3 (4 values) + P4 (`rate_limited`) + the P2-research close-out (`smtp_unwired`). | Additive-by-design (open string enum), but the complete value set is defined across phases; it is now declared once, in `internal/vocab` (`SkipTokens`). | P3 §8 · P4 §9 · M1-G6 |
 | X-9 | **`retry_after_hint_s`** introduced P2 (parsed 4xx hint, "policy default" unspecified) but its default number lives in P5 (backoff floor 5 min). | Knob and its default live in different phases. | P2 §6.5 · P5 §4.2 |
 
 ### 8.2 Dials with no default anywhere (UNSET — owner decisions, see pre-takeoff-checklist)

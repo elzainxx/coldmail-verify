@@ -1,7 +1,7 @@
 # Install and deploy — from a clean checkout to a running system
 
 **Status:** LIVE. Commands, env var names, ports and counts were checked against the code on
-2026-11-13 (control-plane default listen `:8080`, node `:3000`); the migration count (17), the database roles and the migration runner were brought up to migration `0017` on 2026-11-16 (roles: `0016`, 2026-11-15). Read
+2026-11-13 (control-plane default listen `:8080`, node `:3000`); the migration count (18), the database roles and the migration runner were brought up to migration `0018` on 2026-11-17 (the runner: `0017`, 2026-11-16; roles: `0016`, 2026-11-15). Read
 [`architecture.md`](architecture.md) first for what you are installing; operate it with
 [`operator-runbook.md`](operator-runbook.md); follow the ordered, status-marked path to live in
 [`go-live-checklist.md`](go-live-checklist.md). The deep per-phase design is in [`history/`](history/).
@@ -34,7 +34,7 @@ go vet ./...
 
 # A throwaway Postgres for the store + append-only integration tests:
 docker run -d --name cp-pg -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=cptest -p 5432:5432 postgres:16-alpine
-# Apply every migration (0001 … 0017) with the runner: once each, in order, recorded in verify.schema_migrations; a second run is a no-op.
+# Apply every migration (0001 … 0018) with the runner: once each, in order, recorded in verify.schema_migrations; a second run is a no-op.
 # TM_MIGRATE_DATABASE_URL is the MIGRATING identity (here the superuser), never the runtime verify_app. See migrations/README.md "The runner and the tracker".
 TM_MIGRATE_DATABASE_URL='postgres://postgres:dev@localhost:5432/cptest' go run ./cmd/migrate status
 TM_MIGRATE_DATABASE_URL='postgres://postgres:dev@localhost:5432/cptest' go run ./cmd/migrate up
@@ -157,7 +157,7 @@ see [`security-posture.md`](security-posture.md) §2):
 A template with every secret and non-secret knob is `control-plane/config/secrets.example.env`; the full
 list of every dial and flag is [`config-reference.md`](config-reference.md) (generated).
 
-Apply the migrations with the runner (`go run ./cmd/migrate up`, §2: all of `0001` … `0017`, once each, in order; `TM_MIGRATE_DATABASE_URL` is the migrating identity and `TM_MIGRATIONS_DIR` the directory, default `migrations`), then start the control-plane. A plain `psql` loop is valid only on an empty database and records nothing; the runner adopts such a database on its first run ([`operator-runbook.md`](operator-runbook.md) §9.6).
+Apply the migrations with the runner (`go run ./cmd/migrate up`, §2: all of `0001` … `0018`, once each, in order; `TM_MIGRATE_DATABASE_URL` is the migrating identity and `TM_MIGRATIONS_DIR` the directory, default `migrations`), then start the control-plane. A plain `psql` loop is valid only on an empty database and records nothing; the runner adopts such a database on its first run ([`operator-runbook.md`](operator-runbook.md) §9.6).
 
 **The runtime login (since `0016`).** The migrations create module 1's tables in schema `verify`, owned by the no-login role `verify_owner`, and make `verify_app` a `LOGIN` role holding only the runtime privileges. Give it a password **out of band** (never in a migration) and point `TM_DATABASE_URL` at it:
 
@@ -256,7 +256,11 @@ code changes.
    `engine_version` and `config_fingerprint`.
 
 **Reversible:** `TM_NODE_ENABLED=false` or `TM_SMTP_MODE=disabled` returns to cheap verdicts with no redeploy and
-no lost history.
+no lost history. Those cheap verdicts say so: every residue address settles `risky` / `plausible` with
+`signals.smtp_skipped_reason = "smtp_unwired"` and `signals.failure_origin = "own"`, and is **not cached** (it is our own
+degraded state, not an answer) — the same token appears when SMTP is enabled but no node or engine config could be fetched at
+boot (`verify: ... staying cheap-layers-only` in the log). A deployment that runs cheap-layers-only on purpose will see the
+token on every residue result.
 
 **e. Go-live acceptance — the real-IP proofs the local build could only simulate.** Egress smoke → `port25_open`;
 `/v1/audit` green and the node `provisioning → active`; break PTR → auto-quarantine and degrade to cheap (never
@@ -272,19 +276,23 @@ no node change; no schema change.
 
 ### 3.3 Paid third-party fallback (a vendor and a signed DPA)
 
-**Provide** a chosen vendor and a **signed Data Processing Agreement**. The layer ships **disabled**; it egresses
+**Provide** a ZeroBounce account (the one vendor an adapter exists for) and a **signed Data Processing Agreement**. The layer ships **disabled**; it egresses
 addresses to a third party, so enabling it before the DPA is signed would be unlawful sub-processing. Three
 independent affirmative switches, any one missing ⇒ off:
 
 ```
 TM_EXTERNAL_DPA_CONFIRMED=true    # your affirmation that the DPA checklist passed (only the exact string "true")
 TM_FALLBACK_MODE=enabled          # the fallback rung
-TM_VENDOR_KEYS=<vendor>=<key>     # the vendor's API key
+ZEROBOUNCE_API_KEY=<key>          # the vendor's API key: read from the environment variable NAMED by TM_EXTERNAL_ZEROBOUNCE_KEY_ENV (default ZEROBOUNCE_API_KEY)
 ```
 
-A real `external.Vendor` adapter must also be written and wired into `buildExternal` — **none ships** (the layer is
-fail-closed without one; [`future-work.md`](future-work.md) V2). Set conservative ceilings from observed volume
-before raising them: `TM_EXTERNAL_DAILY_CAP`, `_MONTHLY_CAP`, `_PER_JOB_CAP`, `_RATE_CEILING`. **Verify:** only the
+A ZeroBounce `external.Vendor` adapter ships, wired into `buildExternal` and **disabled by default**: with any switch
+missing the layer does not exist (fail-closed; [`future-work.md`](future-work.md) V2), and even with all three on it
+sends nothing until the hard daily spend cap `TM_EXTERNAL_DAILY_SPEND_CAP` is set above its default `0`.
+`TM_VENDOR_KEYS` is no longer read for the vendor. Before turning it on you still have to open the account, sign the
+DPA and check the adapter's status mapping against ZeroBounce's live documentation (it was written from the official
+SDKs): the enablement runbook is [`vendor-zerobounce.md`](vendor-zerobounce.md) §8. Set conservative ceilings from
+observed volume before raising them: `TM_EXTERNAL_DAILY_CAP`, `_MONTHLY_CAP`, `_PER_JOB_CAP`, `_RATE_CEILING`. **Verify:** only the
 *residue* is routed to the vendor, and a vendor `valid` is recorded as `risky` at a capped confidence — never an
 SMTP-grade `valid`. *Reversible:* `TM_FALLBACK_MODE=off` is the global panic button.
 

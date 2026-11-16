@@ -309,12 +309,6 @@ func TestRuntimeAsVerifyApp(t *testing.T) {
 	t.Run("queue_and_job_lifecycle", func(t *testing.T) {
 		const owner = "0b0f4f2a-6d3c-4c53-9f3b-1b6a2c9d7e11"
 		jobID := mustV7(t, now)
-		if _, err := pg.CreateJob(ctx, JobRow{ID: jobID, PolicyKey: "cold-email", PolicyVersion: 1, TotalCount: 2, CallerRef: "rt-ref", OwnerUserID: owner}); err != nil {
-			t.Fatalf("CreateJob: %v", err)
-		}
-		if got := suOne[string](t, su, `SELECT owner_user_id::text FROM verify.jobs WHERE id=$1`, jobID); got != owner {
-			t.Fatalf("jobs.owner_user_id = %q", got)
-		}
 		mk := func(tag string) WorkItemRow {
 			id := mustV7(t, now)
 			return WorkItemRow{ID: id, IdempotencyKey: []byte("rt-idem-" + tag), JobID: jobID, Domain: "queue.test", EmailHash: []byte("h-" + tag),
@@ -322,13 +316,38 @@ func TestRuntimeAsVerifyApp(t *testing.T) {
 				NotBefore: now.Add(-time.Minute), AddrCiphertext: []byte("ct-" + tag)}
 		}
 		i1, i2 := mk("one"), mk("two")
+		// 0018: the job, ALL its input rows and the LOG row of its malformed row are recorded in ONE transaction, as verify_app: INSERT on
+		// verify.jobs, verify.verifications and verify.job_rows. Row 0 carries a caller label, row 1 is a work item, row 2 is malformed
+		// (its own invalid_syntax LOG row, NULL hash, §3.2.7).
+		bad := rtRow(t, now, "", nil)
+		bad.EmailHash, bad.HashScheme, bad.Domain, bad.MXProvider, bad.NodeID, bad.EngineVersion, bad.EngineValidationType, bad.VerifierIP = nil, "", "", "", "", "", "", ""
+		bad.EngineSuccessSet, bad.EngineSuccess, bad.LatencyMS = false, false, 0
+		bad.Status, bad.Reason, bad.Confidence, bad.Recommendation = "invalid", "invalid_syntax", 99, "skip"
+		bad.Flags, bad.Signals = map[string]bool{"from_cache": false}, map[string]any{"syntax_valid": false}
+		if err := pg.RecordJob(ctx, JobRow{ID: jobID, PolicyKey: "cold-email", PolicyVersion: 1, Status: "running", TotalCount: 3, CallerRef: "rt-ref", OwnerUserID: owner},
+			[]JobRowEntry{
+				{Ordinal: 0, ItemID: "rt-row-0", WorkItemID: i1.ID},
+				{Ordinal: 1, WorkItemID: i2.ID},
+				{Ordinal: 2, ItemID: "rt-bad", Malformed: true, VerificationID: bad.ID},
+			}, []VerificationRow{bad}); err != nil {
+			t.Fatalf("RecordJob as verify_app (INSERT on verify.jobs, verify.verifications and verify.job_rows): %v", err)
+		}
+		if got := suOne[string](t, su, `SELECT owner_user_id::text FROM verify.jobs WHERE id=$1`, jobID); got != owner {
+			t.Fatalf("jobs.owner_user_id = %q", got)
+		}
+		if got := suOne[int](t, su, `SELECT count(*) FROM verify.job_rows WHERE job_id=$1`, jobID); got != 3 {
+			t.Fatalf("job_rows rows = %d, want 3", got)
+		}
+		if got := suOne[int](t, su, `SELECT count(*) FROM verify.verifications WHERE id=$1 AND reason='invalid_syntax' AND email_hash IS NULL AND hash_scheme IS NULL AND NOT from_cache`, bad.ID); got != 1 {
+			t.Fatalf("the malformed row's LOG row (invalid_syntax, NULL hash, from_cache false) = %d rows, want exactly 1", got)
+		}
 		for _, it := range []WorkItemRow{i1, i2} {
 			if id, dup, err := pg.EnqueueWorkItem(ctx, it); err != nil || dup || id != it.ID {
 				t.Fatalf("EnqueueWorkItem(%s) = %q dup=%v err=%v", it.ID, id, dup, err)
 			}
 		}
-		if _, dup, err := pg.EnqueueWorkItem(ctx, i1); err != nil || !dup {
-			t.Fatalf("a repeated idempotency key must dedup, got dup=%v err=%v", dup, err)
+		if id, dup, err := pg.EnqueueWorkItem(ctx, i1); err != nil || !dup || id != i1.ID {
+			t.Fatalf("a repeated idempotency key in the SAME job must dedup and name the work item that holds it, got id=%q dup=%v err=%v", id, dup, err)
 		}
 		if got := suOne[int](t, su, `SELECT count(*) FROM verify.work_items WHERE job_id=$1`, jobID); got != 2 {
 			t.Fatalf("work_items rows = %d, want 2", got)
@@ -388,19 +407,25 @@ func TestRuntimeAsVerifyApp(t *testing.T) {
 
 		// Reads the API serves for a job.
 		res, next, err := pg.ListJobResults(ctx, jobID, owner, "", 10)
-		if err != nil || next != "" || len(res) != 1 || res[0].WorkItemID != i1.ID || res[0].Verdict.ID != v1.ID || res[0].Verdict.Reason != "accepted" {
-			t.Fatalf("ListJobResults = %+v next=%q err=%v, want exactly the settled item with its verdict", res, next, err)
+		if err != nil || next != "" || len(res) != 2 || res[0].WorkItemID != i1.ID || res[0].Verdict.ID != v1.ID || res[0].Verdict.Reason != "accepted" ||
+			res[0].Ordinal != 0 || res[0].ItemID != "rt-row-0" {
+			t.Fatalf("ListJobResults = %+v next=%q err=%v, want the settled item's row (ordinal 0, item_id rt-row-0, its verdict) and the malformed row, nothing else", res, next, err)
+		}
+		// The malformed row is served FROM ITS OWN LOG ROW (read back through the runtime login), never made up.
+		if m := res[1]; !m.Malformed || m.Ordinal != 2 || m.ItemID != "rt-bad" || m.WorkItemID != "" || m.Verdict.ID != bad.ID ||
+			m.Verdict.Status != "invalid" || m.Verdict.Reason != "invalid_syntax" || m.Verdict.Recommendation != "skip" || m.Verdict.Confidence != 99 {
+			t.Fatalf("the malformed result = %+v, want ordinal 2 / rt-bad answered by LOG row %s (invalid/invalid_syntax/skip/99)", m, bad.ID)
 		}
 		if other, _, err := pg.ListJobResults(ctx, jobID, "11111111-1111-4111-8111-111111111111", "", 10); err != nil || len(other) != 0 {
 			t.Fatalf("a different owner must see no results, got %d err=%v", len(other), err)
 		}
 		j, known, err := pg.GetJob(ctx, jobID, owner)
-		if err != nil || !known || j.TotalCount != 2 || j.SettledCount != 1 || j.CallerRef != "rt-ref" {
+		if err != nil || !known || j.TotalCount != 3 || j.SettledCount != 1 || j.CallerRef != "rt-ref" {
 			t.Fatalf("GetJob = %+v known=%v err=%v", j, known, err)
 		}
 		complete, total, settled, err := pg.JobCompletion(ctx, jobID, owner)
-		if err != nil || complete || total != 2 || settled != 1 {
-			t.Fatalf("JobCompletion = complete=%v total=%d settled=%d err=%v, want not complete 2/1", complete, total, settled, err)
+		if err != nil || complete || total != 3 || settled != 2 {
+			t.Fatalf("JobCompletion = complete=%v total=%d settled=%d err=%v, want not complete 3 rows of which 2 have an outcome (item one's row and the malformed row)", complete, total, settled, err)
 		}
 	})
 

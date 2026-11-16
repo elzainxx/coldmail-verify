@@ -340,6 +340,13 @@ func (o *Orchestrator) compute(ctx context.Context, rawEmail string, def *policy
 			rawBlob, nodeID, verifierIP = out.RawBlob, out.NodeID, out.VerifierIP
 			o.persistCatchAll(ctx, domain, out.Result)
 			class, retryHintS, lastReason = classifyRan(v)
+		case out.SkipReason == reasonSMTPUnwired:
+			// SMTP is not wired in this process (M1-G6). The cheap residue stands, annotated so it is no longer indistinguishable from
+			// a genuine cheap-layers answer, and PROVISIONAL (our own degraded state is not an answer: never cached). The queue class
+			// stays QSettled and lastReason stays the verdict's: this is NOT a capacity wait — nothing in this process will ever make
+			// the stage appear, so requeueing would loop forever. Everything else is exactly what it was.
+			setSkipSignal(&v, out.SkipReason)
+			provisional = out.Provisional
 		case out.SkipReason != "":
 			// Eligible residue, but no node ran it. Keep the cheap verdict; record WHY SMTP was
 			// skipped (frozen §8 token) and carry the PB1 provisional flag to suppress caching.
@@ -405,7 +412,8 @@ func (o *Orchestrator) compute(ctx context.Context, rawEmail string, def *policy
 	// non-cacheable, AND a capacity-gap fallback (SMTP was eligible but no node served it —
 	// provisional=true) is non-cacheable even though its cheap reason looks settled. Caching a
 	// capacity-gap verdict would freeze a lower-quality answer and suppress the SMTP verdict once the
-	// node recovers / the cap lifts (PB1). A provider_mx_routed skip is NOT provisional (settled).
+	// node recovers / the cap lifts (PB1). A provider_mx_routed skip is NOT provisional (settled). An smtp_unwired
+	// residue (the stage is not wired in this process: our own degraded state, M1-G6) IS provisional too — it is not an answer.
 	// An external_verified verdict IS a settled verdict and caches like any other (§4.3/OQ-P6-9) — so
 	// a re-uploaded list returns the cached rented verdict with NO second vendor call (escalate-once
 	// at verdict-mint, GAP-43): the cache hit path (computeFromCache) never reaches this stage.
@@ -446,6 +454,7 @@ func foldSMTP(cheap policy.Verdict, res smtp.Result) policy.Verdict {
 		Status: res.Status, Reason: res.Reason, Confidence: res.Confidence,
 		Recommendation: rec, Flags: cheap.Flags, Signals: signals,
 		StoppedAt: "smtp",
+		Cause:     res.Cause, // evidence for signals.failure_origin on an unknown; no other effect
 	}
 }
 
@@ -696,6 +705,7 @@ func toCore(v policy.Verdict) verdict.Core {
 	return verdict.Core{
 		Status: v.Status, Reason: v.Reason, Confidence: v.Confidence,
 		Recommendation: v.Recommendation, Flags: v.Flags, Signals: v.Signals,
+		Cause: v.Cause,
 	}
 }
 

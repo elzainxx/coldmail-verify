@@ -757,17 +757,31 @@ ON CONFLICT (node_id, window_start) DO UPDATE SET count = 0, cap = EXCLUDED.cap,
 
 // ── Phase 5 (§3.3/§5/§7) — the durable async queue ──────────────────────────────────────────
 
-// EnqueueWorkItem inserts a work-item, deduping on idempotency_key (§5.5). ON CONFLICT DO NOTHING
-// makes a duplicate submission (same address×policy×config) a no-op returning alreadyExists=true.
+// EnqueueWorkItem inserts a work-item, deduping on idempotency_key (§5.5) WITHIN ITS JOB (0018, owner
+// ruling A2). ON CONFLICT DO NOTHING makes a duplicate (same address×policy×config in the SAME job) a
+// no-op returning alreadyExists=true and the id of the work item that already holds the key. The
+// conflict arbiter is the PER-JOB partial unique index (job_id, idempotency_key) WHERE job_id IS NOT
+// NULL; a different job, of any owner, never conflicts, so the same address always gets its own work
+// item and its own result there. An item with no job (a singular queued check) is arbitrated by
+// idempotency_key alone among job-less items, which is the only scope it ever had.
+//
+// The ON CONFLICT clause names the arbiter explicitly (it is not a bare DO NOTHING) on purpose: a bare
+// DO NOTHING would also swallow a primary-key collision on id and report it as a harmless duplicate.
 // The caller sealed AddrCiphertext (DR-4) — this store persists ciphertext, never plaintext.
 func (p *PG) EnqueueWorkItem(ctx context.Context, item WorkItemRow) (string, bool, error) {
-	const q = `
+	const insert = `
 INSERT INTO verify.work_items (
   id, idempotency_key, job_id, domain, email_hash, policy_key, policy_version,
   config_fingerprint, status, attempt, not_before, addr_ciphertext, created_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-ON CONFLICT (idempotency_key) DO NOTHING
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`
+	q := insert + `
+ON CONFLICT (job_id, idempotency_key) WHERE job_id IS NOT NULL DO NOTHING
 RETURNING id`
+	if item.JobID == "" {
+		q = insert + `
+ON CONFLICT (idempotency_key) WHERE job_id IS NULL DO NOTHING
+RETURNING id`
+	}
 	status := item.Status
 	if status == "" {
 		status = "ready"
@@ -783,13 +797,32 @@ RETURNING id`
 		item.NotBefore.UTC(), nullBytes(item.AddrCiphertext), created.UTC(),
 	).Scan(&returnedID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", true, nil // idempotency_key already present → dedup (§5.5)
+		// idempotency_key already present in this job → dedup (§5.5). Report WHICH work item holds it (the
+		// Mem fake does), so a caller can point a duplicate row at the work item that answers it.
+		var existing string
+		var qerr error
+		if item.JobID == "" {
+			qerr = p.pool.QueryRow(ctx,
+				`SELECT id::text FROM verify.work_items WHERE job_id IS NULL AND idempotency_key = $1`,
+				item.IdempotencyKey).Scan(&existing)
+		} else {
+			qerr = p.pool.QueryRow(ctx,
+				`SELECT id::text FROM verify.work_items WHERE job_id = $1 AND idempotency_key = $2`,
+				item.JobID, item.IdempotencyKey).Scan(&existing)
+		}
+		if qerr != nil && !errors.Is(qerr, pgx.ErrNoRows) {
+			return "", true, fmt.Errorf("store: enqueue work item: look up the existing holder of the key: %w", qerr)
+		}
+		return existing, true, nil
 	}
 	if err != nil {
 		return "", false, fmt.Errorf("store: enqueue work item: %w", err)
 	}
 	return returnedID, false, nil
 }
+
+// RecordJob (the job, its input rows and the LOG rows of its malformed rows, in one transaction) is in
+// postgres_jobs.go, with the statement builders it is made of.
 
 // DequeueReady leases up to `limit` ready items with FOR UPDATE SKIP LOCKED in group-by-domain
 // order (§6.2). The inner SELECT locks the chosen rows; the outer UPDATE stamps the lease. ORDER
@@ -976,24 +1009,30 @@ FROM verify.work_items WHERE id=$1`
 
 // CreateJob inserts a jobs row (§7.2).
 func (p *PG) CreateJob(ctx context.Context, job JobRow) (string, error) {
+	if _, err := p.pool.Exec(ctx, insertJobSQL, jobInsertArgs(job)...); err != nil {
+		return "", fmt.Errorf("store: create job: %w", err)
+	}
+	return job.ID, nil
+}
+
+// insertJobSQL / jobInsertArgs are the one INSERT of a jobs row, shared by CreateJob and RecordJob so the two cannot drift.
+//
+// owner_user_id (0013 / item 1): the platform user the submitting key acts for. nullStr maps "" to SQL NULL rather than inventing a
+// sentinel owner — a job whose submitter had no recorded platform user is honestly ownerless, and the read predicates make an ownerless
+// row match no caller (NULL = $2 is NULL, not true), so the fail-safe direction is read-CLOSED.
+const insertJobSQL = `
+INSERT INTO verify.jobs (id, policy_key, policy_version, status, total_count, settled_count, caller_ref, owner_user_id)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`
+
+func jobInsertArgs(job JobRow) []any {
 	status := job.Status
 	if status == "" {
 		status = "submitted"
 	}
-	// owner_user_id (0013 / item 1): the platform user the submitting key acts for. nullStr maps ""
-	// to SQL NULL rather than inventing a sentinel owner — a job whose submitter had no recorded
-	// platform user is honestly ownerless, and the read predicates make an ownerless row match no
-	// caller (NULL = $2 is NULL, not true), so the fail-safe direction is read-CLOSED.
-	const q = `
-INSERT INTO verify.jobs (id, policy_key, policy_version, status, total_count, settled_count, caller_ref, owner_user_id)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`
-	if _, err := p.pool.Exec(ctx, q,
+	return []any{
 		job.ID, job.PolicyKey, job.PolicyVersion, status, job.TotalCount, job.SettledCount,
 		nullStr(job.CallerRef), nullStr(job.OwnerUserID),
-	); err != nil {
-		return "", fmt.Errorf("store: create job: %w", err)
 	}
-	return job.ID, nil
 }
 
 // GetJob reads one job by id, SCOPED TO ITS OWNER (0013 / fix-plan item 1, D1).
@@ -1048,16 +1087,31 @@ FROM verify.jobs WHERE id=$1 AND owner_user_id=$2`
 // invariant stays legible as exactly what the spec words say — completion is NOT EXISTS a
 // non-terminal item, never settled==total.
 func (p *PG) JobCompletion(ctx context.Context, jobID, ownerUserID string) (bool, int, int, error) {
-	var total, settled int
+	var total int
 	if err := p.pool.QueryRow(ctx,
-		`SELECT total_count, settled_count FROM verify.jobs WHERE id=$1 AND owner_user_id=$2`,
-		jobID, nullStr(ownerUserID)).Scan(&total, &settled); err != nil {
+		`SELECT total_count FROM verify.jobs WHERE id=$1 AND owner_user_id=$2`,
+		jobID, nullStr(ownerUserID)).Scan(&total); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Covers BOTH "no such job" and "not yours" — indistinguishable by design (the handler
 			// maps this to the same 404 a nonexistent id gets).
 			return false, 0, 0, ErrNotWired
 		}
 		return false, 0, 0, fmt.Errorf("store: job completion counts: %w", err)
+	}
+	// settled counts ROWS (0018), not work items: every input row whose work item is terminal, plus the
+	// malformed rows (their verdict exists from submission, and they have no work item to wait for). A
+	// duplicate row shares its first row's work item, so it settles with it, and total - settled reaches 0
+	// exactly when the job is complete. Computed from job_rows on read, not from jobs.settled_count: a
+	// counter bumped per work item cannot say how many ROWS a work item answers, and one that the enqueue
+	// order could outrun is how a pending count gets stuck above zero.
+	var settled int
+	if err := p.pool.QueryRow(ctx, `
+SELECT count(*)::int
+FROM verify.job_rows r
+LEFT JOIN verify.work_items w ON w.id = r.work_item_id
+WHERE r.job_id = $1 AND (r.malformed OR w.status IN ('settled','dead'))`,
+		jobID).Scan(&settled); err != nil {
+		return false, 0, 0, fmt.Errorf("store: job completion settled rows: %w", err)
 	}
 	var complete bool
 	if err := p.pool.QueryRow(ctx,
@@ -1086,25 +1140,42 @@ func (p *PG) JobCompletion(ctx context.Context, jobID, ownerUserID string) (bool
 // independent barriers. That redundancy is intentional: the handler's check protects the HTTP
 // response shape, this one protects the QUERY, and either alone would be one edit away from being
 // the only thing holding.
+//
+// SINCE 0018 A RESULT IS ONE PER INPUT ROW, ORDERED BY ORDINAL, AND THE CURSOR IS THE ORDINAL. The page is
+// read from verify.job_rows (the caller's own rows, malformed ones included) and LEFT-joined to the work
+// item and its verdict: identical addresses in one job share a work item, so their rows share a verdict
+// and keep their own ordinal and item_id. A row appears once it has an outcome — its work item is
+// settled|dead, or it is malformed. The page asks for limit+1 rows ONLY to learn whether another page
+// exists: it is then cut back to limit and the cursor is the ordinal of the LAST ROW RETURNED. A cursor
+// taken from the look-ahead row would skip that row on the next page (the defect M2's campaign report
+// had, M2-G5); the pagination tests walk every page and demand every ordinal exactly once, and a paired
+// control that does take the look-ahead row's ordinal must fail them.
 func (p *PG) ListJobResults(ctx context.Context, jobID, ownerUserID, cursor string, limit int) ([]WorkItemResult, string, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	// The cursor is the last-seen work_item.id ("" on the first page). It's compared against a uuid
-	// column, so an empty cursor must NOT be cast to uuid (Postgres rejects ''::uuid) — the
-	// ($3='' OR w.id > $3::uuid) guard skips the comparison on the first page.
+	after, cerr := ParseResultsCursor(cursor) // -1 on the first page; ErrBadCursor for anything else
+	if cerr != nil {
+		return nil, "", cerr
+	}
+	// The verdict of a row is its work item's (shared by every row of one address) or, for a MALFORMED row, its own
+	// invalid_syntax LOG row (r.verification_id, written at submit): every result is served from a LOG row, none is made up.
 	const q = `
-SELECT w.id, w.email_hash,
-       v.id, v.status, v.reason, v.confidence, v.recommendation, v.flags, v.signals,
-       COALESCE(v.mx_provider,''), COALESCE(v.domain,''), v.policy_key, v.policy_version, v.api_version
-FROM verify.work_items w
-JOIN verify.jobs j ON j.id = w.job_id AND j.owner_user_id = $2
-JOIN verify.verifications v ON v.id = w.verification_id
-WHERE w.job_id=$1 AND w.status IN ('settled','dead') AND w.verification_id IS NOT NULL
-  AND ($3 = '' OR w.id > $3::uuid)
-ORDER BY w.id
+SELECT r.ordinal, COALESCE(r.item_id,''), r.malformed, r.duplicate_of_ordinal, COALESCE(w.id::text,''), w.email_hash,
+       COALESCE(v.id::text,''), COALESCE(v.status,''), COALESCE(v.reason,''), COALESCE(v.confidence::int,0),
+       COALESCE(v.recommendation,''), v.flags, v.signals,
+       COALESCE(v.mx_provider,''), COALESCE(v.domain,''), COALESCE(v.policy_key,''),
+       COALESCE(v.policy_version,0), COALESCE(v.api_version,'')
+FROM verify.job_rows r
+JOIN verify.jobs j ON j.id = r.job_id AND j.owner_user_id = $2
+LEFT JOIN verify.work_items w ON w.id = r.work_item_id
+LEFT JOIN verify.verifications v ON v.id = COALESCE(w.verification_id, r.verification_id)
+WHERE r.job_id = $1
+  AND r.ordinal > $3
+  AND (r.malformed OR (w.status IN ('settled','dead') AND w.verification_id IS NOT NULL))
+ORDER BY r.ordinal
 LIMIT $4`
-	rows, err := p.pool.Query(ctx, q, jobID, nullStr(ownerUserID), cursor, limit+1) // +1 to compute nextCursor
+	rows, err := p.pool.Query(ctx, q, jobID, nullStr(ownerUserID), after, limit+1) // +1 to learn whether another page exists
 	if err != nil {
 		return nil, "", fmt.Errorf("store: list job results: %w", err)
 	}
@@ -1115,7 +1186,7 @@ LIMIT $4`
 		var v VerificationRow
 		var flagsJSON, signalsJSON []byte
 		if err := rows.Scan(
-			&r.WorkItemID, &r.EmailHash,
+			&r.Ordinal, &r.ItemID, &r.Malformed, &r.DuplicateOf, &r.WorkItemID, &r.EmailHash,
 			&v.ID, &v.Status, &v.Reason, &v.Confidence, &v.Recommendation, &flagsJSON, &signalsJSON,
 			&v.MXProvider, &v.Domain, &v.PolicyKey, &v.PolicyVersion, &v.APIVersion,
 		); err != nil {
@@ -1131,8 +1202,9 @@ LIMIT $4`
 	}
 	nextCursor := ""
 	if len(out) > limit {
+		// The extra row only proved a next page exists. The cursor is the LAST ROW RETURNED, never the look-ahead.
 		out = out[:limit]
-		nextCursor = out[len(out)-1].WorkItemID
+		nextCursor = FormatResultsCursor(out[len(out)-1].Ordinal)
 	}
 	return out, nextCursor, nil
 }
@@ -1140,38 +1212,17 @@ LIMIT $4`
 // insertVerificationTx inserts one LOG row (+ optional raw sidecar) inside an existing tx — the
 // shared body of AppendVerification and the queue settlement (§5.3). Door 2 append; never UPDATE.
 func insertVerificationTx(ctx context.Context, tx pgx.Tx, row VerificationRow, raw *RawRow) error {
-	flagsJSON, err := json.Marshal(orEmptyFlags(row.Flags))
+	args, err := verificationArgs(row)
 	if err != nil {
-		return fmt.Errorf("store: marshal flags: %w", err)
-	}
-	signalsJSON, err := json.Marshal(orEmptySignals(row.Signals))
-	if err != nil {
-		return fmt.Errorf("store: marshal signals: %w", err)
-	}
-	var engineSuccess any
-	if row.EngineSuccessSet {
-		engineSuccess = row.EngineSuccess
+		return err
 	}
 	const q = `
-INSERT INTO verify.verifications (
-  id, request_id, checked_at, created_at,
-  email_hash, hash_scheme, domain, provider_canonical_hash, local_part_len,
-  status, reason, confidence, recommendation, flags, signals, mx_provider,
-  policy_key, policy_version, api_version,
-  verifier_ip, node_id, engine_version, engine_core_version, config_fingerprint,
-  engine_validation_type, engine_success, from_cache, latency_ms
+INSERT INTO verify.verifications (` + verificationColumns + `
 ) VALUES (
   $1,$2,$3,$4, $5,$6,$7,$8,$9, $10,$11,$12,$13,$14,$15,$16, $17,$18,$19,
   $20,$21,$22,$23,$24, $25,$26,$27,$28
 )`
-	if _, err := tx.Exec(ctx, q,
-		row.ID, row.RequestID, row.CheckedAt.UTC(), row.CreatedAt.UTC(),
-		nullBytes(row.EmailHash), nullStr(row.HashScheme), nullStr(row.Domain), nullBytes(row.ProviderCanonicalHash), nullInt(row.LocalPartLen),
-		row.Status, row.Reason, row.Confidence, row.Recommendation, flagsJSON, signalsJSON, nullStr(row.MXProvider),
-		row.PolicyKey, row.PolicyVersion, row.APIVersion,
-		nullStr(row.VerifierIP), nullStr(row.NodeID), nullStr(row.EngineVersion), nullStr(row.EngineCoreVersion), row.ConfigFingerprint,
-		nullStr(row.EngineValidationType), engineSuccess, row.FromCache, nullInt(row.LatencyMS),
-	); err != nil {
+	if _, err := tx.Exec(ctx, q, args...); err != nil {
 		return fmt.Errorf("store: settle insert verification: %w", err)
 	}
 	if raw != nil {

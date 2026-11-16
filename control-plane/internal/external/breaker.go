@@ -28,6 +28,15 @@ type Budget struct {
 	MonthlyCap  int // §5.2 per rolling month; 0 => unset
 	PerJobCap   int // §5.2 per bulk job — one pathological list can't drain the global budget; 0 => unset
 	RateCeiling int // §5.2 max vendor CALLS per minute (a burst brake, distinct from the cost caps); 0 => unset
+
+	// VendorDailyCap is the HARD per-vendor daily spend ceiling in vendor credits (TM_EXTERNAL_DAILY_SPEND_CAP,
+	// Docs/vendor-zerobounce.md). Unlike every cap above, 0 is NOT "unset": when VendorDailyCapEnforced is
+	// true, a cap of 0 means "no calls allowed", so enabling a vendor without choosing a cap sends nothing.
+	// It is checked in ADDITION to DailyCap (the owner-OQ §5.2 dial, unset by default); whichever is lower
+	// wins. Both read the same durable external_calls spend, so neither can be reset by a restart.
+	// VendorDailyCapEnforced is false in a zero Budget, so every pre-existing caller keeps its behavior.
+	VendorDailyCap         int
+	VendorDailyCapEnforced bool
 }
 
 // BreakerParams are the circuit-breaker DIALs (§5.3 thresholds). ErrorRateThreshold is the sustained
@@ -77,6 +86,7 @@ const (
 	TripErrorRate    TripReason = "vendor_error_rate"
 	TripVendorDown   TripReason = "vendor_down"
 	TripRateCeiling  TripReason = "rate_ceiling"
+	TripVendorCap    TripReason = "vendor_daily_spend_cap" // the hard per-vendor cap (0 = no calls)
 )
 
 // Decision is the breaker's answer to "may I call the vendor now?" (§5.3). Allow=false => the layer
@@ -96,6 +106,11 @@ type Decision struct {
 // DECIDES; the caller (the orchestrator's external stage) is what actually degrades to keep_residue.
 // It never itself produces a verdict.
 func Decide(b Budget, p BreakerParams, f SpendFacts, now time.Time) Decision {
+	// The hard per-vendor daily cap comes first: it is the one ceiling where 0 means "no spend at all",
+	// and a closed door needs no further reading of the facts.
+	if b.VendorDailyCapEnforced && f.SpentDay >= b.VendorDailyCap {
+		return Decision{Allow: false, State: Open, Reason: TripVendorCap}
+	}
 	// Condition 1 — budget exhaustion (§5.3.1). Any window cap reached => open until the window rolls.
 	// A cap of 0 is UNSET (not enforced); a reached cap (spent >= cap) trips. per_job first so a
 	// pathological single list is bounded before it can push the global day/month over (§5.2/§4.4).

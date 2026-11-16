@@ -94,7 +94,7 @@ TM_DATABASE_URL='postgres://postgres:dev@localhost:5432/cptest' TM_PEPPER='<32-b
   go run ./cmd/control-plane
 ```
 
-The runner applies all 17 (`0001`–`0017`) exactly once each and records them; running it again changes nothing, and it refuses a changed file, a database ahead of the checkout or a hole in the history (see `control-plane/migrations/README.md` "The runner and the tracker"; a plain `psql` loop is valid only on an empty database). A production start (`TM_ENV=production`) also needs
+The runner applies all 18 (`0001`–`0018`) exactly once each and records them; running it again changes nothing, and it refuses a changed file, a database ahead of the checkout or a hole in the history (see `control-plane/migrations/README.md` "The runner and the tracker"; a plain `psql` loop is valid only on an empty database). A production start (`TM_ENV=production`) also needs
 `TM_SUPABASE_KEY` (and `TM_FRONTDOOR_TOKEN` to call the sync endpoint) — see [`Docs/install-and-deploy.md`](Docs/install-and-deploy.md) §3.1.
 
 Build the box (no Ruby on the host — it's containerized), from the repo root:
@@ -107,8 +107,8 @@ bash bin/assert-gem-unmodified.sh    # the Door-5 gem-unmodified assertion
 ## Deployment prerequisites
 
 The brain runs cheap-verification-only with just a database and a pepper (it reports `/readyz` ready only once the queue key below is also set). Each further capability
-is switched on when its prerequisite is in place — an operator action, config, or (for the vendor
-and outcome-feed tiers) a pluggable adapter dropped into an existing interface seam; the brain's
+is switched on when its prerequisite is in place — an operator action, config, or (for the outcome-feed
+tier; the vendor tier's ZeroBounce adapter already ships, disabled) a pluggable adapter dropped into an existing interface seam; the brain's
 decision code is never touched. Satisfy them in order (each is detailed, with verification
 commands, in [install & deploy](Docs/install-and-deploy.md) §3, and tracked item by item — done, owner-only,
 or not built yet — in the [go-live checklist](Docs/go-live-checklist.md)):
@@ -118,7 +118,7 @@ or not built yet — in the [go-live checklist](Docs/go-live-checklist.md)):
 | **Cheap verification** | a Postgres instance + an email-hash pepper | `TM_DATABASE_URL`, `TM_PEPPER` |
 | **Bulk / async jobs** | an at-rest encryption key for the queue | `TM_QUEUE_ADDR_KEY` (bulk endpoints stay 503 without it — the queue never stores plaintext unencrypted — and `/readyz` reports `not_ready` with the reason, so a module whose job routes cannot work is not sent traffic) |
 | **SMTP verification** | a port-25-capable host with a settable PTR on a clean IP (vet V1–V5) | the node descriptor + `TM_SMTP_MODE=enabled` |
-| **Paid fallback** | a verification vendor + a signed DPA | a vendor adapter at the `external.Vendor` seam + `TM_EXTERNAL_DPA_CONFIRMED=true` + `TM_FALLBACK_MODE=enabled` + a vendor key |
+| **Paid fallback** | a ZeroBounce account + a signed DPA (the ZeroBounce adapter at the `external.Vendor` seam ships **disabled**) | `TM_EXTERNAL_DPA_CONFIRMED=true` + `TM_FALLBACK_MODE=enabled` + the vendor key in the environment variable named by `TM_EXTERNAL_ZEROBOUNCE_KEY_ENV` (default `ZEROBOUNCE_API_KEY`) + a daily spend cap above 0 (`TM_EXTERNAL_DAILY_SPEND_CAP`) |
 | **Confidence calibration** | an authenticated (mTLS) real send-outcome feed | an mTLS client at the `OutcomeSource` seam + the trust anchor/credential; promote the mutators when ready |
 
 These are setup steps, like provisioning a database — not caveats. Until a tier is configured, the

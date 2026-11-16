@@ -46,7 +46,9 @@ func corpResolver() fixtureResolver {
 	return fixtureResolver{mx: map[string][]layers.MXHost{"acmecorp.com": {{Host: "mx.acmecorp.com", Pref: 10}}}}
 }
 
-// The full lifecycle: a clean corp address → risky/plausible, logged exactly once, cached.
+// The full lifecycle: a clean corp address → risky/plausible, logged exactly once. (It is NOT cached here: with the SMTP stage unwired
+// the residue carries smtp_skipped_reason=smtp_unwired and is never cached — M1-G6; TestSMTPUnwired_* pin that, and
+// TestVerifyCacheHitReLogs covers the cached path with a wired stage.)
 func TestVerifyLogsAndCaches(t *testing.T) {
 	o, mem, def := setup(t, corpResolver(), time.Hour)
 	resp, err := o.Verify(context.Background(), "jane.doe@acmecorp.com", def)
@@ -70,12 +72,27 @@ func TestVerifyLogsAndCaches(t *testing.T) {
 	}
 }
 
+// settledValidBody is what a node reports for a clean 250 on a non-catch-all domain: a SETTLED valid/accepted verdict, which is cacheable.
+var settledValidBody = []byte(`{
+  "wrapper_api_version":"v1","email":"jane.doe@acmecorp.com","validation_type":"smtp","success":true,
+  "smtp_debug":null,
+  "catchall":{"probed":true,"probe_local_part":"nx-seed","accepted":false,"conclusion":"not_catchall"},
+  "mx":{"domain":"acmecorp.com","mail_servers":["1.2.3.4"]}}`)
+
 // A second identical request hits the cache and RE-LOGS with from_cache=true (§4.2/OQ-9).
+//
+// It runs against a WIRED SMTP stage whose probe answers (a settled valid/accepted): an unwired stage's residue is provisional and never
+// cached since M1-G6, so the cache-hit property can only be shown on a settled answer. The first verdict is asserted settled so this
+// cannot pass by the cache having been skipped.
 func TestVerifyCacheHitReLogs(t *testing.T) {
-	o, mem, def := setup(t, corpResolver(), time.Hour)
+	o, mem, def := smtpSetup(t, settledValidBody, nil, time.Hour)
 	ctx := context.Background()
-	if _, err := o.Verify(ctx, "jane.doe@acmecorp.com", def); err != nil {
+	first, err := o.Verify(ctx, "jane.doe@acmecorp.com", def)
+	if err != nil {
 		t.Fatalf("first verify: %v", err)
+	}
+	if first.Status != vocab.StatusValid || mem.CacheLen() != 1 {
+		t.Fatalf("precondition: the first verdict must be a settled, cached valid (else the cache-hit assertions below prove nothing); got %s/%s cache len %d", first.Status, first.Reason, mem.CacheLen())
 	}
 	if _, err := o.Verify(ctx, "jane.doe@acmecorp.com", def); err != nil {
 		t.Fatalf("second verify: %v", err)

@@ -14,6 +14,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strconv"
 	"time"
 )
 
@@ -223,13 +224,17 @@ type WorkItemRow struct {
 
 // JobRow is one bulk job handle (§7.2) — brain-side verification-work state ONLY (no user id,
 // credits, CSV, filename — §7.6/GAP-36). caller_ref is opaque, echoed, never interpreted.
+//
+// TotalCount is the job's INPUT ROWS since 0018 (malformed and duplicate rows included). SettledCount is
+// the denormalized progress counter, one per WORK ITEM settled (GAP-38): it is NOT what the status route
+// reports (JobCompletion counts rows) and completion is never judged from it.
 type JobRow struct {
 	ID            string
 	PolicyKey     string
 	PolicyVersion int
 	Status        string // submitted | running | complete | complete_with_unknowns (§7.3)
 	TotalCount    int
-	SettledCount  int // denormalized progress (GAP-38); completion is authoritative, never this
+	SettledCount  int
 	SubmittedAt   time.Time
 	CompletedAt   time.Time
 	CallerRef     string // opaque (§7.6); the sole platform coupling
@@ -255,11 +260,81 @@ type WorkItemAttemptRow struct {
 	LatencyMS   int
 }
 
-// WorkItemResult is one settled work-item paired with its verdict (for ListJobResults, §7.1).
+// WorkItemResult is one INPUT ROW of a bulk job paired with its verdict (for ListJobResults, §7.1).
+//
+// Since 0018 a result is one per input row, not one per work item: identical addresses in one job share
+// a work item, so several results carry the same WorkItemID and the same Verdict (one check, N rows).
+// Ordinal / ItemID / Malformed / DuplicateOf are ADDITIVE: they say which input row this is.
 type WorkItemResult struct {
-	WorkItemID string
+	WorkItemID string // "" for a malformed row (no work item exists for it)
 	EmailHash  []byte
-	Verdict    VerificationRow // the settled verdict from the LOG (joined via verification_id)
+	// Verdict is the settled verdict from the LOG: joined via the work item's verification_id, or — for a
+	// malformed row — via the row's own verification_id (the invalid_syntax LOG row written at submit).
+	Verdict VerificationRow
+
+	// Ordinal is the row's 0-based position in the caller's submitted list, counting malformed rows, so it
+	// is always the caller's own index. Results are returned ORDERED BY IT and the cursor is derived from it.
+	Ordinal int
+	// ItemID is the caller-supplied per-row label ("" => the row had none: the `addresses` request shape).
+	ItemID string
+	// Malformed marks a row whose address did not normalise (Door 3 norm/v1). It has no work item; its
+	// Verdict is its own invalid/invalid_syntax LOG row.
+	Malformed bool
+	// DuplicateOf is the ordinal of the FIRST row of the job with the same address (nil on a first row and on
+	// a malformed row, which is never a duplicate). Such a row shares that row's work item and verdict.
+	DuplicateOf *int
+}
+
+// JobRowEntry is one input row of a bulk job as recorded in verify.job_rows (0018). It holds no address and
+// no hash (Door 3): only the caller's own row index, the caller's own optional label, and the pointers to
+// what answers the row.
+type JobRowEntry struct {
+	Ordinal int    // 0-based position in the submitted list (malformed rows count); unique within the job
+	ItemID  string // caller-supplied label, 1..200 bytes, unique within the job; "" => none
+	// WorkItemID is the work item that answers the row; several rows of one job may share it. "" iff Malformed.
+	WorkItemID string
+	// Malformed: the address did not normalise, so there is no work item; the row is answered by its own LOG
+	// row, VerificationID (the invalid_syntax verdict Door 2 requires to be logged before it is returned).
+	Malformed bool
+	// VerificationID is the LOG row of a malformed row ("" otherwise: a work-item row is answered through its
+	// work item's verification_id).
+	VerificationID string
+	// DuplicateOf is the ordinal of the first row of the job with the same address; nil for the first row of
+	// an address and for every malformed row (a repeated malformed address is NOT a duplicate: each malformed
+	// row is its own row with its own LOG row). Must be below Ordinal.
+	DuplicateOf *int
+}
+
+// MaxItemIDBytes is the longest caller-supplied item_id (A1). The API enforces it before anything is stored;
+// the verify.job_rows CHECK (0018) is the backstop.
+const MaxItemIDBytes = 200
+
+// ErrBadCursor marks a results cursor that is not one this store issued (not a non-negative decimal ordinal).
+// The cursor is OPAQUE to callers, but a store must still refuse garbage rather than guess a position.
+var ErrBadCursor = errors.New("store: results cursor is not a valid position")
+
+// maxCursorOrdinal bounds a cursor to the integer column the ordinal lives in.
+const maxCursorOrdinal = 1<<31 - 1
+
+// FormatResultsCursor renders the cursor that means "everything after this ordinal" — the ordinal of the
+// LAST row of the page just returned, never of a look-ahead row. The cursor is a string and opaque to
+// callers; today it is the decimal ordinal.
+func FormatResultsCursor(lastReturnedOrdinal int) string {
+	return strconv.Itoa(lastReturnedOrdinal)
+}
+
+// ParseResultsCursor returns the ordinal after which a page starts: -1 for "" (the first page), the
+// ordinal for a cursor FormatResultsCursor issued, and ErrBadCursor for anything else (a work-item uuid from
+// before 0018, a negative number, text).
+func ParseResultsCursor(cursor string) (after int, err error) {
+	if cursor == "" {
+		return -1, nil
+	}
+	n, perr := strconv.ParseInt(cursor, 10, 64)
+	if perr != nil || n < 0 || n > maxCursorOrdinal || strconv.FormatInt(n, 10) != cursor {
+		return 0, ErrBadCursor
+	}
+	return int(n), nil
 }
 
 // ── Phase 6 (§5/§6) — the external-verifier spend record + provenance sidecar ──────────────────
@@ -548,11 +623,33 @@ type Store interface {
 
 	// ── Phase 5 (§3.3/§5/§7) — the durable async queue ──
 
-	// EnqueueWorkItem inserts one work-item, DEDUPING on idempotency_key (§5.5): if the key already
-	// exists, it is a no-op returning alreadyExists=true (ON CONFLICT DO NOTHING). The caller seals
-	// AddrCiphertext (DR-4) before calling — the store persists ciphertext, never plaintext. itemID
-	// is the row's id (the caller's WorkItemRow.ID, which is also the AEAD AAD).
+	// EnqueueWorkItem inserts one work-item, DEDUPING on idempotency_key (§5.5) WITHIN ITS JOB (0018, owner
+	// ruling A2): if the key already exists FOR THE SAME item.JobID it is a no-op returning
+	// alreadyExists=true and the id of the work item that already holds the key (ON CONFLICT DO NOTHING).
+	// A DIFFERENT job (any owner) never collides: the same address in another job gets its own work item.
+	// An item with no JobID (a singular queued check) is deduplicated against other job-less items only,
+	// by the key alone, as before. The caller seals AddrCiphertext (DR-4) before calling — the store
+	// persists ciphertext, never plaintext. itemID is the row's id (the caller's WorkItemRow.ID, which is
+	// also the AEAD AAD).
 	EnqueueWorkItem(ctx context.Context, item WorkItemRow) (itemID string, alreadyExists bool, err error)
+
+	// RecordJob creates a bulk job, records ALL its INPUT ROWS (0018, verify.job_rows) and appends the LOG row
+	// of every MALFORMED row, in ONE transaction: the job, its rows and the LOG rows commit together or not
+	// at all (a refused batch leaves nothing behind — not the job, not a row, not a LOG row).
+	//
+	// rows has one entry per row of the submitted list, malformed rows included, each with its 0-based
+	// ordinal, optional item_id, and what answers it: a work item (several rows of one job may share one:
+	// identical addresses are checked once; DuplicateOf then names the first such row) or, for a malformed
+	// row, its own LOG row. rejects are those LOG rows: the invalid/invalid_syntax verdicts with a NULL hash
+	// that the sync path writes for an un-addressable input (§3.2.7), one per malformed row, which Door 2
+	// requires to be logged BEFORE the verdict is returned. rows[i].VerificationID names the reject that
+	// answers it; every reject must be named by exactly one malformed row.
+	//
+	// The rows hold no address and no hash (Door 3). Ordinals and item_ids must be unique within the job, a
+	// malformed row must carry a verification_id and no work item, any other row the reverse, and a
+	// DuplicateOf must be below its ordinal (the database CHECKs; the Mem fake mirrors them). The enqueuer
+	// calls it BEFORE it enqueues the work items, so a work item can never settle before its rows exist.
+	RecordJob(ctx context.Context, job JobRow, rows []JobRowEntry, rejects []VerificationRow) error
 
 	// DequeueReady leases up to `limit` ready items (status IN (ready,waiting_retry) AND
 	// now>=not_before) via FOR UPDATE SKIP LOCKED, in group-by-domain order (§6.2), setting
@@ -634,16 +731,24 @@ type Store interface {
 	GetJob(ctx context.Context, jobID, ownerUserID string) (job JobRow, known bool, err error)
 
 	// JobCompletion judges completion AUTHORITATIVELY (§7.3/GAP-38): complete iff
-	// NOT EXISTS(work_items WHERE job_id=jobID AND status NOT IN ('settled','dead')). It also
-	// returns the (denormalized) total/settled counts for cheap progress display — but completion
-	// is NEVER settled==total (the counter can drift under the reclaim/no-op path). SCOPED TO ITS
-	// OWNER: a job owned by another caller returns ErrNotWired, exactly as a nonexistent one does.
+	// NOT EXISTS(work_items WHERE job_id=jobID AND status NOT IN ('settled','dead')) — computed from the
+	// WORK ITEMS, never from a counter. total is the job's INPUT ROWS (jobs.total_count, 0018: malformed
+	// and duplicate rows included). settled counts ROWS (job_rows) that have an outcome: the rows whose
+	// work item is settled|dead, plus the malformed rows (their invalid/invalid_syntax verdict exists from
+	// the moment of submission). So total-settled (the status route's `pending`) reaches 0 when the job is
+	// complete, duplicates included. SCOPED TO ITS OWNER: a job owned by another caller returns
+	// ErrNotWired, exactly as a nonexistent one does.
 	JobCompletion(ctx context.Context, jobID, ownerUserID string) (complete bool, total, settled int, err error)
 
-	// ListJobResults returns settled work-items for a job joined to their verdicts, cursor-paginated
-	// (§7.1). cursor is the last-seen work_item.id ("" => from the start); nextCursor is "" at the end.
-	// SCOPED TO ITS OWNER via a join back to jobs — a cross-tenant call yields ZERO ROWS, never a
-	// partial page. This is the path that leaked full verification results (PII) under D1.
+	// ListJobResults returns the input rows of a job that have an outcome — rows whose work item is
+	// settled|dead, plus malformed rows — joined to their verdicts, ORDERED BY ORDINAL and
+	// cursor-paginated (§7.1). cursor is ParseResultsCursor's input ("" => from the start; ErrBadCursor
+	// for anything this store did not issue); nextCursor is the cursor of the LAST row RETURNED
+	// (FormatResultsCursor of its ordinal), and "" when the list is exhausted. The cursor is never derived
+	// from a look-ahead row. A row that settles after a reader's cursor passed its ordinal is not revisited,
+	// so a complete listing needs complete=true first (docs/bulk-item-identity.md). SCOPED TO ITS OWNER via a
+	// join back to jobs — a cross-tenant call yields ZERO ROWS, never a partial page. This is the path that
+	// leaked full verification results (PII) under D1.
 	ListJobResults(ctx context.Context, jobID, ownerUserID, cursor string, limit int) (results []WorkItemResult, nextCursor string, err error)
 
 	// ── Phase 5 (§7.5 / PN-13) — per-caller front-door auth ──
@@ -793,6 +898,9 @@ func (StubStore) SetNodeStatus(context.Context, string, string) error       { re
 func (StubStore) ResetWarmup(context.Context, string, time.Time, int) error { return ErrNotWired }
 func (StubStore) EnqueueWorkItem(context.Context, WorkItemRow) (string, bool, error) {
 	return "", false, ErrNotWired
+}
+func (StubStore) RecordJob(context.Context, JobRow, []JobRowEntry, []VerificationRow) error {
+	return ErrNotWired
 }
 func (StubStore) DequeueReady(context.Context, string, int, time.Time) ([]WorkItemRow, error) {
 	return nil, ErrNotWired

@@ -67,8 +67,9 @@ jobs:
       # FW-3: the migration runner (cmd/migrate) over the database the loop above just built. The loop
       # leaves the tracker table (0017) present and EMPTY, so `status` shows every file pending, the
       # first `up` ADOPTS 0001..0017 (it must replay none of them: 0001..0015 would re-create empty
-      # tables in public), applies only what the loop could not have known about (nothing today), and
-      # the second `up` is a no-op. The fresh-install, upgrade, refusal and lock proofs are Go tests
+      # tables in public), applies only what the loop could not have known about (0018 today: the runner
+      # cannot tell the loop ran it, so it applies it once more, which is idempotent; the `applied $((n - 17))`
+      # check below is that one file), and the second `up` is a no-op. The fresh-install, upgrade, refusal and lock proofs are Go tests
       # (internal/migrate, cmd/migrate) that build their own databases; this step proves the real
       # binary and its summary line on a database the loop made.
       - name: migration runner (adopts the loop-built database, then a no-op)
@@ -88,13 +89,49 @@ jobs:
           printf '%s\n' "$out" | grep -qx "migrate: applied 0, adopted 0, already applied $n, total $n"
           out="$("$bin" status)"; echo "$out"
           test "$(printf '%s\n' "$out" | grep -cE '^[0-9]{4} (applied|adopted) [0-9a-f]{8}$')" -eq "$n"
+      # The ZeroBounce STAND-IN: a small local HTTP server (control-plane/test/zbstub) that plays the vendor's
+      # validate API, so the adapter, the mapping table, the spend cap, the kill switch and every failure mode
+      # are exercised against a real HTTP peer. There is NO real vendor call in CI and no real key anywhere in
+      # the repository or this workflow (the "key" the tests send is a throwaway string). Its two base images
+      # are pinned by digest in its Dockerfile, and it is built without a cache like every image here.
+      # It must be up BEFORE the test steps below, which are handed its address in TM_TEST_ZEROBOUNCE_URL.
+      - name: build and start the ZeroBounce stand-in (local server, no real vendor)
+        run: |
+          docker build --pull --no-cache -t zbstub:ci test/zbstub
+          docker run -d --name zbstub -p 127.0.0.1:18081:8080 zbstub:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18081/healthz >/dev/null 2>&1; then echo "zbstub is up"; exit 0; fi
+            sleep 1
+          done
+          docker logs zbstub || true
+          echo "zbstub did not become ready"
+          exit 1
       # The GAP harness tests SKIP with PENDING reasons — that is expected and honest
       # (behavioral layer scaffolded, not faked). -v so the SKIP reasons are visible.
       # TM_TEST_DATABASE_URL is set so the store's PG integration tests RUN (not skip).
+      # TM_TEST_ZEROBOUNCE_URL points the ZeroBounce tests at the stand-in started above; a test that
+      # needs it FAILS (never skips) when it is missing in CI (internal/zbtest).
       - name: go test (with real Postgres)
         env:
           TM_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/cptest
+          TM_TEST_ZEROBOUNCE_URL: http://127.0.0.1:18081
         run: go test -v ./...
+      # The PAIRED CONTROL for "a stand-in test cannot pass vacuously": with the stand-in address REMOVED, a
+      # stand-in test must FAIL and must say why. If it skipped or passed, an unset variable would read as
+      # green and the whole ZeroBounce suite could be silently absent from a run (the D13 failure shape).
+      - name: ZeroBounce tests FAIL, not skip, when the stand-in is missing (paired control)
+        run: |
+          if out="$(env -u TM_TEST_ZEROBOUNCE_URL go test -count=1 -run 'TestZB_Client_EveryAnsweredRow' ./internal/external/ 2>&1)"; then
+            echo "FAIL: a stand-in test passed with no stand-in configured"
+            printf '%s\n' "$out"
+            exit 1
+          fi
+          if ! printf '%s\n' "$out" | grep -q 'TM_TEST_ZEROBOUNCE_URL'; then
+            echo "FAIL: the stand-in test failed, but not by naming the missing TM_TEST_ZEROBOUNCE_URL"
+            printf '%s\n' "$out"
+            exit 1
+          fi
+          echo "ok: with no stand-in the ZeroBounce tests fail loudly"
       # EXECUTION, not merely discovery. The step above exits 0 and prints `ok` for a package in which
       # every test SKIPPED — which is exactly what audit D13 was: two grant tests that always skipped
       # while the comment at the top of this job claimed they proved append-only on every push.
@@ -110,6 +147,7 @@ jobs:
         working-directory: .
         env:
           TM_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/cptest
+          TM_TEST_ZEROBOUNCE_URL: http://127.0.0.1:18081
         run: bash scripts/check-test-execution.sh
       # The PAIRED CONTROL for the step above. On a green tree that gate prints ok, which means every
       # one of its failure branches is unexercised — it could be broken to accept everything and this

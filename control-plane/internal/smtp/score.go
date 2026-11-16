@@ -3,6 +3,7 @@ package smtp
 import (
 	"strings"
 
+	"github.com/coldmail-verify/control-plane/internal/failureorigin"
 	"github.com/coldmail-verify/control-plane/internal/vocab"
 )
 
@@ -38,6 +39,10 @@ type Result struct {
 	Confidence int
 	Signals    map[string]any
 	Cacheable  bool // §6.5/OQ-P2-6: only SETTLED verdicts are cacheable
+
+	// Cause is the evidence behind an `unknown` result about who could not answer (failure_origin, Docs/failure-origin.md): never
+	// serialised; verdict.Assemble derives the signal from it. Empty on every non-unknown result.
+	Cause failureorigin.Cause
 }
 
 // Confidence bands (§7.4 DIAL). Placeholders until P7 recalibrates per (reason × provider).
@@ -76,7 +81,9 @@ func Score(in Input) Result {
 	case vocab.StatusUnknown:
 		// Transient / blocked / timeout / ambiguous. Never cache (§6.5) — a retry may resolve it.
 		markTransient(cls.Reason, signals)
-		return transient(cls.Status, cls.Reason, confUnknown, signals)
+		res := transient(cls.Status, cls.Reason, confUnknown, signals)
+		res.Cause = CauseOf(in.Target) // evidence for failure_origin only; the status/reason/confidence above are Classify's, untouched
+		return res
 
 	case vocab.StatusValid:
 		// The target was ACCEPTED (2xx) or is 552 mailbox_full. mailbox_full is settled valid

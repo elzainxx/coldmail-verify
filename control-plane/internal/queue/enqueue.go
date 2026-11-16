@@ -4,11 +4,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"time"
 
 	"github.com/coldmail-verify/control-plane/internal/hash"
 	"github.com/coldmail-verify/control-plane/internal/idgen"
+	"github.com/coldmail-verify/control-plane/internal/policy"
 	"github.com/coldmail-verify/control-plane/internal/store"
+	"github.com/coldmail-verify/control-plane/internal/verdict"
+	"github.com/coldmail-verify/control-plane/internal/vocab"
 )
 
 // DeriveIdempotencyKey computes the work-item dedup / settle-once key (§5.1):
@@ -35,13 +39,15 @@ func DeriveIdempotencyKey(emailHash []byte, policyKey string, policyVersion int,
 
 // Enqueuer turns a bulk submission into durable work-items (§7.1). It is the ONLY place plaintext
 // enters the queue: it normalizes + hashes each address (Door 3), seals the plaintext under the
-// DR-4 cipher (AAD = the new row id), derives the idempotency key, and enqueues. Cache/dedup
-// short-circuits happen at DRAIN time (compute()'s cache lookup + the store's idempotency_key
-// dedup), so the enqueuer stays simple and the results are uniform /v1/verify objects.
+// DR-4 cipher (AAD = the new row id), derives the idempotency key, and enqueues. Identical addresses
+// WITHIN ONE JOB collapse here (one work item, every row shares its result); the cache short-circuit
+// happens at DRAIN time (compute()'s cache lookup), so the enqueuer stays simple and the results are
+// uniform /v1/verify objects. Nothing is deduplicated ACROSS jobs or tenants (0018, owner ruling A2).
 //
-// GAP-36 boundary: the Enqueuer knows addresses/domains/policy + an OPAQUE caller_ref only. It does
-// NOT parse CSVs, count credits, or track per-row UI — that is the platform's job. Malformed input
-// is COUNTED (rejected) and reported, never a work-item (a bulk item must be a normalizable address).
+// GAP-36 boundary: the Enqueuer knows addresses/domains/policy + an OPAQUE caller_ref only (and the
+// caller's own per-row item_id label, which it stores and echoes without interpreting). It does NOT
+// parse CSVs, count credits, or track per-row UI — that is the platform's job. Malformed input is
+// COUNTED and reported with its ordinal, never a work-item (a work item must be a normalizable address).
 type Enqueuer struct {
 	Store             store.Store
 	Hasher            *hash.Hasher
@@ -50,21 +56,69 @@ type Enqueuer struct {
 	Now               func() time.Time
 }
 
-// BulkResult is what SubmitBulk returns: the job handle + counts (§7.1). Malformed is the count of
-// inputs that didn't normalize (reported so the caller isn't silently short a few rows); Enqueued
-// is the number of durable work-items created (post dedup-within-this-submission).
-type BulkResult struct {
-	JobID     string
-	Total     int // normalizable addresses accepted into the job
-	Enqueued  int // work-items actually created (duplicates within the batch collapse)
-	Duplicate int // inputs that deduped to an already-present idempotency_key
-	Malformed int // inputs that failed to normalize (Door 3) — rejected, not queued
+// BulkRow is one INPUT ROW of a bulk submission (A1): the address and the caller's optional label for
+// the row. ItemID "" means the row has none (the `addresses` request shape). The API has already
+// validated the labels (non-blank, <= store.MaxItemIDBytes, no control characters, unique in the
+// request); the Enqueuer does not re-judge them, the database CHECKs and unique index are the backstop.
+type BulkRow struct {
+	ItemID  string
+	Address string
 }
 
-// SubmitBulk creates a job and enqueues one work-item per NORMALIZABLE address (§7.1). It returns
-// immediately with the job handle — no SMTP runs here (the drainer does that later through the P4
-// gates). policyKey/policyVersion/configFingerprint govern every item (part of the idempotency
-// key). callerRef is the opaque platform correlation string (§7.6), echoed, never interpreted.
+// MalformedRowsCap bounds how many malformed rows a BulkResult (and so the create response) lists. The
+// COUNT (BulkResult.Malformed) is always exact; only the list is capped, with MalformedRowsTruncated set.
+const MalformedRowsCap = 1000
+
+// MalformedRow names one input row whose address did not normalise: the caller's own index and label.
+type MalformedRow struct {
+	Ordinal int
+	ItemID  string // "" => the row had none
+}
+
+// BulkResult is what SubmitBulk returns: the job handle + counts (§7.1). With A1/A2 (0018) the counts
+// are over INPUT ROWS and add up: Total = Enqueued + Duplicate + Malformed.
+type BulkResult struct {
+	JobID     string
+	Total     int // input rows, malformed and duplicate rows included
+	Enqueued  int // work-items actually created: the first row of each distinct address in the job
+	Duplicate int // rows that shared an EARLIER row's work-item in THIS job (never across jobs)
+	Malformed int // rows that failed to normalize (Door 3): no work-item, reported as invalid_syntax
+
+	// MalformedRows lists the malformed rows (at most MalformedRowsCap) so the caller can map them to its
+	// own input; MalformedRowsTruncated is true when more than that many were malformed.
+	MalformedRows          []MalformedRow
+	MalformedRowsTruncated bool
+}
+
+// SubmitBulk is SubmitBulkRows for the `addresses` request shape: every address is a row with no
+// item_id. Kept as the narrow entry point the original callers (and the end-to-end tests) use.
+func (e *Enqueuer) SubmitBulk(ctx context.Context, addresses []string, def *policy.Definition, callerRef, ownerUserID string) (BulkResult, error) {
+	rows := make([]BulkRow, len(addresses))
+	for i, a := range addresses {
+		rows[i] = BulkRow{Address: a}
+	}
+	return e.SubmitBulkRows(ctx, rows, def, callerRef, ownerUserID)
+}
+
+// SubmitBulkRows creates a job and records EVERY input row (§7.1; A1/A2, 0018). It returns immediately
+// with the job handle — no SMTP runs here (the drainer does that later through the P4 gates).
+// def is the governing policy: its key and version, with the config fingerprint, govern every item (part
+// of the idempotency key), and its invalid_syntax baseline is the confidence of a malformed row's verdict.
+// callerRef is the opaque platform correlation string (§7.6), echoed, never interpreted.
+//
+// What happens to each row, in submitted order (its index is its ordinal):
+//   - an address that does not normalise is MALFORMED: it gets a job row, no work item, and its OWN LOG
+//     row — the invalid/invalid_syntax verdict with a NULL hash that the sync path writes for such an
+//     input (§3.2.7), logged here, before the 202, because Door 2 says every result is logged before it is
+//     returned. Its result is served from that LOG row, with its ordinal and item_id. A repeated malformed
+//     address is NOT a duplicate: each malformed row is its own row with its own LOG row;
+//   - the FIRST row of a given (normalised address × policy × config) in this job creates the work item;
+//   - a later identical row in the SAME job creates nothing, points at that work item and names the first
+//     row (DuplicateOf), so the address is checked once, every row gets the result, and the caller can
+//     see which rows are one check (counted as Duplicate).
+//
+// There is NO dedup across jobs or tenants: the idempotency key is unique per job (0018), so a new job
+// always gets a work item for every distinct address, whatever any job before it did.
 //
 // ownerUserID is the PLATFORM user that will own the job (0013 / fix-plan item 1, D1) — the value
 // every subsequent read predicates on. The two trailing string parameters are deliberately NOT
@@ -77,26 +131,79 @@ type BulkResult struct {
 // it stores a NULL owner, which makes the resulting job unreadable over the API by anyone. Failing
 // CLOSED on read beats failing closed on submit: the alternative — rejecting the submission — would
 // break the legacy/dev path for no security gain, since an unreadable job leaks nothing.
-func (e *Enqueuer) SubmitBulk(ctx context.Context, addresses []string, policyKey string, policyVersion int, callerRef, ownerUserID string) (BulkResult, error) {
+//
+// ORDER OF WRITES: ONE transaction records the job, ALL its job rows and the LOG rows of its malformed
+// rows (Store.RecordJob), then the work items are enqueued. A work item can therefore never settle before
+// the rows that point at it exist, so the status counts (rows whose work item is terminal) are exact at
+// every instant, and the malformed rows' verdicts are logged and committed before this returns, i.e.
+// before the 202. (A failure part-way through the work items leaves a job the caller never learns the id
+// of, as it always could.)
+func (e *Enqueuer) SubmitBulkRows(ctx context.Context, rows []BulkRow, def *policy.Definition, callerRef, ownerUserID string) (BulkResult, error) {
+	if def == nil {
+		return BulkResult{}, fmt.Errorf("queue: a bulk submission needs the governing policy definition")
+	}
 	now := e.now()
 	jobID, err := idgen.NewV7String(now)
 	if err != nil {
 		return BulkResult{}, err
 	}
+	policyKey, policyVersion := def.Key, def.Version
 
-	// Normalize + build the work-items first so total_count reflects the REAL accepted set.
-	type pending struct {
-		item store.WorkItemRow
+	res := BulkResult{JobID: jobID, Total: len(rows)}
+	entries := make([]store.JobRowEntry, 0, len(rows))
+	// firstByKey maps an idempotency key (raw bytes as a string key) to the work item that holds it IN THIS
+	// JOB and the ordinal of the first row that created it. It lives for one submission, which is exactly
+	// the dedup scope: nothing is remembered across jobs, so a second job (any owner) finds it empty.
+	type firstRow struct {
+		itemID  string
+		ordinal int
 	}
-	var items []pending
-	res := BulkResult{JobID: jobID}
-	for _, raw := range addresses {
-		normalized, domain, nerr := e.Hasher.Normalize(raw)
+	firstByKey := make(map[string]firstRow, len(rows))
+	var items []store.WorkItemRow
+	// rejects are the LOG rows of the malformed rows. Every one is the same verdict, built ONCE by the
+	// assembler the sync path uses (rejectTemplate) and stamped with its own id; the maps inside are shared
+	// and never written again, so a 100,000-row submission of garbage costs one set of maps, not 100,000.
+	var rejects []store.VerificationRow
+	var rejectTmpl *store.VerificationRow
+	for ordinal, row := range rows {
+		normalized, domain, nerr := e.Hasher.Normalize(row.Address)
 		if nerr != nil {
-			res.Malformed++ // Door-3 un-normalizable → rejected, never a work-item (§7.6 boundary)
+			// Door-3 un-normalizable → no work-item (§7.6 boundary), but the row is kept: every input
+			// row still has an outcome, its ordinal is the caller's own index, and the outcome is LOGGED.
+			res.Malformed++
+			if len(res.MalformedRows) < MalformedRowsCap {
+				res.MalformedRows = append(res.MalformedRows, MalformedRow{Ordinal: ordinal, ItemID: row.ItemID})
+			} else {
+				res.MalformedRowsTruncated = true
+			}
+			if rejectTmpl == nil {
+				t := e.rejectTemplate(def, now)
+				rejectTmpl = &t
+			}
+			logRow := *rejectTmpl
+			logID, ierr := idgen.NewV7String(now)
+			if ierr != nil {
+				return BulkResult{}, ierr
+			}
+			reqID, ierr := idgen.NewV7String(now)
+			if ierr != nil {
+				return BulkResult{}, ierr
+			}
+			logRow.ID, logRow.RequestID = logID, reqID
+			rejects = append(rejects, logRow)
+			entries = append(entries, store.JobRowEntry{Ordinal: ordinal, ItemID: row.ItemID, Malformed: true, VerificationID: logID})
 			continue
 		}
 		emailHash := e.Hasher.EmailHash(normalized)
+		key := DeriveIdempotencyKey(emailHash, policyKey, policyVersion, e.ConfigFingerprint)
+		if first, dup := firstByKey[string(key)]; dup {
+			// The same address earlier in this job: no second check, the row shares the first one's result
+			// and names the first row, so the caller can see these rows are ONE check.
+			res.Duplicate++
+			firstOrdinal := first.ordinal
+			entries = append(entries, store.JobRowEntry{Ordinal: ordinal, ItemID: row.ItemID, WorkItemID: first.itemID, DuplicateOf: &firstOrdinal})
+			continue
+		}
 		itemID, ierr := idgen.NewV7String(now)
 		if ierr != nil {
 			return BulkResult{}, ierr
@@ -107,9 +214,10 @@ func (e *Enqueuer) SubmitBulk(ctx context.Context, addresses []string, policyKey
 		if serr != nil {
 			return BulkResult{}, serr
 		}
-		items = append(items, pending{item: store.WorkItemRow{
+		firstByKey[string(key)] = firstRow{itemID: itemID, ordinal: ordinal}
+		items = append(items, store.WorkItemRow{
 			ID:                itemID,
-			IdempotencyKey:    DeriveIdempotencyKey(emailHash, policyKey, policyVersion, e.ConfigFingerprint),
+			IdempotencyKey:    key,
 			JobID:             jobID,
 			Domain:            domain,
 			EmailHash:         emailHash,
@@ -120,31 +228,63 @@ func (e *Enqueuer) SubmitBulk(ctx context.Context, addresses []string, policyKey
 			NotBefore:         now,
 			CreatedAt:         now,
 			AddrCiphertext:    sealed,
-		}})
+		})
+		entries = append(entries, store.JobRowEntry{Ordinal: ordinal, ItemID: row.ItemID, WorkItemID: itemID})
 	}
-	res.Total = len(items)
+	res.Enqueued = len(items)
 
-	// Create the job with the accepted total, then enqueue each item. Enqueue dedups on
-	// idempotency_key (§5.5): a duplicate within this submission (or a still-pending identical check
-	// from another job) collapses — counted as Duplicate, not double-verified.
-	if _, err := e.Store.CreateJob(ctx, store.JobRow{
+	// The job's total is its INPUT ROWS (malformed and duplicates included), so total = enqueued +
+	// duplicate + malformed and the status counts can reach pending 0. The job, its rows and the malformed
+	// rows' LOG rows commit together (or not at all) before anything is enqueued or returned.
+	if err := e.Store.RecordJob(ctx, store.JobRow{
 		ID: jobID, PolicyKey: policyKey, PolicyVersion: policyVersion, Status: "running",
 		TotalCount: res.Total, CallerRef: callerRef, OwnerUserID: ownerUserID,
-	}); err != nil {
+	}, entries, rejects); err != nil {
 		return BulkResult{}, err
 	}
-	for _, p := range items {
-		_, existed, eerr := e.Store.EnqueueWorkItem(ctx, p.item)
+	for _, it := range items {
+		// The key was de-duplicated above and the job id is brand new, so the store cannot already hold
+		// it; if it reports otherwise, a job row would point at a work item that does not exist, so refuse
+		// loudly rather than hand back a job whose results can never be served.
+		_, existed, eerr := e.Store.EnqueueWorkItem(ctx, it)
 		if eerr != nil {
 			return BulkResult{}, eerr
 		}
 		if existed {
-			res.Duplicate++
-		} else {
-			res.Enqueued++
+			return BulkResult{}, fmt.Errorf("queue: work item key already present in the brand-new job %s", jobID)
 		}
 	}
 	return res, nil
+}
+
+// RejectConfidence is the confidence of an un-addressable input's verdict: the policy's baseline for invalid_syntax, 99 when the policy
+// names none. It is the SAME rule the sync path applies (orchestrator.confidenceForReject); that function is unexported, so the rule is
+// restated here and TestSubmitBulkRows_AMalformedRowIsLoggedLikeTheSyncPathLogsIt compares a bulk row with a real sync Verify so the two
+// cannot drift.
+func RejectConfidence(def *policy.Definition) int {
+	if v, ok := def.Confidence.BaselineByReason[string(vocab.ReasonInvalidSyntax)]; ok {
+		return v
+	}
+	return 99
+}
+
+// rejectTemplate builds the LOG row of an un-addressable input exactly as the sync path does (orchestrator.computeReject, logged by
+// logOnly): invalid / invalid_syntax / skip, the policy's invalid_syntax confidence, signals {"syntax_valid": false}, from_cache false,
+// NO email_hash and NO hash_scheme (§3.2.7), no domain. The assembler (verdict.Assemble) is the one the sync path uses, so the response
+// shape and the LOG row cannot drift. The caller stamps each copy with its own id and request id. RawEmail is deliberately left empty:
+// the LOG never holds an address (Door 3), and the bulk result does not echo one.
+func (e *Enqueuer) rejectTemplate(def *policy.Definition, now time.Time) store.VerificationRow {
+	core := verdict.Core{
+		Status: vocab.StatusInvalid, Reason: vocab.ReasonInvalidSyntax,
+		Confidence: RejectConfidence(def), Recommendation: vocab.RecSkip,
+		Flags: map[string]bool{}, Signals: map[string]any{"syntax_valid": false},
+	}
+	prov := verdict.Provenance{
+		CheckedAt: now, PolicyKey: def.Key, PolicyVersion: def.Version, ConfigFingerprint: e.ConfigFingerprint,
+		NormalizedDomain: "", EmailHash: nil, // NULL hash (§3.2.7)
+	}
+	_, row := verdict.Assemble(core, prov)
+	return row
 }
 
 func (e *Enqueuer) now() time.Time {

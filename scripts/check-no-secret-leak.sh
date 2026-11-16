@@ -21,6 +21,13 @@
 # The precedent is coldmail-send-byo's tests/harness/checks/no_secret_leak.sh, which greps live
 # service logs; this is the same idea narrowed to what M1 can actually stand up today.
 #
+# THE ZEROBOUNCE CANARY. The vendor client is built (buildExternal) only AFTER the store opens, and this
+# fixture's store never opens, so the boot path below never reaches the point where the key is read into
+# the client: this gate proves that configuring the key (with the fallback switches on) makes nothing
+# in config, secrets or wiring print it. What the client itself does with the key (formatting, errors,
+# stored state, logs) is proved by TestZB_KeyNeverLeaks_* and TestZB_Stage_KeyNeverInStoredStateOrLogs
+# in the Go unit suite, not here: stated so nobody reads this canary as covering the client.
+#
 # The DSN canary is deliberately carried as a QUERY PARAMETER (`?password=`). That is the shape pgx
 # fails to redact, so the gate exercises the worst case rather than the one the driver handles.
 set -euo pipefail
@@ -42,6 +49,7 @@ CANARY_FRONTDOOR="canaryFRONTDOOR00003"
 CANARY_NODETOKEN="canaryNODETOKEN00004"
 CANARY_SUPABASE="canarySUPABASEKEY005"
 CANARY_VENDOR="canaryVENDORKEY00006"
+CANARY_ZEROBOUNCE="canaryZEROBOUNCEKEY09"   # the ZeroBounce key, read from the variable TM_EXTERNAL_ZEROBOUNCE_KEY_ENV names (default ZEROBOUNCE_API_KEY)
 CANARY_QUEUEKEY="canaryQUEUEADDRKEY07"
 CANARY_QUEUEPREV="canaryQUEUEPREVKEY08"
 
@@ -61,6 +69,10 @@ env \
   TM_NODE_TOKENS="node-a=${CANARY_NODETOKEN}" \
   TM_SUPABASE_KEY="$CANARY_SUPABASE" \
   TM_VENDOR_KEYS="millionverifier=${CANARY_VENDOR}" \
+  ZEROBOUNCE_API_KEY="$CANARY_ZEROBOUNCE" \
+  TM_FALLBACK_MODE="enabled" \
+  TM_EXTERNAL_DPA_CONFIRMED="true" \
+  TM_EXTERNAL_DAILY_SPEND_CAP="10" \
   TM_QUEUE_ADDR_KEY="$CANARY_QUEUEKEY" \
   TM_QUEUE_ADDR_KEY_PREV="$CANARY_QUEUEPREV" \
   "$BIN" >"$LOG" 2>&1 &
@@ -117,7 +129,8 @@ check "$CANARY_DSNPW"     "the DATABASE PASSWORD (TM_DATABASE_URL query param)"
 check "$CANARY_FRONTDOOR" "the front-door bearer (TM_FRONTDOOR_TOKEN)"
 check "$CANARY_NODETOKEN" "a verifier-node token (TM_NODE_TOKENS)"
 check "$CANARY_SUPABASE"  "the Supabase service-role key (TM_SUPABASE_KEY)"
-check "$CANARY_VENDOR"    "a vendor API key (TM_VENDOR_KEYS)"
+check "$CANARY_VENDOR"    "the legacy vendor key variable (TM_VENDOR_KEYS: no longer read, must still never be logged)"
+check "$CANARY_ZEROBOUNCE" "the ZeroBounce API key (ZEROBOUNCE_API_KEY)"
 check "$CANARY_QUEUEKEY"  "the P5 queue at-rest key (TM_QUEUE_ADDR_KEY)"
 check "$CANARY_QUEUEPREV" "the rotation-overlap queue key (TM_QUEUE_ADDR_KEY_PREV)"
 

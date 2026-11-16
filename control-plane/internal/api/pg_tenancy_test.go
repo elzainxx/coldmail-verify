@@ -174,6 +174,7 @@ func cleanupJob(t *testing.T, pg *store.PG, jobID string) {
 		_, _ = pg.Pool().Exec(ctx, `DELETE FROM verify.work_item_attempts WHERE work_item_id IN (SELECT id FROM verify.work_items WHERE job_id=$1)`, jobID)
 		_, _ = pg.Pool().Exec(ctx, `DELETE FROM verify.verifications WHERE id IN (SELECT verification_id FROM verify.work_items WHERE job_id=$1 AND verification_id IS NOT NULL)`, jobID)
 		_, _ = pg.Pool().Exec(ctx, `DELETE FROM verify.work_items WHERE job_id=$1`, jobID)
+		_, _ = pg.Pool().Exec(ctx, `DELETE FROM verify.job_rows WHERE job_id=$1`, jobID)
 		_, _ = pg.Pool().Exec(ctx, `DELETE FROM verify.jobs WHERE id=$1`, jobID)
 	})
 }

@@ -6,6 +6,7 @@ package verdict
 import (
 	"time"
 
+	"github.com/coldmail-verify/control-plane/internal/failureorigin"
 	"github.com/coldmail-verify/control-plane/internal/store"
 	"github.com/coldmail-verify/control-plane/internal/vocab"
 )
@@ -19,6 +20,10 @@ type Core struct {
 	Recommendation vocab.Recommendation
 	Flags          map[string]bool
 	Signals        map[string]any
+
+	// Cause is the evidence the stage that produced an `unknown` holds about why it could not answer (see internal/failureorigin). It is
+	// NEVER serialised: Assemble turns it into signals.failure_origin. Empty = the stage recorded no evidence (=> undetermined).
+	Cause failureorigin.Cause
 }
 
 // Provenance is everything the assembler needs beyond the verdict to build the response meta
@@ -68,6 +73,12 @@ func Assemble(c Core, p Provenance) (Response, store.VerificationRow) {
 	signals := c.Signals
 	if signals == nil {
 		signals = map[string]any{}
+	}
+	// failure_origin (Docs/failure-origin.md): written HERE and only here, so that every `unknown` this assembler ever builds carries
+	// it by construction — a new code path that mints an unknown cannot forget the key. It is an additive signals key (Door 1) and
+	// changes no status, reason, confidence, recommendation, caching decision or retry.
+	if origin, ok := failureorigin.Of(c.Status, c.Reason, c.Cause, signals); ok {
+		signals[vocab.SignalFailureOrigin] = string(origin)
 	}
 
 	resp := Response{

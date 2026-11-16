@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -247,7 +248,7 @@ func buildQueue(appCtx context.Context, cfg config.Config, sec *secrets.Secrets,
 	drainer, err := queue.NewDrainer(queue.Deps{
 		Store: pg, Compute: orch, Policy: policyResolver{def: def}, Cipher: cipher, Backoff: bo,
 		WorkerID: "drainer-1", LeaseTTL: leaseTTL, MaxSMTPDeadline: maxSMTP,
-		MaxAttempts: cfg.Dials.QueueMaxAttempts, MaxRetryAge: cfg.QueueMaxRetryAge(),
+		MaxAttempts: cfg.Dials.QueueMaxAttempts, MaxRetryAge: cfg.QueueMaxRetryAge(), ErrorMaxAttempts: cfg.Dials.QueueErrorMaxAttempts,
 		BatchSize: cfg.Dials.QueueDrainBatchSize, IdlePoll: cfg.QueueDrainIdlePoll(),
 		// Kill-switch Rung 4 (fix-plan item 4 / D2): accept-and-defer means the front door keeps
 		// accepting and storing work while THE DRAINER IS STOPPED. This is the line that makes the
@@ -260,8 +261,8 @@ func buildQueue(appCtx context.Context, cfg config.Config, sec *secrets.Secrets,
 		srv.WithQueueStatus(false, fmt.Sprintf("drainer init failed: %v; bulk submissions would enqueue but not drain", err))
 		return
 	}
-	log.Printf("queue: bulk endpoint wired; drainer starting (lease_ttl=%s max_smtp=%s max_attempts=%d max_age=%s)",
-		leaseTTL, maxSMTP, cfg.Dials.QueueMaxAttempts, cfg.QueueMaxRetryAge())
+	log.Printf("queue: bulk endpoint wired; drainer starting (lease_ttl=%s max_smtp=%s max_attempts=%d max_age=%s error_max_attempts=%d)",
+		leaseTTL, maxSMTP, cfg.Dials.QueueMaxAttempts, cfg.QueueMaxRetryAge(), cfg.Dials.QueueErrorMaxAttempts)
 	if cfg.KillSwitch.VerdictProductionPaused() {
 		// Loud at boot, not just at the first tick: starting a brain that is ALREADY at Rung 4 is a
 		// deliberate act, and the operator must see the process agree with the config it was handed.
@@ -272,19 +273,28 @@ func buildQueue(appCtx context.Context, cfg config.Config, sec *secrets.Secrets,
 	srv.WithQueueStatus(true, "")
 }
 
-// buildExternal wires the P6 third-party-fallback stage — but ONLY when it is DELIBERATELY enabled:
-// the kill-switch fallback rung is ON (Fallback==enabled — DEFAULT off) AND the §7.4 DPA is confirmed
-// (TM_EXTERNAL_DPA_CONFIRMED=true — DEFAULT false) AND a vendor key is loaded. Any switch missing =>
-// nil => the layer is fully OFF (the P1–P5 posture, the safe default). This is the "enabling is hard"
-// discipline: enabling pre-DPA is unlawful sub-processing, so it takes THREE independent affirmative
-// operator actions, and the global-fallback-kill (Fallback==off) overrides all of them.
+// buildExternal wires the P6 third-party-fallback stage with the ZeroBounce adapter — but ONLY when it is
+// DELIBERATELY enabled. Every one of these is an independent switch; any one missing => nil => the layer is
+// fully OFF (the P1–P5 posture, the safe default), so enabling is hard:
 //
-// PENDING-REAL-VENDOR: this phase ships NO real HTTP vendor client — the real vendor is not enabled
-// (GAP-47: vendor accuracy on the residue is untestable pre-integration). A configured real vendor
-// is a swappable adapter behind external.Vendor (§8); the mock proves the mechanics locally. Until a
-// real adapter is added, buildExternal wires a DISABLED-by-safety stub even when the switches are on,
-// logging loudly — so a misconfiguration can't silently egress to a non-existent vendor.
-func buildExternal(cfg config.Config, sec *secrets.Secrets) *orchestrator.ExternalDeps {
+//  1. the kill-switch fallback rung is ON (TM_FALLBACK_MODE=enabled — DEFAULT off). The global-fallback-kill
+//     (TM_FALLBACK_MODE=off) overrides everything below.
+//  2. the §7.4 DPA is confirmed (TM_EXTERNAL_DPA_CONFIRMED=true — DEFAULT false).
+//  3. the vendor key is present in the environment variable NAMED by TM_EXTERNAL_ZEROBOUNCE_KEY_ENV (default
+//     ZEROBOUNCE_API_KEY). The dial holds the name, never the value.
+//  4. even then, external.Budget carries the HARD daily spend cap (TM_EXTERNAL_DAILY_SPEND_CAP, default 0 =
+//     NO CALLS), so a vendor enabled without choosing a cap sends nothing.
+//
+// The policy must also opt in (its external block + route_when) and the residue must be one of the four
+// classes — that is the stage, not this wiring. The vendor adapter is ZeroBounce, named "zerobounce" for the
+// budget/breaker/spend records; the shipped policy's external.vendor field is informational and currently
+// names a different vendor (changing a policy is a separate, versioned decision — Docs/vendor-zerobounce.md).
+func buildExternal(cfg config.Config, _ *secrets.Secrets) *orchestrator.ExternalDeps {
+	return buildExternalWith(cfg, os.Getenv)
+}
+
+// buildExternalWith is buildExternal over an injectable environment lookup (the tests drive it with a map).
+func buildExternalWith(cfg config.Config, getenv func(string) string) *orchestrator.ExternalDeps {
 	if !cfg.ExternalFallbackEnabled() {
 		// The common, safe path: fallback off (default), or DPA not confirmed. No egress, ever.
 		if cfg.KillSwitch.Fallback == config.FallbackOff {
@@ -294,33 +304,45 @@ func buildExternal(cfg config.Config, sec *secrets.Secrets) *orchestrator.Extern
 		}
 		return nil
 	}
-	// Enabled + DPA confirmed: a vendor key MUST be present for the named vendor, or we stay off.
+	// Enabled + DPA confirmed: the policy must carry an external block, and the vendor key must be present.
 	def, err := policy.ColdEmailDefinition()
 	if err != nil || def.External == nil || def.External.Vendor == "" {
 		log.Printf("external: no external policy block/vendor configured — fallback stays off")
 		return nil
 	}
-	vendorName := def.External.Vendor
-	if _, ok := sec.VendorKey(vendorName); !ok {
-		log.Printf("external: %s enabled + DPA confirmed but no vendor API key for %q (set TM_VENDOR_KEYS) — fallback stays off (honest not-ready, never a fake vendor)", secrets.EnvVendorKeys, vendorName)
+	keyEnv := cfg.ExternalZeroBounceKeyEnvName()
+	key := strings.TrimSpace(getenv(keyEnv))
+	if key == "" {
+		// The variable NAME is logged, never a value.
+		log.Printf("external: fallback enabled + DPA confirmed but the vendor key variable %s is empty or unset — fallback stays off (honest not-ready, never a fake vendor)", keyEnv)
 		return nil
 	}
-	// The budget + breaker DIALs are mapped from config here (so the §5 dials are genuinely CONSUMED,
-	// never settable-but-ignored). This is the exact wiring a real adapter uses; only the vendor
-	// itself is missing this phase.
+	vendor, err := external.NewZeroBounce(external.ZeroBounceConfig{
+		APIKey:            key,
+		BaseURL:           cfg.ExternalZeroBounceBase(),
+		Timeout:           cfg.ExternalZeroBounceTimeout(),
+		AllowLoopbackHTTP: cfg.ExternalAllowsLoopbackHTTP(),
+	})
+	if err != nil {
+		// NewZeroBounce errors are static strings: they never carry the key or the URL.
+		log.Printf("external: the ZeroBounce adapter refused to start (%v) — fallback stays off", err)
+		return nil
+	}
+	if def.External.Vendor != vendor.Name() {
+		log.Printf("external: note — policy %s v%d names external.vendor %q (informational); the compiled vendor %q is used", def.Key, def.Version, def.External.Vendor, vendor.Name())
+	}
+	if cfg.Dials.ExternalDailySpendCap == 0 {
+		log.Printf("external: ZeroBounce is wired but TM_EXTERNAL_DAILY_SPEND_CAP is 0 — EVERY vendor call will be refused until a cap above zero is chosen (owner action)")
+	}
 	deps := &orchestrator.ExternalDeps{
-		Vendor:           nil, // PENDING-REAL-VENDOR — a real external.Vendor adapter slots in HERE (§8)
+		Vendor:           vendor,
 		Budget:           configToBudget(cfg),
 		Breaker:          configToBreaker(cfg),
 		GloballyDisabled: cfg.KillSwitch.Fallback == config.FallbackOff, // global-fallback-kill
 	}
-	_ = deps // built to prove the config mapping; not returned until a real adapter exists (below).
-	// A real adapter is not built this phase (PENDING-REAL-VENDOR). Refuse to wire a live-looking
-	// stage against a non-existent HTTP client — that would be faking green. The mechanics are proven
-	// in tests against external.MockVendor; a real adapter slots into deps.Vendor above to go live.
-	log.Printf("external: PENDING-REAL-VENDOR — fallback is enabled + DPA confirmed + key present, but no real vendor adapter ships this phase (GAP-47). The layer is built + fail-verified locally against the mock; set deps.Vendor to a real external.Vendor adapter (budget=%d/day breaker_cooldown=%s) to go live.",
-		cfg.Dials.ExternalDailyCap.Value, cfg.ExternalBreakerCooldown())
-	return nil
+	log.Printf("external: ZeroBounce wired (endpoint=%s timeout=%s daily_spend_cap=%d credits breaker_cooldown=%s)",
+		vendor.Endpoint(), vendor.Timeout(), cfg.Dials.ExternalDailySpendCap, cfg.ExternalBreakerCooldown())
+	return deps
 }
 
 // buildFlywheel wires the P7 live-path touches (§4.6 historical-bounce gate + §5.4 calibrated read).
@@ -361,6 +383,9 @@ func configToBudget(cfg config.Config) external.Budget {
 		MonthlyCap:  cfg.Dials.ExternalMonthlyCap.Value,
 		PerJobCap:   cfg.Dials.ExternalPerJobCap.Value,
 		RateCeiling: cfg.Dials.ExternalRateCeiling.Value, // §5.2 calls/min burst brake — now consumed
+		// The HARD per-vendor daily cap: 0 means NO calls (not "unset"), and 0 is the default.
+		VendorDailyCap:         cfg.Dials.ExternalDailySpendCap,
+		VendorDailyCapEnforced: true,
 	}
 }
 

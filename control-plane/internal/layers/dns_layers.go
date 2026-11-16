@@ -28,7 +28,7 @@ func (MXLayer) Run(ctx context.Context, ev *Evidence) LayerOutput {
 		// Reported by the null_mx layer as the dominant reason; here mx just reports "no usable route".
 		return LayerOutput{LayerID: "mx", SignalKey: "mx_found", Result: Fail, SeverityHint: Critical, Value: false, Detail: "null MX (RFC 7505)"}
 	default: // mxError — transient/unresolvable → UNKNOWN, never invalid (the whole discipline)
-		return LayerOutput{LayerID: "mx", SignalKey: "mx_found", Result: Unknown, SeverityHint: Warn, Value: false, Detail: "DNS lookup failed (transient) — not proof of non-existence"}
+		return LayerOutput{LayerID: "mx", SignalKey: "mx_found", Result: Unknown, SeverityHint: Warn, Value: false, Detail: "DNS lookup failed (transient) — not proof of non-existence", Cause: ev.mxCause}
 	}
 }
 

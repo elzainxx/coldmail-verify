@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/coldmail-verify/control-plane/internal/failureorigin"
 	"github.com/coldmail-verify/control-plane/internal/layers"
 	"github.com/coldmail-verify/control-plane/internal/vocab"
 )
@@ -119,6 +120,10 @@ type Verdict struct {
 	Flags          map[string]bool
 	Signals        map[string]any
 	StoppedAt      string // layer id that produced the terminal gate ("" if none fired)
+
+	// Cause is the evidence behind an `unknown` verdict about who could not answer (see internal/failureorigin): never serialised,
+	// carried to verdict.Assemble, which derives signals.failure_origin from it. Empty on every non-unknown verdict.
+	Cause failureorigin.Cause
 }
 
 // action is a parsed "<status>:<reason>:<stop|continue>" gate value.
@@ -203,7 +208,11 @@ func (e *Engine) Evaluate(ctx context.Context, def *Definition, ev *layers.Evide
 				return Verdict{}, err
 			}
 			if act.stop {
-				return e.finish(def, act.status, act.reason, flags, signals, out.LayerID), nil
+				v := e.finish(def, act.status, act.reason, flags, signals, out.LayerID)
+				if act.status == vocab.StatusUnknown {
+					v.Cause = out.Cause // the layer's evidence for WHY it could not answer (failure_origin; no other effect)
+				}
+				return v, nil
 			}
 		}
 		_ = flagLayers // flags are recorded above; membership reserved for future weighting

@@ -100,7 +100,7 @@ Per PROJECT_RULES.md §7, every change runs (see [`../.github/workflows/ci.yml`]
    `internal/migrate` and `cmd/migrate` (the migration runner, FW-3) pin the tracker: a fresh install, the full chain twice
    (a no-op), upgrades from `0015` / `0016` / `0017` that must end with the same catalog fingerprint as a fresh install (with a
    paired control that the fingerprint changes and names the object), `0001`–`0016` never executed on a database that already ran
-   `0016`, refusals that leave the database unchanged, two runners at once, a failing file, and the checksums of `0001`–`0016`.
+   `0016`, refusals that leave the database unchanged, two runners at once, a failing file, and the checksums of `0001`–`0018`.
    A database left at `0015` is created and finished inside one hold of the migration lock, because it still depends on the
    cluster-wide role `cp_runtime` that other packages assert is gone (`testpg.ScratchUnderLock`). There is no per-package test
    count to register: `check-test-execution.sh` derives every package's roster from `go test -list` and fails on any skip

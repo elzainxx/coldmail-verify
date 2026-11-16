@@ -117,7 +117,8 @@ func TestImplicitMX_WhenTheProbeCannotRun_IsRiskyNeverInvalid(t *testing.T) {
 		skip     string
 	}{
 		{"the only node's audit is red", true, redNode, "audit_red"},
-		{"no SMTP stage is wired at all", false, store.NodeHealth{}, ""},
+		// M1-G6: an unwired stage used to leave NO token, indistinguishable from a genuine cheap answer; it now says smtp_unwired.
+		{"no SMTP stage is wired at all", false, store.NodeHealth{}, "smtp_unwired"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			o, mem, def, calls := realDNSOrch(t, tc.withSMTP, tc.health, implicitMXValidBody, nil)
@@ -137,8 +138,9 @@ func TestImplicitMX_WhenTheProbeCannotRun_IsRiskyNeverInvalid(t *testing.T) {
 			if calls.Load() != 0 {
 				t.Fatalf("the node was called %d times although the probe was meant not to run", calls.Load())
 			}
-			if tc.withSMTP && mem.CacheLen() != 0 {
-				t.Fatalf("a capacity-gap fallback must not be cached (PB1), got cache len %d", mem.CacheLen())
+			if mem.CacheLen() != 0 {
+				// PB1 for the capacity gaps; and since M1-G6 the unwired stage is our own degraded state, not an answer: never cached either.
+				t.Fatalf("a fallback for a probe that could not run must not be cached, got cache len %d", mem.CacheLen())
 			}
 		})
 	}
