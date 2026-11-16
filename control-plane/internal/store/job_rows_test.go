@@ -366,6 +366,11 @@ func TestRecordJob_BothStoresRefuseWhatTheConstraintsRefuse(t *testing.T) {
 		{"two rows naming the same LOG row", func(r VerificationRow) []JobRowEntry {
 			return []JobRowEntry{{Ordinal: 0, Malformed: true, VerificationID: r.ID}, {Ordinal: 1, Malformed: true, VerificationID: r.ID}}
 		}, one, ""},
+		// The same LOG row handed over twice, with a row that names it: the Mem fake used to store both copies (one id twice in the append-only
+		// LOG) while Postgres refused on verifications_pkey. A store must not accept what the database cannot hold.
+		{"the same LOG row written twice", func(r VerificationRow) []JobRowEntry {
+			return []JobRowEntry{{Ordinal: 0, Malformed: true, VerificationID: r.ID}}
+		}, func(r VerificationRow) []VerificationRow { return []VerificationRow{r, r} }, ""},
 	}
 	forEachStore(t, func(t *testing.T, st Store) {
 		_, isPG := st.(*PG)

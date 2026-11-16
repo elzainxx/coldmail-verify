@@ -19,7 +19,9 @@ func checkRejectLinks(rows []JobRowEntry, rejects []VerificationRow) error {
 		if r.ID == "" {
 			return fmt.Errorf("store: record job: a reject LOG row has no id")
 		}
-		if byID[r.ID] {
+		// byID's VALUE means "already referenced by a row", so presence (not the value) is what says "seen before": testing the value
+		// here let a reject written twice through, because at this point nothing has been referenced yet and both copies read false.
+		if _, seen := byID[r.ID]; seen {
 			return fmt.Errorf("store: record job: reject LOG row %s appears twice", r.ID)
 		}
 		byID[r.ID] = false // false = not yet referenced by a row
