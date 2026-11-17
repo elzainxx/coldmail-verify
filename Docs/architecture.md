@@ -112,6 +112,14 @@ which node was blocked.
 | `idgen` | time-ordered UUIDv7 for the LOG's primary key |
 | `dnsfixture` · `testpg` · `zbtest` | test infrastructure only: an in-process authoritative DNS server, a throwaway migrated Postgres, and the finder and per-test counters of the ZeroBounce stand-in (`control-plane/test/zbstub`; a missing stand-in fails in CI, never skips) |
 
+**The shared `norm/v1` vector file.** `control-plane/internal/hash/testdata/norm-vectors.json` (207 vectors: the input,
+whether `Hasher.Normalize` refuses it, the normalised string, and a group of inputs that must collapse to one address) is a
+**byte-identical copy** of the file the platform keeps at `internal/norm/testdata/norm-vectors.json` in `coldmail-platform`;
+the platform's own normaliser must give the same answer on every vector. Its expectations were produced by running this
+package's real `Hasher.Normalize`, and `internal/hash/norm_vectors_test.go` runs every vector through it. The two copies
+must stay byte-identical (the platform's harness fails on any difference at the pin), and a change to the file is a change
+to a **frozen** scheme (Door 3): make it in both repositories at once, never in one.
+
 The single entrypoint is `cmd/control-plane/main.go`; read `buildAPI`, `buildSMTP`, `buildQueue`,
 `buildExternal` and `buildFlywheel` to see exactly which switch gates each capability. Background
 loops: the health-watcher, the queue drainer, and the `verification_raw` partition maintenance loop
