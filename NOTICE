@@ -1,3 +1,13 @@
+Source visible for transparency. All rights reserved. No license is granted to use, copy, modify or distribute.
+
+Third-party components keep their own licenses (see their directories).
+
+The one directory that holds third-party code is verifier-node/truemail-rack/ (a vendored fork of truemail-rack, MIT; its
+license is kept verbatim at verifier-node/truemail-rack/LICENSE.txt). The truemail engine gem is a pinned, unmodified
+dependency and is not copied into this repository. The detailed third-party notices follow.
+
+================================================================================
+
 Truemail Verification System — Third-Party Notices
 ====================================================
 

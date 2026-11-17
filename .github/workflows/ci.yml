@@ -5,13 +5,96 @@
 # retry-then-accept, vendor accuracy) are never asserted here (Docs/test-strategy.md §4).
 name: ci
 
+# TRIGGERS. Pushes to main, pushes of a v* tag, every pull request, and a manual dispatch.
+#
+# PATH FILTERS (economy: Actions minutes are the scarce resource). A change that touches ONLY prose documentation does
+# not start this workflow. GitHub skips a push or pull request only when EVERY changed file matches an ignore pattern,
+# so one code, script, workflow, migration or gate-input file in the change runs everything. Path filters are not
+# evaluated for a tag push, so a v* tag always runs the full set. The list is an ALLOW-LIST OF WHAT MAY BE SKIPPED, not a
+# list of what must run: a file nobody listed (a new doc, a new directory) runs CI, which is the safe direction.
+#
+# WHAT IS DELIBERATELY NOT IGNORED, because a gate or a test reads it (an edit to it must still run the gate):
+#   Docs/config-manifest.md, Docs/config-reference.md   scripts/check-config-reference-fresh.sh, TestErrorCapDial_*
+#   Docs/test-strategy.md                                scripts/check-test-enumeration.sh rule 7 (gate list documented)
+#   Docs/api-contract.md                                 internal/api routes_contract_test.go
+#   Docs/operator-runbook.md                             cmd/control-plane main_queue_readiness_test.go
+#   Docs/vendor-zerobounce.md                            internal/external zerobounce_map_test.go
+#   Docs/failure-origin.md                               internal/failureorigin failureorigin_test.go
+#   Docs/adr/ADR-0003-*.md                               verifier-node/truemail-rack/bin/assert-gem-unmodified.sh
+#   everything under scripts/, control-plane/, verifier-node/ (the fork's own README/CHANGELOG/FORK.md included) and
+#   .github/ (this file too).
+# If a script or test is ever made to read another doc, REMOVE that doc from the lists below in the same change. Nothing
+# checks that mechanically (a doc a gate reads but the list ignores would only run CI on the next non-doc change), which is
+# a stated limit, not a claim of coverage.
+#
+# The two lists below (push, pull_request) MUST stay identical: GitHub does not let the two events share one.
+#
+# REQUIRED CHECKS. A workflow skipped by a path filter leaves its checks "Pending", never green. If branch protection ever
+# requires the job names below, a documentation-only pull request will sit Pending until an admin merges it. Do not "fix"
+# that by loosening the filters or by adding a stub job that reports success: a stub that says green without running a gate
+# is the failure this repository's gates exist to prevent.
 on:
   push:
     branches: [main]
+    tags: ['v*']
+    paths-ignore:
+      - 'README.md'
+      - 'NOTICE'
+      - 'LICENSE'
+      - 'PROJECT_RULES.md'
+      - 'Docs/README.md'
+      - 'Docs/architecture.md'
+      - 'Docs/bulk-item-identity.md'
+      - 'Docs/future-work.md'
+      - 'Docs/go-live-checklist.md'
+      - 'Docs/install-and-deploy.md'
+      - 'Docs/open-decisions.md'
+      - 'Docs/security-posture.md'
+      - 'Docs/truemail-architecture-detailed.svg'
+      - 'Docs/history/**'
+      - 'Docs/adr/README.md'
+      - 'Docs/adr/ADR-000[1-2]-*.md'
+      - 'Docs/adr/ADR-000[4-9]-*.md'
+      - 'Docs/adr/ADR-00[1-9][0-9]-*.md'
   pull_request:
+    paths-ignore:
+      - 'README.md'
+      - 'NOTICE'
+      - 'LICENSE'
+      - 'PROJECT_RULES.md'
+      - 'Docs/README.md'
+      - 'Docs/architecture.md'
+      - 'Docs/bulk-item-identity.md'
+      - 'Docs/future-work.md'
+      - 'Docs/go-live-checklist.md'
+      - 'Docs/install-and-deploy.md'
+      - 'Docs/open-decisions.md'
+      - 'Docs/security-posture.md'
+      - 'Docs/truemail-architecture-detailed.svg'
+      - 'Docs/history/**'
+      - 'Docs/adr/README.md'
+      - 'Docs/adr/ADR-000[1-2]-*.md'
+      - 'Docs/adr/ADR-000[4-9]-*.md'
+      - 'Docs/adr/ADR-00[1-9][0-9]-*.md'
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+# A newer push to the same ref cancels a run still going on it, so a stale run stops costing minutes. Nothing here is a
+# release or a deploy, so cancelling a run mid-way leaves no half-done state; the gates run again on the newer commit, whose
+# history contains the older one. (The older commit then shows "cancelled", not green: that is the cost.)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# SECRETS AND FORKS. No job in this workflow reads a secret: there is no `secrets.*` expression anywhere in it, the Postgres
+# service password below is a fixed throwaway for a container that exists only for the run, and the ZeroBounce key the tests
+# send is a throwaway string (the real vendor is never called). So no job needs a fork guard, and a pull request from a fork
+# runs every job. A job that ever reads a secret must add
+#   if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+# AND say here that its skip on a fork is not a pass. (The `secrets.PGDSN` mentioned in a comment on the test-execution gate
+# below is the shape that gate's self-test PLANTS to prove it fails; this file does not use it.)
 
 jobs:
   control-plane:
@@ -47,8 +130,8 @@ jobs:
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.26'
       - run: go build ./...
@@ -167,7 +250,7 @@ jobs:
     name: verifier-node (Door 5 — engine pinned, unmodified)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # Host-portable check: exact pin, no vendored engine source, ADR-0003 agreement.
       - run: bash verifier-node/truemail-rack/bin/assert-gem-unmodified.sh
       # The REAL resolution (not stubbed): build the node and assert bundle resolved 3.3.1.
@@ -187,7 +270,7 @@ jobs:
     name: verifier-node base image (digest-pinned, supported Debian, built without a cache)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: base image pinned by digest, on supported Debian, matches .ruby-version, CI builds uncached
         run: bash scripts/check-base-image-pinned.sh
       - name: base-image-pinned SELF-TEST (the paired control)
@@ -200,7 +283,7 @@ jobs:
     name: verifier-node gems (committed Gemfile.lock, installed frozen, agrees with the Door 5 pin)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: lock tracked, image installs it frozen, truemail/net-smtp/bundler/Ruby agree with the Gemfile
         run: bash scripts/check-gemfile-lock.sh
       - name: gemfile-lock SELF-TEST (the paired control)
@@ -215,8 +298,8 @@ jobs:
     name: control-plane DNS (a SERVFAIL is unknown, never invalid; an A-only domain is not invalid — real DNS shapes)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.26'
       - name: DNS tests pass inside a container whose resolv.conf has a search domain
@@ -243,7 +326,7 @@ jobs:
     name: verifier-node resolver hygiene (a dirty resolver turns the audit red — real Ruby, real resolv.conf)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: resolver hygiene against the real Ruby, with Ruby's own resolver as the oracle
         run: bash scripts/check-resolver-hygiene.sh
       - name: resolver-hygiene SELF-TEST (the gate goes RED with the search, hostname or ndots rule disabled)
@@ -257,7 +340,7 @@ jobs:
     name: verifier-node SMTP probe destination guard (independent oracle + egress ruleset)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: probe guard vs the independent oracle; egress ruleset in step with the guard
         run: bash scripts/check-probe-guard.sh
       - name: probe-guard SELF-TEST (the gate goes RED with CGNAT, link-local, 172.16/12 or the firewall's CGNAT removed)
@@ -267,7 +350,7 @@ jobs:
     name: verifier-node (RSpec — stock + /v1 wrapper)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # Run the fork's own RSpec suite (stock specs + the P2 /v1 wrapper specs). The gem is
       # STUBBED here (fast, no socket) — the socket-level wire proof (test/p2) is a separate,
       # Docker-heavy harness run out of band (Docs/history/phase-2-status.md). The fork's SimpleCov 100%
@@ -289,8 +372,8 @@ jobs:
     # the pgx DSN leak sit unnoticed. The precedent is coldmail-send-byo's harness check of the same
     # name; this one boots the real binary because M1 has no compose stack yet (fix-plan item 15).
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.26'
       - name: boot with canary secrets and scan the log
@@ -300,7 +383,7 @@ jobs:
     name: docs-updated + config-reference freshness
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0   # docs-updated needs history to diff against the base
       # The base ref is passed EXPLICITLY, which puts the gate in RANGE mode and is what makes CI the
@@ -330,7 +413,7 @@ jobs:
     name: code-reviewer gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # The code-reviewer gate runs on every change (PROJECT_RULES.md §7). This job is the
       # CI hook for it; the reviewer checks correctness, the additive-only doors, no hardcoded
       # manifest flag, no secret in the diff, and no future-phase mechanism built early.

@@ -88,6 +88,13 @@ CI surfaces these as **explicit `PROVABLE-ONLY-AT-ROLLOUT` markers**, not skippe
 
 ## 5. CI shape
 
+**When it runs.** `ci.yml` starts on a push to `main`, a `v*` tag, a pull request, or a manual dispatch, and a push or pull
+request that changes ONLY prose documentation does not start it (an explicit ignore list at the top of the workflow; every
+doc a gate or test reads is deliberately off that list, and any file nobody listed runs CI). `gitleaks.yml` has no path
+filter and runs on every push. So "every change" below means every change that is not prose-only. PROJECT_RULES.md §7
+gates doc changes too; today the code-reviewer gate (item 9) is a placeholder job, so the review of a prose-only change is
+the human one, not this job. That reading is for the owner to confirm.
+
 Per PROJECT_RULES.md §7, every change runs (see [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml)):
 1. **control-plane:** `go build ./...`, `go vet ./...`, `go test -v ./...` against a real Postgres. The suite runs with the
    DEFAULT `search_path` (no test DSN sets one, `testpg` sets neither a role nor a path): since migration `0016` public holds
@@ -127,7 +134,8 @@ Per PROJECT_RULES.md §7, every change runs (see [`../.github/workflows/ci.yml`]
 8. **test discovery intact + every gate wired** — the meta-gate: no second `go.mod`, no build-tagged
    test file, RSpec's glob unnarrowed, every `check-*.sh` named in the workflow, every §7 job present,
    and every gate named in THIS list (`scripts/check-test-enumeration.sh`, plus its paired self-test)
-9. **the code-reviewer gate** — on every change, docs included
+9. **the code-reviewer gate** — on every change that starts the workflow, docs included (but not a prose-only change: see
+   "When it runs" above)
 10. **the verifier-node base image can never again be a cache-only build** — the Dockerfile's `FROM` is
     pinned by DIGEST, names a supported Debian (bookworm/trixie, never bullseye or older), carries the
     Ruby patch `.ruby-version` names, and every `docker build` in the workflow passes `--pull --no-cache`

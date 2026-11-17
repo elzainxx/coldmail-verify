@@ -14,6 +14,8 @@
 #
 # A repository's own .gitleaks.toml (the platform repository has one, scoped to its cited run logs) is picked up automatically from the source root.
 name: gitleaks
+# NO PATH FILTERS HERE, ON PURPOSE: a secret can be in any file, a documentation file included, so this scan runs on every push
+# (any branch, any tag) and every pull request. It stays cheap: one job, a single pinned binary download, a seconds-long scan.
 on:
   push:
   pull_request:
@@ -22,6 +24,14 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same ref cancels a scan still going on it. That loses nothing: every run scans the FULL history reachable
+# from the commit it checked out (`--log-opts="--all"`, fetch-depth 0), so the newer run covers every commit the cancelled one
+# would have. Cancelling is for a stale run on the same ref only; different refs have different groups and never cancel each
+# other. No secret is read here (the job needs only `contents: read`), so there is nothing to guard on a fork pull request.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   scan:
     runs-on: ubuntu-latest
@@ -29,7 +39,7 @@ jobs:
       GITLEAKS_VERSION: "8.30.1"
       GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           submodules: false

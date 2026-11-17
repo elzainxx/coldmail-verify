@@ -216,7 +216,8 @@ path or the calibration writer, preserve it.
 
 ## 10. How the architecture is kept honest
 
-Eleven CI jobs run on every push (`.github/workflows/ci.yml`): the Go build/vet/test against real
+Eleven CI jobs run on every push or pull request that changes more than prose documentation
+(`.github/workflows/ci.yml`; a prose-only change skips them, see [`test-strategy.md`](test-strategy.md) §5): the Go build/vet/test against real
 Postgres, the gem-unmodified assertion, the base-image and Gemfile.lock gates, the real-DNS fixtures
 (search-domain, implicit MX), the node's resolver-hygiene and probe-guard gates, the node RSpec suite,
 the boot-log secret scan, the docs/config-freshness gates, and the code-reviewer gate. Every gate has

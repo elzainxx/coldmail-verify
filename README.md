@@ -1,5 +1,7 @@
 # Truemail Verification System
 
+Source visible for transparency; all rights reserved, no license is granted. See [`NOTICE`](NOTICE).
+
 An email-verification system that returns an **honest** verdict for any address — `valid`,
 `invalid`, `risky`, or `unknown` — with a confidence score and a recommended action. It verifies
 through progressively more thorough layers (fast syntax/DNS checks, real SMTP probing, an optional
