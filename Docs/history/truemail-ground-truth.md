@@ -81,7 +81,7 @@ j=JSON.parse(Truemail.validate("test@example.com").as_json); puts j.key?("domain
 // HAS_DOMAIN=false  HAS_MAIL_SERVERS=false   (GAP-2/9 confirmed LIVE — struct has them, JSON drops them)
 
 // Truemail.host_audit.as_json:
-{"date":"2026-07-17 01:12:28 +0000","current_host_ip":"197.51.161.198",
+{"date":"2026-07-17 01:12:28 +0000","current_host_ip":"<redacted: audit host address>",
  "warnings":{"dns":"A-record of verifier domain not refers to current host ip address",
              "ptr":"PTR-record for current host ip address was not found"},
  "configuration":{ ...subset... }}

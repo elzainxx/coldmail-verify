@@ -30,7 +30,7 @@ they were accepted on 2026-07-17.
 output is in [`truemail-ground-truth.md`](truemail-ground-truth.md) §0 "LIVE captured output".*
 
 - **GT-4 `host_audit` (LIVE):** `Truemail.host_audit.as_json` returned
-  `{"date":…,"current_host_ip":"197.51.161.198","warnings":{"dns":"A-record…","ptr":"PTR-record…"},"configuration":{…}}`
+  `{"date":…,"current_host_ip":"<redacted: audit host address>","warnings":{"dns":"A-record…","ptr":"PTR-record…"},"configuration":{…}}`
   — the P3 gate anchor (`current_host_ip` + `warnings`, green iff `warnings=={}`) matches reality.
 - **GT-5 `smtp_mock` accept-all:** deferred to P2 **correctly** — the Phase-0 stock rack drives real
   DNS/MX (live SMTP egress to gmail.com confirmed, timed out → `unknown`-shaped, never fabricated). The

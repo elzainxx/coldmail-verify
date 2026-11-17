@@ -1,6 +1,6 @@
 # Truemail Verification System
 
-Source visible for transparency; all rights reserved, no license is granted. See [`NOTICE`](NOTICE).
+Source visible for transparency only; all rights reserved (see LICENSE and NOTICE).
 
 An email-verification system that returns an **honest** verdict for any address — `valid`,
 `invalid`, `risky`, or `unknown` — with a confidence score and a recommended action. It verifies
@@ -147,7 +147,7 @@ system simply returns its honest verdict from the layers it *can* run.
 ## License
 
 - **This project's own code and documentation** (`control-plane/`, the `verifier-node/` wrapper
-  additions, `Docs/`) are **proprietary / all rights reserved** — see [`LICENSE`](LICENSE).
+  additions, `Docs/`) are **all rights reserved**; the source is visible for transparency only — see [`LICENSE`](LICENSE).
 - **Third-party components** — the `truemail` engine and the forked `truemail-rack` server, both
   MIT © Vladislav Trotsenko — are respected and attributed in [`NOTICE`](NOTICE); the top-level
   license grants no rights over them and does not alter their MIT terms.
