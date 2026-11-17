@@ -79,6 +79,9 @@ type stageWant struct {
 var stageRows = []stageWant{
 	{"valid", "", vocab.StatusRisky, vocab.StatusRisky},
 	{"valid", "leading_period_removed", vocab.StatusRisky, vocab.StatusRisky},
+	{"valid", "alias_address", vocab.StatusRisky, vocab.StatusRisky},
+	{"valid", "alternate", vocab.StatusRisky, vocab.StatusRisky},
+	{"valid", "accept_all", vocab.StatusRisky, vocab.StatusRisky},
 	{"valid", "gold", vocab.StatusRisky, vocab.StatusRisky},
 	{"valid", "role_based_accept_all", vocab.StatusRisky, vocab.StatusRisky},
 	{"valid", "ai_agent_mailbox", vocab.StatusRisky, vocab.StatusRisky},
@@ -99,6 +102,7 @@ var stageRows = []stageWant{
 	{"do_not_mail", "toxic", vocab.StatusRisky, vocab.StatusRisky},
 	{"do_not_mail", "global_suppression", vocab.StatusRisky, vocab.StatusRisky},
 	{"do_not_mail", "possible_trap", vocab.StatusRisky, vocab.StatusRisky},
+	{"do_not_mail", "mx_forward", vocab.StatusRisky, vocab.StatusRisky},
 }
 
 func (w stageWant) behaviour() string {
@@ -210,8 +214,13 @@ func TestZB_Stage_EveryAnsweredRow_AntiLaundering(t *testing.T) {
 func TestZB_Stage_NonAnswers_ResidueStands(t *testing.T) {
 	zbtest.URL(t)
 	behaviours := []string{
-		"unknown", "unknown--greylisted", "unknown--mail_server_temporary_error", "unknown--timeout_exceeded", "unknown--antispam_system",
-		"valid--accept_all", "invalid--blocked", "do_not_mail--allowed", "totally_new_status", "valid--some_future_sub_status",
+		// the eight sub-statuses the live page lists under `unknown` (ZeroBounce does not charge for them) and the bare status
+		"unknown", "unknown--antispam_system", "unknown--exception_occurred", "unknown--failed_smtp_connection", "unknown--forcible_disconnect",
+		"unknown--greylisted", "unknown--mail_server_did_not_respond", "unknown--mail_server_temporary_error", "unknown--timeout_exceeded",
+		// the same words that ANSWER under their own status (valid/accept_all, do_not_mail/mx_forward) are non-answers under another;
+		// blocked / allowed are on neither the live page nor in any pair
+		"invalid--accept_all", "do_not_mail--alternate", "valid--mx_forward", "invalid--blocked", "do_not_mail--allowed",
+		"totally_new_status", "valid--some_future_sub_status",
 		"fail--error_body_key", "fail--error_body_credits", "fail--error_body_echo_key", "fail--http_429", "fail--http_500",
 		"fail--http_403_html", "fail--http_302", "fail--malformed", "fail--truncated", "fail--message_only", "fail--unknown_status",
 	}

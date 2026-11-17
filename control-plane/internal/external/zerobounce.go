@@ -34,9 +34,11 @@ import (
 //     of `unknown`, and any (status, sub_status) the table does not list. We NEVER guess a verdict out
 //     of a response we did not understand.
 //
-// UNVERIFIED against the live documentation (Docs/vendor-zerobounce.md, "UNVERIFIED"): whether
-// ZeroBounce charges for an `unknown` or for a call that timed out, the 429 / Retry-After contract, and
-// the exact error-body text. The code is conservative about each (a non-answer; a bounded pause).
+// The live status-codes page (read by the owner, 2026-11-17) states that ZeroBounce does not charge for
+// an `unknown`, which is the rule here: a non-answer is cost 0. STILL UNVERIFIED against the live
+// documentation (Docs/vendor-zerobounce.md, "UNVERIFIED"): whether a call that timed out on OUR deadline
+// is charged, the 429 / Retry-After contract, the exact error-body text and the price per answer. The
+// code is conservative about each (a non-answer; a bounded pause).
 //
 // THE KEY. It rides in the query string (ZeroBounce's only documented way) so it WOULD appear in any
 // error that quotes the request URL — Go's own *url.Error does. So no error from this file is ever

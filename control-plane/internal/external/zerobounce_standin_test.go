@@ -79,7 +79,8 @@ func TestZB_Client_EveryAnsweredRow(t *testing.T) {
 	}
 }
 
-// Every pair that is NOT an answer — every `unknown`, every sub_status with no documented pairing, and a
+// Every pair that is NOT an answer — every `unknown` (all eight of its live sub-statuses by name, in
+// zbDocSubs), every sub_status paired with a status the live page does not give it, `blocked` / `allowed`, and a
 // status or sub_status nobody has seen — is a non-answer: the call WAS made (and so is counted) but it yields
 // no result, no cost marker and no raw blob. The control is the answered row beside it.
 func TestZB_Client_NonAnswerRows_YieldNoVerdict(t *testing.T) {
@@ -98,11 +99,24 @@ func TestZB_Client_NonAnswerRows_YieldNoVerdict(t *testing.T) {
 		rows = append(rows, row{b, ZBErrNoAnswer})
 	}
 	for _, b := range []string{
-		"valid--accept_all", "valid--alternate", "valid--mx_forward", "valid--blocked", "valid--allowed", "valid--alias_address",
-		"invalid--accept_all", "do_not_mail--allowed", "catch-all--gold", "invalid", "invalid--toxic", "spamtrap--toxic",
+		"catch-all--gold", "invalid", "invalid--toxic", "spamtrap--toxic",
 		"abuse--disposable", "valid--some_future_sub_status", "totally_new_status", "catch-all--role_based",
 	} {
 		rows = append(rows, row{b, ZBErrUnrecognised})
+	}
+	// The live page's added sub-statuses are answers ONLY with their own status (the control rows are in
+	// zbWantRows, answered in TestZB_Client_EveryAnsweredRow): the same word under every OTHER status is a
+	// non-answer, and `blocked` / `allowed` (on neither the page nor in any pair) under every status.
+	for _, p := range []struct{ sub, own string }{
+		{"accept_all", "valid"}, {"alternate", "valid"}, {"alias_address", "valid"}, {"mx_forward", "do_not_mail"},
+		{"blocked", ""}, {"allowed", ""},
+	} {
+		for _, st := range zbDocStatuses {
+			if st == "unknown" || st == p.own { // unknown is covered above (no_answer); the own status answers
+				continue
+			}
+			rows = append(rows, row{st + "--" + p.sub, ZBErrUnrecognised})
+		}
 	}
 	for _, rw := range rows {
 		t.Run(rw.behaviour, func(t *testing.T) {
@@ -125,6 +139,20 @@ func TestZB_Client_NonAnswerRows_YieldNoVerdict(t *testing.T) {
 	tag := zbtest.Tag(t)
 	if r, err := z.Verify(context.Background(), zbtest.Addr("valid", tag, "gmail.com"), "idem-"+tag); err != nil || r.Result != vocab.StatusValid {
 		t.Errorf("control: the same client must answer a mapped row, got %+v / %v", r, err)
+	}
+	// Paired controls for the rows above: the very words that are non-answers under another status ANSWER under
+	// their own (valid/accept_all|alternate|alias_address, do_not_mail/mx_forward), by the same client.
+	for _, c := range []struct {
+		behaviour string
+		want      vocab.Status
+	}{
+		{"valid--accept_all", vocab.StatusValid}, {"valid--alternate", vocab.StatusValid},
+		{"valid--alias_address", vocab.StatusValid}, {"do_not_mail--mx_forward", vocab.StatusRisky},
+	} {
+		ctag := zbtest.Tag(t)
+		if r, err := z.Verify(context.Background(), zbtest.Addr(c.behaviour, ctag, "gmail.com"), "idem-"+ctag); err != nil || r.Result != c.want {
+			t.Errorf("control: %s must answer %s, got %+v / %v", c.behaviour, c.want, r, err)
+		}
 	}
 }
 

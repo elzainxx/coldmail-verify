@@ -67,7 +67,10 @@ func TestZB_Interpret_NonAnswers_ResidueStands(t *testing.T) {
 		{"a status this build has never seen", `{"address":"a@b.example","status":"totally_new_status"}`, ZBErrUnrecognised},
 		{"a differently-cased status", `{"address":"a@b.example","status":"Valid"}`, ZBErrUnrecognised},
 		{"a known status with an unseen sub_status", `{"address":"a@b.example","status":"valid","sub_status":"some_future_sub_status"}`, ZBErrUnrecognised},
-		{"a sub_status with no documented pairing", `{"address":"a@b.example","status":"valid","sub_status":"accept_all"}`, ZBErrUnrecognised},
+		{"accept_all is a sub_status of valid only: under invalid it has no documented pairing", `{"address":"a@b.example","status":"invalid","sub_status":"accept_all"}`, ZBErrUnrecognised},
+		{"mx_forward is a sub_status of do_not_mail only: under valid it has no documented pairing", `{"address":"a@b.example","status":"valid","sub_status":"mx_forward"}`, ZBErrUnrecognised},
+		{"blocked is on neither the live page nor in any pair", `{"address":"a@b.example","status":"valid","sub_status":"blocked"}`, ZBErrUnrecognised},
+		{"allowed is on neither the live page nor in any pair", `{"address":"a@b.example","status":"do_not_mail","sub_status":"allowed"}`, ZBErrUnrecognised},
 		{"invalid with no sub_status (never shown by any SDK)", `{"address":"a@b.example","status":"invalid"}`, ZBErrUnrecognised},
 	}
 	answers, nonAnswers := 0, 0
@@ -98,6 +101,51 @@ func TestZB_Interpret_NonAnswers_ResidueStands(t *testing.T) {
 	}
 	if answers != 4 || nonAnswers < 20 {
 		t.Fatalf("answers=%d non-answers=%d: the table did not exercise both sides", answers, nonAnswers)
+	}
+}
+
+// EVERY answered pair through the interpreter on a body shaped like the vendor's, from the INDEPENDENT list
+// (zbWantRows, typed from the doc): the normalized result, the verbatim "status/sub_status" grade, one credit.
+// The four rows the live page added (valid/alias_address, valid/alternate, valid/accept_all, do_not_mail/
+// mx_forward) are among them; each one's paired control is the same sub_status under a status that does not
+// own it, which is a non-answer of kind unrecognised, and the four SDK-only pairs still answer.
+func TestZB_Interpret_EveryAnsweredPair_AndTheLivePageAdditions(t *testing.T) {
+	body := func(status, sub string) []byte {
+		return []byte(fmt.Sprintf(`{"address":"a@b.example","status":%q,"sub_status":%q}`, status, sub))
+	}
+	for _, w := range zbWantRows {
+		r, err := interpretZeroBounce(body(w.status, w.sub), "k", 1)
+		if err != nil {
+			t.Errorf("%s/%q is an answered pair but read as a non-answer: %v", w.status, w.sub, err)
+			continue
+		}
+		wantRaw := w.status
+		if w.sub != "" {
+			wantRaw += "/" + w.sub
+		}
+		if r.Result != w.result || r.StatusRaw != wantRaw || r.CostUnits != 1 {
+			t.Errorf("%s/%q = %+v, want result %s, status_raw %q, 1 credit", w.status, w.sub, r, w.result, wantRaw)
+		}
+	}
+	for _, w := range zbPageAdded {
+		for _, st := range zbDocStatuses {
+			if st == w.status {
+				continue
+			}
+			if r, err := interpretZeroBounce(body(st, w.sub), "k", 1); err == nil {
+				t.Errorf("control: %s/%s was read as an answer %+v; %q is an answer only under %q", st, w.sub, r, w.sub, w.status)
+			} else if k := ZBKind(err); k != ZBErrUnrecognised && !(st == "unknown" && k == ZBErrNoAnswer) {
+				t.Errorf("control: %s/%s kind = %q, want unrecognised (no_answer for unknown)", st, w.sub, k)
+			}
+		}
+	}
+	for _, p := range [][2]string{{"valid", "gold"}, {"valid", "role_based_accept_all"}, {"valid", "ai_agent_mailbox"}, {"catch-all", "ai_agent_mailbox"}} {
+		if _, err := interpretZeroBounce(body(p[0], p[1]), "k", 1); err != nil {
+			t.Errorf("the SDK-only pair %s/%s must stay mapped, got %v", p[0], p[1], err)
+		}
+	}
+	if len(zbWantRows) != 26 {
+		t.Fatalf("zbWantRows has %d rows, want 26 (22 on the live page + 4 SDK-only)", len(zbWantRows))
 	}
 }
 

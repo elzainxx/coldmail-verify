@@ -16,7 +16,12 @@
 //	valid+<tag>@x                <tag> groups the request for the counters below (any other + segment is noise)
 //
 // Any <status>--<sub_status> is served as written; the stand-in does not validate pairs. That is the point:
-// it serves every documented pair, a pair the SDKs never show, and a status this build has never seen.
+// it serves every pair the live status-codes page lists (valid--alias_address, valid--alternate,
+// valid--accept_all, do_not_mail--mx_forward and the rest of the mapping table), the four SDK-only pairs, all
+// eight sub-statuses of `unknown`, the pairs the adapter must NOT read as answers (invalid--accept_all,
+// valid--mx_forward, valid--blocked, ...), and a status this build has never seen. What counts as an answer is
+// decided by the adapter's table (internal/external/zerobounce_map.go), never here: this server is a test
+// double, not a model of the vendor.
 //
 // Failure modes (fail--<mode>): error_body_key, error_body_credits (HTTP 200 {"error":...}),
 // error_body_echo_key (an error body that quotes the api_key it was sent — the hazard the adapter must

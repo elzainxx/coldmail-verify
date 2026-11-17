@@ -6,18 +6,24 @@ import "github.com/coldmail-verify/control-plane/internal/vocab"
 // strings are normalized at THIS boundary and never reach status/reason). The table is the code half
 // of Docs/vendor-zerobounce.md; TestZB_MapTable_DocInSync keeps the two in step.
 //
-// SOURCE AND ITS LIMITS. ZeroBounce's documentation pages were not reachable for our tooling
-// (Cloudflare 403), so the status and sub_status sets and the example (status, sub_status) pairs come
-// from ZeroBounce's own official SDK repositories (Go, Rust, Ruby, Python, JavaScript, PHP, Java and
-// the Postman collection), read 2026-11-16; Docs/vendor-zerobounce.md records the repo, commit and what
-// each source confirms. The owner must check this table against the live documentation before the
-// vendor is switched on.
+// SOURCE AND ITS LIMITS. The mapping follows ZeroBounce's live status-codes page
+// (https://www.zerobounce.net/docs/email-list-validation/status-codes), which the OWNER read on
+// 2026-11-17 (our tooling still gets a Cloudflare 403 from that host, so the owner's reading is the
+// source, not a fetch). Four pairs are NOT on that page and are kept as SDK-ONLY pairs: valid/gold,
+// valid/role_based_accept_all, valid/ai_agent_mailbox and catch-all/ai_agent_mailbox. They come from
+// ZeroBounce's own official SDK repositories (Go, Rust, Ruby, Python, JavaScript, PHP, Java and the
+// Postman collection, read 2026-11-16); Docs/vendor-zerobounce.md records the repos, commits and what
+// each source confirms, and labels every row "page" or "SDK-only". `blocked` and `allowed` are on
+// neither the page nor in any pair: they stay non-answers.
 //
-// THE RULE THE TABLE ENFORCES: the table is a WHITELIST of (status, sub_status) pairs that an official
-// SDK shows ZeroBounce actually answering with. Any pair that is not listed (an `unknown` status, a
-// sub_status with no documented pairing, a status or sub_status this build has never seen) is a
+// THE RULE THE TABLE ENFORCES: the table is a WHITELIST of (status, sub_status) pairs that the live
+// page lists (or, for the four SDK-only rows, that an official SDK shows ZeroBounce answering with).
+// Any pair that is not listed (every `unknown` sub-status, a sub_status paired with a status the page
+// does not give it, `blocked`, `allowed`, a status or sub_status this build has never seen) is a
 // NON-ANSWER: the call is recorded as an error, no verdict is formed, and M1's own residue verdict
-// stands. Absence from the table is never read as a verdict.
+// stands. Absence from the table is never read as a verdict. A sub_status is read only together with
+// its status: accept_all, alternate and alias_address are answers under `valid` and nowhere else,
+// mx_forward is an answer under `do_not_mail` and nowhere else.
 //
 // What a row's Result means (vocab.Status the adapter hands to Resolve, which then applies the
 // anti-laundering and OQ-P6-3 rules; the adapter itself never produces a final verdict):
@@ -32,7 +38,7 @@ import "github.com/coldmail-verify/control-plane/internal/vocab"
 //	              cautious side. PROJECT_RULES §2 / OQ-7: "won't deliver" and "don't want" are never
 //	              conflated, so a disposable, role, toxic or suppressed address is never invalid.
 //
-// ZeroBounce `status` strings (the union of the SDKs; every SDK agrees on these seven).
+// ZeroBounce `status` strings (the live page and every SDK agree on these seven).
 const (
 	zbStatusValid     = "valid"
 	zbStatusInvalid   = "invalid"
@@ -52,16 +58,21 @@ type ZBRow struct {
 
 // zbRows is the ONLY place a pair becomes an answer. Keep Docs/vendor-zerobounce.md in step.
 var zbRows = []ZBRow{
-	// valid: a rented "yes" — risky/external_verified, capped, in Resolve.
+	// valid: a rented "yes" — risky/external_verified, capped, in Resolve. Every sub-status of `valid`
+	// maps the same way: a vendor yes is never M1 `valid` (anti-laundering), whatever its sub-status.
 	{zbStatusValid, "", vocab.StatusValid},
 	{zbStatusValid, "leading_period_removed", vocab.StatusValid},
+	{zbStatusValid, "alias_address", vocab.StatusValid}, // on the live page (owner, 2026-11-17)
+	{zbStatusValid, "alternate", vocab.StatusValid},     // on the live page (owner, 2026-11-17)
+	{zbStatusValid, "accept_all", vocab.StatusValid},    // on the live page (owner, 2026-11-17)
+	// SDK-only pairs (NOT on the live page; kept mapped and labelled so in the doc):
 	{zbStatusValid, "gold", vocab.StatusValid},
 	{zbStatusValid, "role_based_accept_all", vocab.StatusValid},
 	{zbStatusValid, "ai_agent_mailbox", vocab.StatusValid},
 
 	// catch-all: the domain accepts everything; risky.
 	{zbStatusCatchAll, "", vocab.StatusRisky},
-	{zbStatusCatchAll, "ai_agent_mailbox", vocab.StatusRisky},
+	{zbStatusCatchAll, "ai_agent_mailbox", vocab.StatusRisky}, // SDK-only pair (not on the live page)
 
 	// invalid, hard negatives: positive evidence the mailbox cannot receive.
 	{zbStatusInvalid, "mailbox_not_found", vocab.StatusInvalid},
@@ -88,6 +99,7 @@ var zbRows = []ZBRow{
 	{zbStatusDoNotMail, "toxic", vocab.StatusRisky},
 	{zbStatusDoNotMail, "global_suppression", vocab.StatusRisky}, // ambiguous (suppressed because it bounced, or because it complained?)
 	{zbStatusDoNotMail, "possible_trap", vocab.StatusRisky},      // "possible": not proof
+	{zbStatusDoNotMail, "mx_forward", vocab.StatusRisky},         // on the live page (owner, 2026-11-17); a "don't want", never a "won't deliver"
 }
 
 type zbKey struct{ status, sub string }

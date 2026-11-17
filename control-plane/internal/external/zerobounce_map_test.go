@@ -1,6 +1,7 @@
 package external
 
 import (
+	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -15,9 +16,9 @@ import (
 // Docs/vendor-zerobounce.md, not derived from zbRows) that the stand-in tests reuse; a test that read its
 // expectations back out of the table it checks would pass whatever the table said.
 
-// zbDocStatuses / zbDocSubs are the union of ZeroBounce's status and sub_status values across the official
-// SDKs (Go, Rust, Ruby: all 7 and all 31; Python/JS/PHP/Java: the classic subset). "" is the sub_status the
-// vendor sends when it has none.
+// zbDocStatuses / zbDocSubs are the union of ZeroBounce's status and sub_status values: the live status-codes
+// page (read by the owner, 2026-11-17) plus the official SDKs (Go, Rust, Ruby: all 7 and all 31; Python/JS/PHP/Java:
+// the classic subset). "" is the sub_status the vendor sends when it has none.
 var zbDocStatuses = []string{"valid", "invalid", "catch-all", "unknown", "spamtrap", "abuse", "do_not_mail"}
 
 var zbDocSubs = []string{"",
@@ -30,6 +31,14 @@ var zbDocSubs = []string{"",
 	"role_based_accept_all", "gold", "ai_agent_mailbox",
 }
 
+// zbLiveUnknownSubs are the eight sub-statuses the live page lists under `unknown` (owner, 2026-11-17). Every one is
+// a non-answer: M1's own verdict stands, the call is an error with cost 0 and no vendor-charged marker. (ZeroBounce
+// states that an unknown is not charged, which is exactly that rule.) Typed here, not read from the table.
+var zbLiveUnknownSubs = []string{
+	"antispam_system", "exception_occurred", "failed_smtp_connection", "forcible_disconnect", "greylisted",
+	"mail_server_did_not_respond", "mail_server_temporary_error", "timeout_exceeded",
+}
+
 type zbWant struct {
 	status, sub string
 	result      vocab.Status
@@ -39,6 +48,9 @@ type zbWant struct {
 var zbWantRows = []zbWant{
 	{"valid", "", vocab.StatusValid},
 	{"valid", "leading_period_removed", vocab.StatusValid},
+	{"valid", "alias_address", vocab.StatusValid},
+	{"valid", "alternate", vocab.StatusValid},
+	{"valid", "accept_all", vocab.StatusValid},
 	{"valid", "gold", vocab.StatusValid},
 	{"valid", "role_based_accept_all", vocab.StatusValid},
 	{"valid", "ai_agent_mailbox", vocab.StatusValid},
@@ -59,6 +71,23 @@ var zbWantRows = []zbWant{
 	{"do_not_mail", "toxic", vocab.StatusRisky},
 	{"do_not_mail", "global_suppression", vocab.StatusRisky},
 	{"do_not_mail", "possible_trap", vocab.StatusRisky},
+	{"do_not_mail", "mx_forward", vocab.StatusRisky},
+}
+
+// zbSDKOnlyPairs are the four answered pairs that are NOT on the live status-codes page (the owner ruled them
+// SDK-only and kept them mapped). The doc labels exactly these "SDK-only" and every other row "page".
+var zbSDKOnlyPairs = map[[2]string]bool{
+	{"valid", "gold"}: true, {"valid", "role_based_accept_all"}: true, {"valid", "ai_agent_mailbox"}: true,
+	{"catch-all", "ai_agent_mailbox"}: true,
+}
+
+// zbPageAdded are the four pairs the 2026-11-17 ruling added: valid gained alias_address, alternate and accept_all,
+// do_not_mail gained mx_forward. Each is an answer ONLY with its own status.
+var zbPageAdded = []zbWant{
+	{"valid", "alias_address", vocab.StatusValid},
+	{"valid", "alternate", vocab.StatusValid},
+	{"valid", "accept_all", vocab.StatusValid},
+	{"do_not_mail", "mx_forward", vocab.StatusRisky},
 }
 
 func zbWantMap() map[[2]string]vocab.Status {
@@ -116,6 +145,95 @@ func TestZB_MapTable_CrossProduct(t *testing.T) {
 	}
 	if _, ok := MapZeroBounce("unknown", ""); ok {
 		t.Error("`unknown` is the vendor's own non-answer and must never become a verdict, whatever its sub_status")
+	}
+}
+
+// The four pairs the live page added are answers ONLY with their own status: alias_address / alternate /
+// accept_all under `valid`, mx_forward under `do_not_mail`. The same sub_status under any other status — and
+// `blocked` / `allowed`, which are on neither the page nor in any pair, under every status — is still a
+// non-answer. The mapping is on the PAIR, so each row has its paired control right beside it. Every added row
+// also goes through the real Resolve: a vendor "yes" (even valid/accept_all) is risky/external_verified at the
+// cap and never M1 `valid`.
+func TestZB_MapTable_LivePageSubStatuses_AnswerOnlyWithTheirOwnStatus(t *testing.T) {
+	others := append(append([]string{}, zbDocStatuses...), "totally_new_status", "Valid", "")
+	checked, controls := 0, 0
+	for _, a := range zbPageAdded {
+		got, ok := MapZeroBounce(a.status, a.sub)
+		if !ok || got != a.result {
+			t.Errorf("MapZeroBounce(%q, %q) = (%s, %v), want (%s, true)", a.status, a.sub, got, ok, a.result)
+			continue
+		}
+		checked++
+		for _, class := range []ResidueClass{ResidueCatchAll, ResidueProviderNoSMTP, ResidueRetryExhausted, ResidueGaveUpRateLimited} {
+			res := Resolve(VendorResult{Result: got}, class, 60)
+			if res.KeepResidue || res.Status != vocab.StatusRisky || res.Reason != vocab.ReasonExternalVerified || res.Confidence != 60 {
+				t.Errorf("%s/%s on %s resolved %+v, want risky/external_verified at the cap 60 (a vendor yes is never M1 valid)", a.status, a.sub, class, res)
+			}
+		}
+		for _, st := range others {
+			if st == a.status {
+				continue
+			}
+			controls++
+			if r, ok := MapZeroBounce(st, a.sub); ok {
+				t.Errorf("control: %s/%s answered %s; %q is an answer only under %q", st, a.sub, r, a.sub, a.status)
+			}
+		}
+	}
+	for _, sub := range []string{"blocked", "allowed"} {
+		for _, st := range others {
+			controls++
+			if r, ok := MapZeroBounce(st, sub); ok {
+				t.Errorf("%s/%s answered %s: `blocked` and `allowed` are not on the live page and stay non-answers", st, sub, r)
+			}
+		}
+	}
+	if checked != 4 || controls < 4*len(zbDocStatuses) {
+		t.Fatalf("checked %d added rows (want 4) and %d paired controls: the loop did not reach what it claims", checked, controls)
+	}
+}
+
+// Every `unknown` sub-status the live page lists is a non-answer, each BY NAME, through the real interpreter (not
+// only the table): the call is an error of kind no_answer carrying no result, no cost, no vendor status and no raw
+// blob, so M1's own verdict stands and nothing the vendor does not charge for is recorded as charged. The control
+// is the same body with status `valid`, which IS an answer costing one credit.
+func TestZB_MapTable_LiveUnknownSubStatuses_AreEachANonAnswer(t *testing.T) {
+	if len(zbLiveUnknownSubs) != 8 {
+		t.Fatalf("the live page lists 8 unknown sub-statuses, the test names %d", len(zbLiveUnknownSubs))
+	}
+	known := map[string]bool{}
+	for _, s := range zbDocSubs {
+		known[s] = true
+	}
+	for _, sub := range zbLiveUnknownSubs {
+		if !known[sub] {
+			t.Errorf("%q is not in zbDocSubs, so the cross-product would never test it", sub)
+		}
+		if r, ok := MapZeroBounce("unknown", sub); ok {
+			t.Errorf("unknown/%s is mapped (%s): the vendor's own non-answer is never a verdict", sub, r)
+		}
+		body := `{"address":"a@b.example","status":"unknown","sub_status":"` + sub + `"}`
+		r, err := interpretZeroBounce([]byte(body), "idem", 5)
+		if err == nil {
+			t.Errorf("unknown/%s was read as an answer %+v", sub, r)
+			continue
+		}
+		if k := ZBKind(err); k != ZBErrNoAnswer {
+			t.Errorf("unknown/%s: kind %q, want %q", sub, k, ZBErrNoAnswer)
+		}
+		if r.Result != "" || r.CostUnits != 0 || r.StatusRaw != "" || len(r.RawJSON) != 0 || r.RequestID != "" {
+			t.Errorf("unknown/%s carried a result or a vendor-charged marker: %+v", sub, r)
+		}
+		// Paired control: the same word under `valid` is no pair either (it is unrecognised, not no_answer), so the
+		// table is keyed on the pair and the `unknown` rows above are non-answers because of the status too.
+		ctl, err := interpretZeroBounce([]byte(strings.Replace(body, `"unknown"`, `"valid"`, 1)), "idem", 5)
+		if err == nil || ZBKind(err) != ZBErrUnrecognised {
+			t.Errorf("control: valid/%s = %+v / %v, want an unrecognised non-answer", sub, ctl, err)
+		}
+	}
+	ctl, err := interpretZeroBounce([]byte(`{"address":"a@b.example","status":"valid","sub_status":""}`), "idem", 5)
+	if err != nil || ctl.CostUnits != 1 {
+		t.Errorf("control: a valid answer must cost one credit, got %+v / %v", ctl, err)
 	}
 }
 
@@ -201,16 +319,66 @@ func TestZB_MapTable_DoNotMailIsNeverInvalid_OQ7(t *testing.T) {
 			}
 		}
 	}
-	if seen != 6 {
-		t.Fatalf("saw %d do_not_mail rows, want 6 (disposable, role_based, role_based_catch_all, toxic, global_suppression, possible_trap)", seen)
+	if seen != 7 {
+		t.Fatalf("saw %d do_not_mail rows, want 7 (disposable, role_based, role_based_catch_all, toxic, global_suppression, possible_trap, mx_forward)", seen)
 	}
 	if res := Resolve(VendorResult{Result: vocab.StatusInvalid}, ResidueRetryExhausted, 60); res.Status != vocab.StatusInvalid {
 		t.Error("control: a hard negative (spamtrap) must still resolve invalid on retry_exhausted")
 	}
 }
 
+// zbDocRowRE matches a row of the doc's mapping table (section 4): status, sub_status, adapter result. The
+// non-answers table has other words in its third cell, so it never matches.
+var zbDocRowRE = regexp.MustCompile(`(?m)^\| \x60(valid|invalid|catch-all|spamtrap|abuse|do_not_mail)\x60 \| \x60[^\x60]*\x60 \| (valid|invalid|risky) \| `)
+
+// zbDocRow returns the doc's table line for an answered pair, requiring the adapter result in the third cell
+// (so a doc that says "risky" where the code says "valid" is not found).
+func zbDocRow(doc, status, sub string, result vocab.Status) (string, bool) {
+	if sub == "" {
+		sub = "(empty)"
+	}
+	needle := "| `" + status + "` | `" + sub + "` | " + string(result) + " | "
+	i := strings.Index(doc, needle)
+	if i < 0 {
+		return "", false
+	}
+	line := doc[i:]
+	if j := strings.IndexByte(line, '\n'); j >= 0 {
+		line = line[:j]
+	}
+	return line, true
+}
+
+// zbDocProblems compares the doc with the table in BOTH directions and returns one message per difference:
+// every answered pair needs its row with the right adapter result and the right source label ("page", or
+// "SDK-only pair" for exactly the four pairs the owner ruled SDK-only), and the doc may not carry a mapping row
+// the table does not have.
+func zbDocProblems(doc string, rows []ZBRow) []string {
+	var out []string
+	for _, row := range rows {
+		line, ok := zbDocRow(doc, row.Status, row.Sub, row.Result)
+		if !ok {
+			out = append(out, fmt.Sprintf("no doc row for %s/%q with adapter result %s", row.Status, row.Sub, row.Result))
+			continue
+		}
+		sdkOnly := zbSDKOnlyPairs[[2]string{row.Status, row.Sub}]
+		if has := strings.Contains(line, "**SDK-only pair**"); has != sdkOnly {
+			out = append(out, fmt.Sprintf("%s/%q: the doc row's SDK-only label is %v, want %v", row.Status, row.Sub, has, sdkOnly))
+		}
+		if has := strings.Contains(line, "**page**"); has == sdkOnly {
+			out = append(out, fmt.Sprintf("%s/%q: the doc row's page label is %v, want %v", row.Status, row.Sub, has, !sdkOnly))
+		}
+	}
+	if n := len(zbDocRowRE.FindAllString(doc, -1)); n != len(rows) {
+		out = append(out, fmt.Sprintf("the doc's mapping table has %d rows, the code's table has %d", n, len(rows)))
+	}
+	return out
+}
+
 // The doc is the owner's record of the mapping; the table must not drift from it. Every answered pair must
-// have its row, every documented sub_status must be named, and the owner-facing NOTE and sections must exist.
+// have its row (adapter result and source label included), the doc may hold no row the table lacks, every
+// documented sub_status must be named, and the owner-facing NOTE and sections must exist. The paired controls
+// feed the SAME checker doctored copies of the real doc and require each to be reported.
 func TestZB_MapTable_DocInSync(t *testing.T) {
 	const docPath = "../../../Docs/vendor-zerobounce.md"
 	b, err := os.ReadFile(docPath)
@@ -218,15 +386,9 @@ func TestZB_MapTable_DocInSync(t *testing.T) {
 		t.Fatalf("read %s: %v", docPath, err)
 	}
 	doc := string(b)
-	for _, row := range ZeroBounceRows() {
-		sub := row.Sub
-		if sub == "" {
-			sub = "(empty)"
-		}
-		needle := "| `" + row.Status + "` | `" + sub + "` | "
-		if !strings.Contains(doc, needle) {
-			t.Errorf("Docs/vendor-zerobounce.md has no table row starting %q for the answered pair %s/%q", needle, row.Status, row.Sub)
-		}
+	rows := ZeroBounceRows()
+	for _, p := range zbDocProblems(doc, rows) {
+		t.Errorf("Docs/vendor-zerobounce.md is out of step with zbRows: %s", p)
 	}
 	for _, sub := range zbDocSubs {
 		if sub != "" && !strings.Contains(doc, "`"+sub+"`") {
@@ -239,16 +401,62 @@ func TestZB_MapTable_DocInSync(t *testing.T) {
 		}
 	}
 	for _, must := range []string{
-		"Cloudflare 403", "must be checked against the live documentation", "UNVERIFIED", "Not honestly mappable",
-		"policy.vendor is informational",
+		"https://www.zerobounce.net/docs/email-list-validation/status-codes", "2026-11-17", "Cloudflare 403",
+		"must be checked against the live documentation", "UNVERIFIED", "Not honestly mappable",
+		"policy.vendor is informational", "SDK-only pair",
 	} {
 		if !strings.Contains(doc, must) {
 			t.Errorf("Docs/vendor-zerobounce.md lacks %q", must)
 		}
 	}
+	// The unknown-charge question moved out of UNVERIFIED: the doc must say the page states it, and the
+	// UNVERIFIED table must no longer carry it as an open item.
+	if !strings.Contains(doc, "does not charge for `unknown`") {
+		t.Error("Docs/vendor-zerobounce.md does not record that the live page states an `unknown` is not charged")
+	}
+	if i := strings.Index(doc, "## 6. UNVERIFIED"); i < 0 {
+		t.Error("Docs/vendor-zerobounce.md lost its UNVERIFIED section")
+	} else if j := strings.Index(doc[i:], "\n## 7."); j < 0 || strings.Contains(doc[i:i+j], "Whether credits are charged for `unknown`") {
+		t.Error("the UNVERIFIED section still lists the unknown-charge question as open")
+	}
 	// Paired control: the matcher really can fail — a pair that is NOT answered has no such row.
 	if strings.Contains(doc, "| `unknown` | `greylisted` | valid |") {
 		t.Error("control: the doc must not list unknown/greylisted as an answer")
+	}
+
+	// Paired controls on the checker itself: each doctored copy of the real doc must be reported, by its reason.
+	line, ok := zbDocRow(doc, "valid", "accept_all", vocab.StatusValid)
+	if !ok {
+		t.Fatal("control setup: the doc has no valid/accept_all row")
+	}
+	gold, ok := zbDocRow(doc, "valid", "gold", vocab.StatusValid)
+	if !ok || !strings.Contains(gold, "**SDK-only pair**") {
+		t.Fatalf("control setup: valid/gold must be labelled SDK-only in the doc, got %q", gold)
+	}
+	mutants := []struct{ name, doc, reason string }{
+		{"a row's adapter result changed", strings.Replace(doc, line, strings.Replace(line, "| valid | ", "| risky | ", 1), 1), "no doc row for valid/\"accept_all\""},
+		{"a row deleted", strings.Replace(doc, line+"\n", "", 1), "no doc row for valid/\"accept_all\""},
+		{"an SDK-only row labelled page", strings.Replace(doc, gold, strings.Replace(gold, "**SDK-only pair**", "**page**", 1), 1), "valid/\"gold\": the doc row's SDK-only label is false"},
+		{"a page row labelled SDK-only", strings.Replace(doc, line, strings.Replace(line, "**page**", "**SDK-only pair**", 1), 1), "valid/\"accept_all\": the doc row's SDK-only label is true"},
+		{"a row the table lacks", doc + "\n| `valid` | `blocked` | valid | risky | risky | external_verified | cap | x | **page** |\n", "the doc's mapping table has"},
+	}
+	for _, m := range mutants {
+		if m.doc == doc {
+			t.Errorf("control %q: the mutation did not change the doc, so it proves nothing", m.name)
+			continue
+		}
+		found := false
+		for _, p := range zbDocProblems(m.doc, rows) {
+			if strings.Contains(p, m.reason) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("control %q: the checker did not report %q", m.name, m.reason)
+		}
+	}
+	if p := zbDocProblems(doc, rows); len(p) != 0 {
+		t.Errorf("control: the undoctored doc must be clean, got %v", p)
 	}
 }
 

@@ -290,8 +290,9 @@ A ZeroBounce `external.Vendor` adapter ships, wired into `buildExternal` and **d
 missing the layer does not exist (fail-closed; [`future-work.md`](future-work.md) V2), and even with all three on it
 sends nothing until the hard daily spend cap `TM_EXTERNAL_DAILY_SPEND_CAP` is set above its default `0`.
 `TM_VENDOR_KEYS` is no longer read for the vendor. Before turning it on you still have to open the account, sign the
-DPA and check the adapter's status mapping against ZeroBounce's live documentation (it was written from the official
-SDKs): the enablement runbook is [`vendor-zerobounce.md`](vendor-zerobounce.md) §8. Set conservative ceilings from
+DPA and check what is still unverified against ZeroBounce's live documentation (the status mapping was written from the
+official SDKs and the owner has since corrected it against the live status-codes page, 2026-11-17; the rest is listed in
+[`vendor-zerobounce.md`](vendor-zerobounce.md) §6): the enablement runbook is [`vendor-zerobounce.md`](vendor-zerobounce.md) §8. Set conservative ceilings from
 observed volume before raising them: `TM_EXTERNAL_DAILY_CAP`, `_MONTHLY_CAP`, `_PER_JOB_CAP`, `_RATE_CEILING`. **Verify:** only the
 *residue* is routed to the vendor, and a vendor `valid` is recorded as `risky` at a capped confidence — never an
 SMTP-grade `valid`. *Reversible:* `TM_FALLBACK_MODE=off` is the global panic button.
