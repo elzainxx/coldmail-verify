@@ -166,6 +166,46 @@ hard to rebuild):
 Startup validates the control-loop dials: an out-of-range value that would silently disable a
 brake (e.g. a fleet-brake fraction ≥ 100%) is a **startup error**, never a silent no-op.
 
+### 5.1 A node promotes itself, and a restart re-promotes it (owner ruling OD-4, migration `0019`)
+
+Nobody runs SQL to bring a node into service. At **every** control-plane boot each enabled node is registered `provisioning` with
+`port25_open=false` (`verify.nodes.registered_at` = the database clock; any `active` an earlier process left is **not** trusted).
+The watcher's first audit runs **at once**, then every `TM_WATCHER_CADENCE_SECONDS` (default 45), and promotes the node only from
+a green audit row recorded after that registration, on the node's configured egress IP, from a node that answers its liveness
+probe, in one statement that takes `port25_open` from the audit and records the audit row's id (`promoted_by_audit_id`). What the
+environment must provide for a green audit is the table in [`install-and-deploy.md`](install-and-deploy.md) §3.2 ("What a green node
+audit needs").
+
+| You see | Means | Do |
+|---|---|---|
+| `health: node=<id> provisioning->active (audit_promote, audit=<id>, auto)` | the node promoted itself | nothing |
+| a node stays `provisioning`, `audit_status=red` in `verify.nodes` | the audit is red: read `verify.node_audits.warnings` for the key (`dns`, `ptr`, `resolver`, `probe_guard`; an empty `current_host_ip` is the IP lookup failing) | fix the environment; the next cycle promotes it (a red audit does **not** quarantine a node that was never active) |
+| `provisioning` with `audit_status=green` | the audit is green but the promotion did not fire: `egress-IP != audited current_host_ip (GAP-24)` in the log, or the node is not answering `/healthcheck`, or `TM_NODE_PUBLIC_EGRESS_IP` is unset | correct the setting |
+| `health: node=<id> promotion REFUSED by the store` | the store re-checked and the audit row was not a green row recorded after this boot's registration | a clock or ordering problem; it retries next cycle |
+| `TM_WATCHER_CADENCE_SECONDS=0` and a node never promotes | one audit at boot only, and the node was not up for it | restart after the node is up, and run with a non-zero cadence |
+
+After a restart the node is `provisioning` for the length of its first audit (seconds); work that needs SMTP in that window
+settles as the capacity-wait `no_eligible_node` (a bulk item is requeued 30 s at a time until the node is active), never as a wrong answer.
+
+### 5.2 After a stop, a leased batch waits for its lease to expire (the lease-recovery wait)
+
+The drainer leases up to `TM_QUEUE_DRAIN_BATCH_SIZE` work items (default **10**) at a time. If the process stops (a crash, a `kill`,
+a deploy) while it holds a batch, those items stay `in_flight` under a dead lease and nothing else touches them until a **reclaim
+sweep** sees the lease is older than the **lease TTL**. Both numbers come from one place in `cmd/control-plane/main.go`:
+
+| What | Value | Governed by |
+|---|---|---|
+| lease TTL | **max SMTP client deadline + the lease margin**: `TM_SMTP_CLIENT_DEADLINE_MS` (**60 s is assumed when it is unset**) `+` `TM_QUEUE_LEASE_MARGIN_SECONDS` (**default 120**, must be > 0) = **180 s by default**; **150 s** with `TM_SMTP_CLIENT_DEADLINE_MS=30000` | the two dials. The margin must stay above 0 so the TTL strictly exceeds the deadline (GAP-37): a live, merely slow attempt must never lose its lease and be run twice |
+| reclaim sweep | once per **lease TTL** (the drainer's `ReclaimEvery` defaults to the TTL; it is not a separate dial), and **once at drainer start** | `TM_QUEUE_LEASE_MARGIN_SECONDS` (it moves both) |
+
+So the stranded batch is not recoverable until its lease is **TTL old**, and is then picked up by the next sweep, which can be up
+to **one more TTL** later: **up to about 2 × TTL after the stop (360 s by default; 300 s with a 30 s deadline)**, and not less than
+one TTL after the restart in practice (the sweep at start finds leases that are only seconds old). Nothing is lost and nothing is
+run twice: the settlement is a compare-and-set on the lease. The dial that shortens the wait is **`TM_QUEUE_LEASE_MARGIN_SECONDS`**
+(for example `5` with a 30 s deadline gives a 35 s TTL and about a minute of recovery); the cost of a short margin is that an attempt
+slower than the TTL is reclaimed under a live holder, so keep the TTL above the real worst-case attempt time, and never below the
+deadline. A graceful stop (SIGTERM) does not strand work in this way; a SIGKILL mid-batch does, and is not covered by any test here.
+
 ---
 
 ## 6. What the alerts mean
@@ -290,11 +330,11 @@ rolling forward. (Originally written 2026-08-07 as `history/go-live-rollback-pos
 
 ### 9.1 The measured facts
 
-Measured against the tree — the migration row on 2026-11-17 over 18 migrations, the tracker row on 2026-11-16, the `REVOKE` row on 2026-11-15 (`0017` and `0018` add none), the others on 2026-11-13; not inferred:
+Measured against the tree — the migration row on 2026-11-18 over 19 migrations, the tracker row on 2026-11-16, the `REVOKE` row on 2026-11-15 (`0017`, `0018` and `0019` add none), the others on 2026-11-13; not inferred:
 
 | Fact | Value |
 |---|---|
-| Migrations | **18** (`0001` … `0018`), applied by the runner, `cmd/migrate up` (§9.6). CI builds its test database with the old loop (`for f in $(ls migrations/[0-9][0-9][0-9][0-9]_*.sql \| sort); do psql -f "$f"; done`, valid on an EMPTY database only) and then runs the runner over it |
+| Migrations | **19** (`0001` … `0019`), applied by the runner, `cmd/migrate up` (§9.6). CI builds its test database with the old loop (`for f in $(ls migrations/[0-9][0-9][0-9][0-9]_*.sql \| sort); do psql -f "$f"; done`, valid on an EMPTY database only) and then runs the runner over it |
 | `.down.sql` files, or any other rollback mechanism | **0** — none |
 | A `schema_migrations` / version-tracking table | **`verify.schema_migrations`**, created by `0017` and filled by the runner: one row per file (`version`, sha256 `checksum`, `how` = `applied` or `adopted`, `applied_at`, `applied_by`). `verify_app` holds no privilege on it; `verify_admin` may `SELECT` (FW-3, closed) |
 | `REVOKE` statements | **22** in 11 files (`grep -cE '^\s*REVOKE\b' migrations/*.sql`): 17 are `REVOKE … FROM cp_runtime` tightenings (the least-privilege pattern: `GRANT SELECT, INSERT … TO cp_runtime; REVOKE UPDATE, DELETE … FROM cp_runtime;`), 2 (in `0014`) remove the default `PUBLIC` execute on two functions, and 3 (in `0016`) remove the default `PUBLIC` access to schema `verify` and to the two functions that file creates (`cp_runtime` is the role `0016` renames to `verify_app`) |

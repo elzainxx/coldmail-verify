@@ -163,7 +163,7 @@ func TestJobResults_ServesAnOnContractRow(t *testing.T) {
 	jobs := &stagedJobs{rows: []store.WorkItemResult{onContractRow("wi-1"), onContractRow("wi-2")}, next: "wi-2"}
 	srv := stagedResultsServer(t, jobs)
 
-	rec := getResults(t, srv, "job-1")
+	rec := getResults(t, srv, stagedJobID)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("an on-contract page must serve 200; got %d %s", rec.Code, rec.Body.String())
 	}
@@ -178,7 +178,7 @@ func TestJobResults_ServesAnOnContractRow(t *testing.T) {
 	if len(body.Results) != 2 {
 		t.Fatalf("both staged rows must be served, got %d (body %s)", len(body.Results), rec.Body.String())
 	}
-	if body.JobID != "job-1" || body.NextCursor != "wi-2" {
+	if body.JobID != stagedJobID || body.NextCursor != "wi-2" {
 		t.Fatalf("envelope must echo job_id and the store's cursor, got job_id=%q next_cursor=%q", body.JobID, body.NextCursor)
 	}
 	for _, r := range body.Results {
@@ -255,7 +255,7 @@ func TestJobResults_RefusesAStoredRowThatFailsValid(t *testing.T) {
 			jobs := &stagedJobs{rows: []store.WorkItemResult{tc.row}}
 			srv := stagedResultsServer(t, jobs)
 
-			rec := getResults(t, srv, "job-1")
+			rec := getResults(t, srv, stagedJobID)
 			if rec.Code != http.StatusInternalServerError {
 				t.Fatalf("%s: %s — expected 500, got %d %s", tc.name, tc.why, rec.Code, rec.Body.String())
 			}
@@ -312,7 +312,7 @@ func TestJobResults_ARefusedRowFailsTheWholePage(t *testing.T) {
 	jobs := &stagedJobs{rows: []store.WorkItemResult{good, bad}, next: "wi-2"}
 	srv := stagedResultsServer(t, jobs)
 
-	rec := getResults(t, srv, "job-1")
+	rec := getResults(t, srv, stagedJobID)
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("one off-contract row must fail the whole page, not be filtered from it; got %d %s", rec.Code, rec.Body.String())
 	}
@@ -335,7 +335,7 @@ func TestJobResults_TenancyStillShortCircuitsBeforeThePage(t *testing.T) {
 	}
 	srv := stagedResultsServer(t, jobs)
 
-	rec := getResults(t, srv, "someone-elses-job")
+	rec := getResults(t, srv, otherStagedJobID)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("an absent-or-not-yours job must 404 before the page is read; got %d %s", rec.Code, rec.Body.String())
 	}
@@ -343,3 +343,24 @@ func TestJobResults_TenancyStillShortCircuitsBeforeThePage(t *testing.T) {
 		t.Fatalf("ListJobResults must not run for a job the caller cannot see; it ran %d time(s)", jobs.listCalls)
 	}
 }
+
+// JobStatusSnapshot is on JobReader since 0019 (the status route is built from one snapshot). The results-route tests do not use it, so this fake serves a
+// complete job whose totals are the staged rows; it records nothing and asserts nothing, and the route that uses it is covered with the real store.
+func (s *stagedJobs) JobStatusSnapshot(_ context.Context, jobID, ownerUserID string) (store.JobSnapshot, bool, error) {
+	if s.unknown {
+		return store.JobSnapshot{}, false, nil
+	}
+	n := len(s.rows)
+	return store.JobSnapshot{
+		Job:      store.JobRow{ID: jobID, Status: "complete", TotalCount: n, SettledCount: n, OwnerUserID: ownerUserID},
+		Complete: true,
+		Totals:   store.JobTotals{Submitted: n, Settled: n, ByStatus: map[string]int{}},
+	}, true, nil
+}
+
+// The job ids of the staged-results tests. They are UUIDs because a job id that is not one is a 400 before any reader is called (0019, A3); the old
+// fixtures used "job-1" and "someone-elses-job", which the route now refuses as malformed ids. Only the id's shape changed, not what any test asserts.
+const (
+	stagedJobID      = "019fd000-0000-7000-8000-000000000001"
+	otherStagedJobID = "019fd000-0000-7000-8000-000000000002"
+)

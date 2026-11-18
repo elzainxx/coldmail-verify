@@ -94,7 +94,7 @@ memory, so host hardening and core-dump suppression are part of custody. The que
   **fail-closed** — with no authenticated client it pulls nothing, never unauthenticated data. The
   recommend-only default of the calibration mutators is a mitigation, not a substitute
   ([ADR-0001](adr/ADR-0001-outcome-feed-authentication.md), ADR-0013).
-- **Operator actions** (pull a kill-switch rung, promote a mutator, flip `port25_open`) are *not yet*
+- **Operator actions** (pull a kill-switch rung, promote a mutator) are *not yet*
   per-actor audited: that is DR-3 ([`future-work.md`](future-work.md) FW-1). Until it is built they are
   config/env changes and `verify_admin` writes, attributable only by the host's own access logs.
 
@@ -176,7 +176,7 @@ The node probes whatever mail host a user-supplied domain publishes, so its cont
 | Gap | Effect today | Tracked |
 |---|---|---|
 | **No admin-audit log** (DR-3) | Manual control-plane actions have no per-actor record | [`future-work.md`](future-work.md) FW-1; go-live G0.2 |
-| **No operator command for `port25_open`** | A node cannot become `:smtp`-eligible without a `verify_admin` write | FW-2 |
+| **`port25_open` follows the audit, not a separate egress proof** | Since `0019` a green audit (public-IP lookup, A, PTR, resolver) sets `port25_open`; the audit does not probe port 25, so a host that blocks it is caught by the operator's V1 check, the warm-up cap and the block-rate watcher, not by the gate | FW-2 (a dedicated egress-test writer) |
 | **A `verify_admin` holder can rewrite the LOG** | Immutability is by grant, not write-once media | FW-9 (owner decision) |
 | **Brakes have no timeout and no authenticated confirm** | They stay held until a human acts | FW-8 (owner decision) |
 | **The egress firewall and short hostname are not installed anywhere yet** | They are shipped and gated, but the real box does not exist | go-live G1.4, G1.5 |

@@ -162,7 +162,8 @@ key (Door 1), plus additive keys:
   charges it as a cache answer.
 * **A job-less queued check** (no `job_id`; nothing in the public API creates one today) keeps its old semantics: deduplicated by
   its key alone, against other job-less checks only.
-* **Retrying a POST** creates a new job. `POST /v1/verify/bulk` has no idempotency key (`future-work.md` FW-10); with the old global
+* **Retrying a POST** creates a new job **unless it carries an `Idempotency-Key` header** (migration 0019: the repeat then returns the
+  original job, see [`api-contract.md`](api-contract.md) "Idempotent bulk create"; `future-work.md` FW-10 is done). Without the header; with the old global
   rule a retried POST came back as a job of "duplicates", now it comes back as a second full job.
 
 ## 7. Two changes of meaning (owner rulings)

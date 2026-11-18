@@ -338,7 +338,7 @@ func TestErrorEnvelope_RequestIDsAreUniquePerRequest(t *testing.T) {
 func TestErrorEnvelope_CodeRegistryIsComplete(t *testing.T) {
 	all := []string{
 		codeUnauthenticated, codeValidationFailed, codeNotFound, codeMethodNotAllowed,
-		codePayloadTooLarge, codeUnavailable, codePaused, codeInternalError, codeContractViolation,
+		codePayloadTooLarge, codeUnavailable, codePaused, codeInternalError, codeContractViolation, codeIdempotencyKeyReused,
 	}
 	// codeMethodNotAllowed was added by fix-plan item 14, and THIS TEST is what noticed. The code
 	// went into the const block and both maps, `go test ./internal/api/` was run in isolation on the
@@ -557,4 +557,9 @@ func TestErrorEnvelope_UnregisteredCodeFailsSafe(t *testing.T) {
 	if got, _ := body["code"].(string); got == "no_such_code_was_ever_registered" {
 		t.Fatalf("an unregistered code was passed through to the caller: %s", rec.Body.String())
 	}
+}
+
+// SubmitBulkRowsKeyed is on BulkSubmitter since 0019. The cap refusal never reaches it either.
+func (nopSubmitter) SubmitBulkRowsKeyed(_ context.Context, rows []queue.BulkRow, _ *policy.Definition, _, _ string, _ queue.IdemInput) (queue.BulkResult, error) {
+	return queue.BulkResult{JobID: "019fd000-0000-7000-8000-0000000000aa", Total: len(rows), Enqueued: len(rows)}, nil
 }

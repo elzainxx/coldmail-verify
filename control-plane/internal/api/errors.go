@@ -100,6 +100,10 @@ const (
 	codePaused            = "paused"             // 503 — an operator pulled kill-switch Rung 4
 	codeInternalError     = "internal_error"     // 500
 	codeContractViolation = "contract_violation" // 500 — a Door-1 shape check failed
+	// codeIdempotencyKeyReused (0019, owner ruling OD-6/OD-8): the Idempotency-Key of POST /v1/verify/bulk was already used, by THIS caller, for a
+	// different request. Nothing was created. M1-ONLY (the senders have no idempotency key on a create); the status is 409 like their `conflict`,
+	// but it is its own code so a client that retries unchanged (the replay case, which is a 202) is never confused with one that reused a key.
+	codeIdempotencyKeyReused = "idempotency_key_reused" // 409
 )
 
 // The field-level issue vocabulary. Fixed slugs, never free text (§1.3's details[].issue).
@@ -126,6 +130,8 @@ var fixedMessages = map[string]string{
 	codePaused:            "The service is paused by an operator.",
 	codeInternalError:     "An unexpected error occurred.",
 	codeContractViolation: "An unexpected error occurred.",
+	// A fixed sentence like every other: it names no key, no job and no request.
+	codeIdempotencyKeyReused: "This Idempotency-Key was already used for a different request.",
 }
 
 // codeStatus — the HTTP status each code answers with. TWO codes share 503 and TWO share 500, on
@@ -140,6 +146,7 @@ var codeStatus = map[string]int{
 	codePaused:            http.StatusServiceUnavailable,
 	codeInternalError:     http.StatusInternalServerError,
 	codeContractViolation: http.StatusInternalServerError,
+	codeIdempotencyKeyReused: http.StatusConflict,
 }
 
 // fieldDetail is one structured field-level error. Field names are OUR identifiers (never echoed
@@ -152,6 +159,10 @@ type fieldDetail struct {
 type errorEnvelope struct {
 	Error errorBody `json:"error"`
 }
+
+// errorEnvelopeKey is the one top-level key of the envelope (the json tag above). describe.go's schema for the envelope uses it, so the schema and
+// the serializer name the key from one place.
+const errorEnvelopeKey = "error"
 
 type errorBody struct {
 	Code      string        `json:"code"`

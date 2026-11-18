@@ -155,6 +155,13 @@ type Observation struct {
 	RawStatus      Status
 	EgressMismatch bool
 	Err            error
+
+	// AuditID is the id of the node_audits row THIS observation recorded ("" when nothing was recorded: a fetch error or a failed append). It is
+	// what a promotion names (0019, owner ruling OD-4): the node becomes active BECAUSE of this row, and the row's id is written beside the new
+	// status. HostIP is the audit's own current_host_ip, which the watcher compares with the node's configured public egress IP before it asks
+	// for a promotion.
+	AuditID string
+	HostIP  string
 }
 
 // Observe fetches /v1/audit, derives green/red, applies the GAP-24 egress cross-check, and appends
@@ -194,7 +201,7 @@ func (s *Scheduler) Observe(ctx context.Context, n NodeRef) Observation {
 	}); aerr != nil {
 		return Observation{NodeID: n.ID, RawStatus: status, EgressMismatch: egressMismatch, Err: fmt.Errorf("append audit: %w", aerr)}
 	}
-	return Observation{NodeID: n.ID, EffectiveGreen: effective == StatusGreen, RawStatus: status, EgressMismatch: egressMismatch}
+	return Observation{NodeID: n.ID, EffectiveGreen: effective == StatusGreen, RawStatus: status, EgressMismatch: egressMismatch, AuditID: id, HostIP: ar.CurrentHostIP}
 }
 
 // ObserveAll runs one Observe pass across all nodes (P4 §5.1 — the watcher's audit-signal refresh).

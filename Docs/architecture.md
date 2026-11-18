@@ -112,11 +112,13 @@ which node was blocked.
 | `idgen` | time-ordered UUIDv7 for the LOG's primary key |
 | `dnsfixture` · `testpg` · `zbtest` | test infrastructure only: an in-process authoritative DNS server, a throwaway migrated Postgres, and the finder and per-test counters of the ZeroBounce stand-in (`control-plane/test/zbstub`; a missing stand-in fails in CI, never skips) |
 
-**The shared `norm/v1` vector file.** `control-plane/internal/hash/testdata/norm-vectors.json` (207 vectors: the input,
-whether `Hasher.Normalize` refuses it, the normalised string, and a group of inputs that must collapse to one address) is a
+**The shared `norm/v1` vector file.** `control-plane/internal/hash/testdata/norm-vectors.json` (238 vectors, format `/2`: the input,
+whether `Hasher.Normalize` refuses it, the normalised string, `syntax_ok` (the answer of module 1's real syntax layer over the normalised
+parts, split by `hash.SplitNormalized`, the split the orchestrator also uses), and a group of inputs that must collapse to one address) is a
 **byte-identical copy** of the file the platform keeps at `internal/norm/testdata/norm-vectors.json` in `coldmail-platform`;
 the platform's own normaliser must give the same answer on every vector. Its expectations were produced by running this
-package's real `Hasher.Normalize`, and `internal/hash/norm_vectors_test.go` runs every vector through it. The two copies
+package's real `Hasher.Normalize` and real `layers.SyntaxLayer`, and `internal/hash/norm_vectors_test.go` runs every vector through both
+(with a paired control that a one-character mutant of the syntax rule is reported by the boundary vector that pins it). The two copies
 must stay byte-identical (the platform's harness fails on any difference at the pin), and a change to the file is a change
 to a **frozen** scheme (Door 3): make it in both repositories at once, never in one.
 
@@ -147,7 +149,7 @@ frozen ([ADR-0018](adr/ADR-0018-verifier-node-base-image.md)). The node's own sa
 
 ## 6. Data model
 
-Postgres 16, 18 forward-only migrations (`control-plane/migrations/0001…0018`, no down-migrations —
+Postgres 16, 19 forward-only migrations (`control-plane/migrations/0001…0019`, no down-migrations —
 [`operator-runbook.md`](operator-runbook.md) §9), applied once each, in order, by the runner `cmd/migrate` (`internal/migrate`) and recorded in `verify.schema_migrations` (`0017`; the control plane never reads it). Everything lives in schema `verify` (since `0016`; nothing of module 1 is in `public`). Three roles: `verify_owner` (owns every object; no login), `verify_app` (the service; the only login) and `verify_admin`
 (break-glass table privileges, no login; DDL needs `verify_owner`).
 

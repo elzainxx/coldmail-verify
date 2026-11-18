@@ -493,7 +493,7 @@ func (p *PG) AppendNodeAudit(ctx context.Context, row NodeAuditRow) error {
 func (p *PG) GetNodeHealth(ctx context.Context, nodeID string) (NodeHealth, bool, error) {
 	const q = `
 SELECT n.status, COALESCE(n.audit_status,''), n.last_audit_at, COALESCE(n.port25_open,false),
-       COALESCE(host(a.current_host_ip),'')
+       COALESCE(host(a.current_host_ip),''), COALESCE(n.promoted_by_audit_id::text,'')
 FROM verify.nodes n
 LEFT JOIN LATERAL (
   SELECT current_host_ip FROM verify.node_audits WHERE node_id = n.id ORDER BY audited_at DESC LIMIT 1
@@ -501,7 +501,7 @@ LEFT JOIN LATERAL (
 WHERE n.id=$1`
 	var h NodeHealth
 	var lastAuditAt *time.Time
-	err := p.pool.QueryRow(ctx, q, nodeID).Scan(&h.Status, &h.AuditStatus, &lastAuditAt, &h.Port25Open, &h.LastAuditHostIP)
+	err := p.pool.QueryRow(ctx, q, nodeID).Scan(&h.Status, &h.AuditStatus, &lastAuditAt, &h.Port25Open, &h.LastAuditHostIP, &h.PromotedByAuditID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return NodeHealth{}, false, nil // never mirrored/audited → router treats as not eligible
 	}

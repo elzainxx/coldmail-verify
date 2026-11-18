@@ -71,7 +71,13 @@ type CallerAuth interface {
 // the job (0013). Injected so tests use a fake without a real queue/DB.
 type BulkSubmitter interface {
 	SubmitBulkRows(ctx context.Context, rows []queue.BulkRow, def *policy.Definition, callerRef, ownerUserID string) (queue.BulkResult, error)
+	// SubmitBulkRowsKeyed is SubmitBulkRows for a request that carries a valid Idempotency-Key (0019, owner ruling OD-6/OD-8). The key is scoped to
+	// idem.CallerID, which the handler takes from the credential. A repeat of the key with the same request returns the ORIGINAL job
+	// (BulkResult.Replayed) and creates nothing; the key with another request is queue.ErrIdempotencyKeyReused.
+	SubmitBulkRowsKeyed(ctx context.Context, rows []queue.BulkRow, def *policy.Definition, callerRef, ownerUserID string, idem queue.IdemInput) (queue.BulkResult, error)
 }
+
+var _ BulkSubmitter = (*queue.Enqueuer)(nil) // the production submitter satisfies the keyed half too
 
 // JobReader reads job progress + paginated results (§7.1, satisfied by store.Store). The results
 // are byte-identical /v1/verify verdict objects (Door 1).
@@ -84,8 +90,13 @@ type BulkSubmitter interface {
 type JobReader interface {
 	GetJob(ctx context.Context, jobID, ownerUserID string) (store.JobRow, bool, error)
 	JobCompletion(ctx context.Context, jobID, ownerUserID string) (complete bool, total, settled int, err error)
+	// JobStatusSnapshot is what GET /v1/jobs/{id} reports, read in ONE consistent snapshot (0019): the job, whether it is complete and its totals.
+	// The status route is built from it and from nothing else, so the totals can never be assembled from two reads.
+	JobStatusSnapshot(ctx context.Context, jobID, ownerUserID string) (store.JobSnapshot, bool, error)
 	ListJobResults(ctx context.Context, jobID, ownerUserID, cursor string, limit int) ([]store.WorkItemResult, string, error)
 }
+
+var _ JobReader = (store.Store)(nil) // the store satisfies the reader, snapshot included
 
 // callerIDKey is the context key under which an authenticated caller_id is stashed (never PII —
 // GAP-36; the platform holds the user↔caller_id map). Distinct type so it can't collide.
@@ -231,6 +242,8 @@ func (s *Server) Routes() []Route {
 		{"POST /v1/verify/bulk", s.handleBulkSubmit},
 		{"GET /v1/jobs/{id}", s.handleJobStatus},
 		{"GET /v1/jobs/{id}/results", s.handleJobResults},
+		// 0019 (partial Tier 4, owner ruling OD-6/OD-8): the module's self-description, in the shape family of modules 2 and 3 (describe.go).
+		{"GET /v1/describe", s.handleDescribe},
 		{"GET /healthz", s.handleHealthz},
 		{"GET /readyz", s.handleReadyz},
 	}
@@ -430,6 +443,15 @@ func (s *Server) handleBulkSubmit(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, codeUnavailable, "orchestrator or policy not wired (no DB/pepper)")
 		return
 	}
+	// 0019 (owner ruling OD-6/OD-8): an OPTIONAL Idempotency-Key header. Judged before the body is read (a bad header is a bad request whatever the
+	// body holds, and it is cheap to say so first). Absent: today's behaviour, byte for byte. Present and not 1..128 characters of [A-Za-z0-9._:-]
+	// (or given more than once): 400 with the envelope.
+	idemKey, hasIdemKey, idemOK := idempotencyKeyOf(r)
+	if !idemOK {
+		writeErr(w, codeValidationFailed, "bulk submit: the Idempotency-Key header is not one value of 1..128 characters of [A-Za-z0-9._:-]",
+			fieldDetail{Field: idempotencyKeyHeader, Issue: issueMalformed})
+		return
+	}
 	// Bound the body (a 100k-row list; generous cap, still bounded — see maxBulkBodyBytes).
 	var req bulkRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBulkBodyBytes)).Decode(&req); err != nil {
@@ -472,7 +494,7 @@ func (s *Server) handleBulkSubmit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	_ = callerID // authenticated principal; rate-limiting/attribution by caller_id is a later dial
+	// callerID is the authenticated principal, derived from the key. It scopes the Idempotency-Key (below); rate-limiting/attribution by it is a later dial.
 
 	// OWNERSHIP IS STAMPED HERE (0013 / fix-plan item 1, D1). ownerUserID comes from
 	// authenticate() → LookupCaller → api_callers.user_id — the CREDENTIAL. req.CallerRef, one
@@ -485,10 +507,27 @@ func (s *Server) handleBulkSubmit(w http.ResponseWriter, r *http.Request) {
 	// rejection is not in play on this endpoint, so a `user_id` in the body is silently ignored
 	// today. That is the correct behaviour for a credential-based module, and the cross-tenant test
 	// asserts it stays that way.
-	res, err := s.bulk.SubmitBulkRows(r.Context(), bulkRows(req), s.defPolicy, req.CallerRef, ownerUserID)
+	var res queue.BulkResult
+	var err error
+	if hasIdemKey {
+		// KEYED (0019): scoped to the AUTHENTICATED caller (callerID, from the credential), never to anything in the body. A repeat with the same
+		// request is the ORIGINAL job (res.Replayed); the same key with another request creates nothing and is a 409.
+		res, err = s.bulk.SubmitBulkRowsKeyed(r.Context(), bulkRows(req), s.defPolicy, req.CallerRef, ownerUserID, queue.IdemInput{CallerID: callerID, Key: idemKey})
+	} else {
+		res, err = s.bulk.SubmitBulkRows(r.Context(), bulkRows(req), s.defPolicy, req.CallerRef, ownerUserID)
+	}
 	if err != nil {
+		if errors.Is(err, queue.ErrIdempotencyKeyReused) {
+			writeErr(w, codeIdempotencyKeyReused, "bulk submit: the Idempotency-Key already holds a job of a different request",
+				fieldDetail{Field: idempotencyKeyHeader, Issue: issueConflict})
+			return
+		}
 		writeErr(w, codeInternalError, "bulk submit: store write failed")
 		return
+	}
+	if res.Replayed {
+		// The answer below is the ORIGINAL answer: this response header is how a caller (and a log) can tell a replay from a first answer.
+		w.Header().Set(idempotentReplayedHeader, "true")
 	}
 	// 202 Accepted + the handle. counts are over INPUT ROWS and add up (A2): total = enqueued +
 	// duplicate + malformed, where `duplicate` is a row that shared an earlier row's check IN THIS JOB
@@ -532,14 +571,23 @@ func (s *Server) handleJobStatus(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, codeUnauthenticated, "auth rejected: no valid per-caller key or legacy token")
 		return
 	}
+	// A job id that is not a UUID is a bad request, answered here and never handed to the database (0019, A3: it used to reach Postgres, whose
+	// `invalid input syntax for type uuid` surfaced as a 500). A well-formed id that names no job (or one that is not the caller's) is still the
+	// 404 below. Judged after authentication, so a stranger learns the shape rule only with a valid key.
+	jobID := r.PathValue("id")
+	if !isUUID(jobID) {
+		writeErr(w, codeValidationFailed, "job status: the job id in the path is not a UUID", fieldDetail{Field: "id", Issue: issueMalformed})
+		return
+	}
 	if s.jobs == nil {
 		writeErr(w, codeUnavailable, "orchestrator or policy not wired (no DB/pepper)")
 		return
 	}
-	jobID := r.PathValue("id")
-	job, known, err := s.jobs.GetJob(r.Context(), jobID, ownerUserID)
+	// ONE consistent read (0019): the job, whether it is complete, and the totals all come from a single snapshot, so `complete`, `counts` and
+	// `totals` can never disagree with each other the way separate reads could while the drainer settles items.
+	snap, known, err := s.jobs.JobStatusSnapshot(r.Context(), jobID, ownerUserID)
 	if err != nil {
-		writeErr(w, codeInternalError, "job read: store query failed")
+		writeErr(w, codeInternalError, "job status: snapshot read failed")
 		return
 	}
 	if !known {
@@ -550,14 +598,16 @@ func (s *Server) handleJobStatus(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, codeNotFound, "job absent, or owned by a different caller (tenancy scoping, D1)")
 		return
 	}
-	complete, total, settled, err := s.jobs.JobCompletion(r.Context(), jobID, ownerUserID)
-	if err != nil {
-		writeErr(w, codeInternalError, "job status: progress aggregation failed")
+	job, complete, totals := snap.Job, snap.Complete, snap.Totals
+	if err := checkTotals(totals); err != nil {
+		// The store handed back numbers that contradict each other. Say so (500) rather than serve a total a caller would act on.
+		writeErr(w, codeContractViolation, "job status: the totals are inconsistent: "+err.Error())
 		return
 	}
+	total, settled := job.TotalCount, totals.Settled
 	status := job.Status
-	if complete && status != "complete" && status != "complete_with_unknowns" {
-		status = "complete" // authoritative completion overrides a stale stored 'running'
+	if complete && status != string(vocab.JobComplete) && status != string(vocab.JobCompleteWithUnknowns) {
+		status = string(vocab.JobComplete) // authoritative completion overrides a stale stored 'running'
 	}
 	// Rung 4 promises "a job handle + 'processing paused' job status" (history/kill-switch-ladder.md). It is
 	// reported as an ADDITIVE BOOLEAN, deliberately NOT as a new `status` value: the job-status
@@ -578,6 +628,9 @@ func (s *Server) handleJobStatus(w http.ResponseWriter, r *http.Request) {
 		"complete":   complete,
 		"caller_ref": job.CallerRef, // echoed opaque (§7.6)
 		"counts":     map[string]int{"total": total, "settled": settled, "pending": total - settled},
+		// ADDITIVE (0019, owner ruling OD-6/OD-8): the job's totals over its input rows, from the same snapshot as everything above. Defined
+		// exactly in Docs/api-contract.md; the identities submitted = settled + pending and settled = sum(by_status) hold in every response.
+		"totals": totalsJSON(totals),
 		// Same live derivation as the submit envelope: never stored, so releasing the rung
 		// immediately stops every job from claiming to be paused.
 		"processing_paused": s.cfg.KillSwitch.VerdictProductionPaused(),
@@ -594,11 +647,16 @@ func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, codeUnauthenticated, "auth rejected: no valid per-caller key or legacy token")
 		return
 	}
+	// As on the status route (0019, A3): a job id that is not a UUID is a 400 with the envelope, answered before the database is touched.
+	jobID := r.PathValue("id")
+	if !isUUID(jobID) {
+		writeErr(w, codeValidationFailed, "job results: the job id in the path is not a UUID", fieldDetail{Field: "id", Issue: issueMalformed})
+		return
+	}
 	if s.jobs == nil {
 		writeErr(w, codeUnavailable, "orchestrator or policy not wired (no DB/pepper)")
 		return
 	}
-	jobID := r.PathValue("id")
 	_, known, err := s.jobs.GetJob(r.Context(), jobID, ownerUserID)
 	if err != nil {
 		writeErr(w, codeInternalError, "job read: store query failed")

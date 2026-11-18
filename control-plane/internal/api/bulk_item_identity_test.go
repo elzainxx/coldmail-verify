@@ -760,7 +760,7 @@ func TestJobResults_ElementsCarryOrdinalItemIDAndDuplicateOf_AndEveryRowIsServed
 	jobs := &stagedJobs{rows: []store.WorkItemResult{good, dup, bad}}
 	srv := stagedResultsServer(t, jobs)
 
-	page := getResultsPage(t, srv, "results-key", "job-1", "")
+	page := getResultsPage(t, srv, "results-key", stagedJobID, "")
 	if len(page.Results) != 3 {
 		t.Fatalf("%d elements, want 3", len(page.Results))
 	}
@@ -788,13 +788,13 @@ func TestJobResults_ElementsCarryOrdinalItemIDAndDuplicateOf_AndEveryRowIsServed
 	// CONTROL 1: a malformed row with NO LOG row behind it is not served as a made-up verdict: the page fails (contract_violation), like any
 	// stored row that cannot be served on contract.
 	noLog := store.WorkItemResult{Ordinal: 3, ItemID: "no-log", Malformed: true}
-	if rec := getResults(t, stagedResultsServer(t, &stagedJobs{rows: []store.WorkItemResult{noLog}}), "job-1"); rec.Code != http.StatusInternalServerError {
+	if rec := getResults(t, stagedResultsServer(t, &stagedJobs{rows: []store.WorkItemResult{noLog}}), stagedJobID); rec.Code != http.StatusInternalServerError {
 		t.Errorf("CONTROL: a malformed row with no LOG row must fail the page, not be synthesized; got %d %s", rec.Code, rec.Body.String())
 	}
 	// CONTROL 2: an off-contract stored row on the same page still fails the WHOLE page, malformed row or not.
 	offContract := withVerdict("wi-9", func(v *store.VerificationRow) { v.APIVersion = "" })
 	srvBad := stagedResultsServer(t, &stagedJobs{rows: []store.WorkItemResult{bad, offContract}})
-	if rec := getResults(t, srvBad, "job-1"); rec.Code != http.StatusInternalServerError {
+	if rec := getResults(t, srvBad, stagedJobID); rec.Code != http.StatusInternalServerError {
 		t.Errorf("CONTROL: an off-contract row beside a malformed one must still fail the page, got %d", rec.Code)
 	}
 }

@@ -32,6 +32,9 @@ type StatusStore interface {
 	GetNodeHealth(ctx context.Context, nodeID string) (store.NodeHealth, bool, error)
 	SetNodeStatus(ctx context.Context, nodeID, status string) error
 	ResetWarmup(ctx context.Context, nodeID string, windowStart time.Time, cap int) error
+	// SettleProvisioningNode is the ONLY way a node becomes active from provisioning (0019, owner ruling OD-4): one atomic step from one audit row,
+	// recorded with that row's id, with port25_open taken from the audit. See store.Store.SettleProvisioningNode.
+	SettleProvisioningNode(ctx context.Context, nodeID, auditID string, promote bool) (promoted bool, err error)
 }
 
 // WatchedNode is one pool member the watcher polls (§5.2). VerifierIP anchors the block-rate query
@@ -199,6 +202,9 @@ func (w *Watcher) Tick(ctx context.Context, pool []WatchedNode) Result {
 				snap.AuditGreen = false // unreachable/errored audit is not green (harden-toward-unknown)
 			} else {
 				snap.AuditGreen, snap.AuditKnown = obs.EffectiveGreen, true
+				// Self-promotion inputs (0019): the row THIS cycle recorded, and whether it ran on the node's configured egress IP.
+				snap.AuditID = obs.AuditID
+				snap.EgressConfirmed = n.PublicEgressIP != "" && obs.HostIP == n.PublicEgressIP
 			}
 		}
 		if bs, ok := blockByIP[n.VerifierIP]; ok && n.VerifierIP != "" {
@@ -211,9 +217,26 @@ func (w *Watcher) Tick(ctx context.Context, pool []WatchedNode) Result {
 	res := Evaluate(fleet, w.params)
 
 	// (6) Apply auto-transitions; log recommendations + alerts.
+	promoted := map[string]bool{}
 	for _, a := range res.Actions {
 		// Maintain the clean-canary green streak for recovering nodes (hysteresis input next cycle).
 		w.updateStreak(a)
+		if a.Apply && a.Reason == "audit_promote" {
+			// SELF-PROMOTION (0019, owner ruling OD-4): one atomic step from the audit row this cycle recorded, which the STORE re-checks (the node is
+			// still provisioning, the row is green, and it was recorded after this boot's registration) and records with the row's id. It is not
+			// a SetNodeStatus: that writes a status and nothing else, which is how a promotion would lose its evidence.
+			ok, err := w.deps.Status.SettleProvisioningNode(ctx, a.NodeID, a.AuditID, true)
+			switch {
+			case err != nil:
+				w.deps.Log("health: node=%s FAILED to promote provisioning->active (audit %s): %v", a.NodeID, a.AuditID, err)
+			case !ok:
+				w.deps.Log("health: node=%s promotion REFUSED by the store (audit %s is not a green row recorded after this boot's registration, or the node is no longer provisioning)", a.NodeID, a.AuditID)
+			default:
+				promoted[a.NodeID] = true
+				w.deps.Log("health: node=%s provisioning->active (audit_promote, audit=%s, auto)", a.NodeID, a.AuditID)
+			}
+			continue
+		}
 		if a.Apply && a.To != a.From {
 			if err := w.deps.Status.SetNodeStatus(ctx, a.NodeID, a.To); err != nil {
 				w.deps.Log("health: node=%s FAILED to apply %s->%s (%s): %v", a.NodeID, a.From, a.To, a.Reason, err)
@@ -236,6 +259,16 @@ func (w *Watcher) Tick(ctx context.Context, pool []WatchedNode) Result {
 		} else if a.Recommend != "" {
 			// Recommend-only (A1 default) or a fleet-brake hold — surfaced, NEVER auto-applied (DR-2).
 			w.deps.Log("health: node=%s RECOMMENDATION (%s): %s", a.NodeID, a.Reason, a.Recommend)
+		}
+	}
+	// A provisioning node that this cycle's audit did NOT promote (a red audit, a green on the wrong IP, a node that does not answer, a refused
+	// promotion) stays provisioning, and its port25_open is what that audit says: false (0019, owner ruling OD-4). A cycle that recorded no audit
+	// (AuditID empty) says nothing, so nothing is written.
+	for _, s := range fleet {
+		if s.Status == LifecycleProvisioning && s.AuditID != "" && !promoted[s.NodeID] {
+			if _, err := w.deps.Status.SettleProvisioningNode(ctx, s.NodeID, s.AuditID, false); err != nil {
+				w.deps.Log("health: node=%s could not record that its audit left it provisioning: %v", s.NodeID, err)
+			}
 		}
 	}
 	for _, al := range res.Alerts {

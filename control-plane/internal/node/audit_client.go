@@ -93,8 +93,13 @@ func (s *SimAuditSurface) Set(baseURL string, r AuditResult) *SimAuditSurface {
 	return s
 }
 
-// SetError makes FetchAudit fail for a base URL (simulate an unreachable/500 box).
+// SetError makes FetchAudit fail for a base URL (simulate an unreachable/500 box). A nil err CLEARS the failure again (the box came back), so a test
+// can drive "down at boot, up on the next tick" on one surface.
 func (s *SimAuditSurface) SetError(baseURL string, err error) *SimAuditSurface {
+	if err == nil {
+		delete(s.err, baseURL)
+		return s
+	}
 	s.err[baseURL] = err
 	return s
 }

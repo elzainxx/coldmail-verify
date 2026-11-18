@@ -492,17 +492,19 @@ func buildSMTP(ctx, appCtx context.Context, cfg config.Config, sec *secrets.Secr
 	}
 
 	// §3.6/§4.5: register each configured node in the `nodes` table as `provisioning` (config-list
-	// is authoritative — P1 OQ-5; this mirrors it + gives the audit summary a row to update). The
-	// node stays provisioning → NOT :smtp-eligible until the first green audit ∧ port25_open. NOTE:
-	// port25_open (§3.4 egress smoke test) is PENDING-REAL-BOX — false here in the local build, so no
-	// node is :smtp-eligible until a real host proves egress-25 and audits green. The eligibility
-	// LOGIC that consumes port25_open is fully built + tested (audit/router tests); only the real
-	// value is deferred. Harden-toward-unknown: an unregisterable node just isn't eligible.
+	// is authoritative — P1 OQ-5; this mirrors it + gives the audit summary a row to update).
+	//
+	// SELF-PROMOTION (0019, owner ruling OD-4). RegisterNode NEVER trusts what an earlier process left behind: a node that was active before this
+	// boot is `provisioning` again, with port25_open=false and a fresh registered_at, until an audit recorded AFTER this call promotes it. The
+	// health watcher started below audits at once (its first tick is immediate, then every TM_WATCHER_CADENCE_SECONDS) and promotes a node ONLY
+	// from a green audit row on the node's configured egress IP, taking port25_open from that audit and recording the audit row's id
+	// (internal/health, Store.SettleProvisioningNode). So a restart re-registers, re-audits and re-promotes by itself; nobody has to run SQL.
+	// Harden-toward-unknown: an unregisterable node just isn't eligible.
 	for _, nd := range cfg.Nodes {
 		if !nd.Enabled {
 			continue
 		}
-		if rerr := pg.UpsertNodeState(ctx, nd.ID, nd.BaseURL, "provisioning", false); rerr != nil {
+		if rerr := pg.RegisterNode(ctx, nd.ID, nd.BaseURL); rerr != nil {
 			log.Printf("verify: WARNING could not register node %s (%v) — it will not be :smtp-eligible", nd.ID, rerr)
 		}
 	}

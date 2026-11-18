@@ -123,8 +123,11 @@ type NodeHealth struct {
 	Status          string    // provisioning | active | quarantined (lifecycle, §4.5)
 	AuditStatus     string    // "green" | "red" | "" (never audited)
 	LastAuditAt     time.Time // zero => never audited
-	Port25Open      bool      // set by the egress smoke test (§3.4), NOT by /audit (GAP-15)
+	Port25Open      bool      // since 0019 set by the audit that PROMOTES a node (SettleProvisioningNode), false at every registration; before that only by hand (GAP-15)
 	LastAuditHostIP string    // current_host_ip of the latest audit (the GAP-24 cross-check anchor)
+	// PromotedByAuditID is the node_audits row that promoted the node provisioning -> active since its last registration (0019, owner ruling
+	// OD-4); "" when it has not been promoted since (RegisterNode clears it).
+	PromotedByAuditID string
 }
 
 // WarmupDecision is the outcome of reserving one :smtp slot against the ascending cap (P3 §5.2).
@@ -303,6 +306,75 @@ type JobRowEntry struct {
 	// an address and for every malformed row (a repeated malformed address is NOT a duplicate: each malformed
 	// row is its own row with its own LOG row). Must be below Ordinal.
 	DuplicateOf *int
+}
+
+// IdemClaim is the idempotency identity of a keyed bulk job (0019, owner ruling OD-6/OD-8): the AUTHENTICATED caller (api_callers.caller_id, never
+// the body), the caller's Idempotency-Key header (1..128 characters of [A-Za-z0-9._:-], validated by the API) and the fingerprint of the canonical
+// request (32 bytes). A repeat of (CallerID, Key) is the same job only if the fingerprint is the same too.
+type IdemClaim struct {
+	CallerID    string
+	Key         string
+	Fingerprint []byte
+}
+
+// KeyedJobRecord is everything one idempotent bulk submission writes, handed over at once so it can be written in ONE transaction: the job, its
+// rows, the LOG rows of its malformed rows and its work items. (An unkeyed submission is still written in two steps, RecordJob and then the work
+// items, exactly as before 0019.)
+type KeyedJobRecord struct {
+	Job     JobRow
+	Rows    []JobRowEntry
+	Rejects []VerificationRow
+	Items   []WorkItemRow
+	Claim   IdemClaim
+}
+
+// KeyedJobOutcome is what RecordKeyedJob did. Exactly one of three things happened:
+//   - Replayed == false, Conflict == false: the key was free, the job was written (JobID is the new job's id);
+//   - Replayed == true: the key already held a job of the SAME request: nothing was written, JobID is that job's id and Submission is what its
+//     202 said (reproduced from the job's rows);
+//   - Conflict == true: the key already holds a job of ANOTHER request: nothing was written and JobID is empty (the other job's id is not
+//     disclosed).
+type KeyedJobOutcome struct {
+	JobID      string
+	Replayed   bool
+	Conflict   bool
+	Submission JobSubmission
+}
+
+// MalformedRowRef names one malformed row of a job: the caller's own index and label.
+type MalformedRowRef struct {
+	Ordinal int
+	ItemID  string
+}
+
+// JobSubmission is what the 202 of a bulk submission said, reproduced from the job's own rows (verify.job_rows is append-only, so it cannot have
+// changed): Total = Enqueued + Duplicate + Malformed.
+type JobSubmission struct {
+	Total, Enqueued, Duplicate, Malformed int
+	MalformedRows                         []MalformedRowRef // at most the cap the caller asked for, lowest ordinal first
+	MalformedRowsTruncated                bool
+}
+
+// JobTotals are the totals of one job over its INPUT ROWS, all computed from ONE consistent read (one statement / one lock acquisition), so the
+// identities below hold in every response:
+//
+//	Submitted = Settled + Pending
+//	Settled   = sum(ByStatus)               (every settled row has a verdict, and every verdict has one of the four statuses)
+//
+// Submitted is the number of rows the job recorded; Settled the rows that have an outcome (a malformed row, or a row whose work item is settled
+// or dead); Pending the rest; Duplicates the rows that repeat an earlier row's address (each shares that row's work item); Malformed the rows that
+// did not normalise. ByStatus holds one key per verdict status (all four, zero included) counting the SETTLED rows.
+type JobTotals struct {
+	Submitted, Settled, Pending, Duplicates, Malformed int
+	ByStatus                                           map[string]int
+}
+
+// JobSnapshot is a job's status read in one consistent snapshot: the job row, whether it is complete (judged from its work items, GAP-38) and its
+// totals.
+type JobSnapshot struct {
+	Job      JobRow
+	Complete bool
+	Totals   JobTotals
 }
 
 // MaxItemIDBytes is the longest caller-supplied item_id (A1). The API enforces it before anything is stored;
@@ -567,6 +639,24 @@ type Store interface {
 	// (active/quarantined). It NEVER deletes; DELETE is a verify_admin action (migration 0007).
 	UpsertNodeState(ctx context.Context, nodeID, baseURL, status string, port25Open bool) error
 
+	// RegisterNode is the control-plane BOOT registration (0019, owner ruling OD-4): the node row exists, is `provisioning` with port25_open=false,
+	// has registered_at = now (the database's clock) and no promoted_by_audit_id. It NEVER trusts what an earlier process left behind: a node that
+	// was `active` (or `quarantined`) before this boot is `provisioning` again until an audit recorded AFTER this call promotes it. The audit
+	// summary columns (audit_status, last_audit_at) are untouched (they are a separate write path and hold what the last audit said). It never
+	// deletes.
+	RegisterNode(ctx context.Context, nodeID, baseURL string) error
+
+	// SettleProvisioningNode applies ONE audit row to a node that is still `provisioning` (0019), in a single atomic step, and is the ONLY thing that
+	// promotes a node to `active`:
+	//   - promote=true: iff the node is still provisioning AND the audit row (auditID, recorded for this node) is green AND was recorded after the
+	//     node's registration (node_audits.created_at > nodes.registered_at), the node becomes `active` with port25_open taken from that audit
+	//     (true: a green audit is what says the node can reach out) and promoted_by_audit_id = auditID, all in one statement. promoted=false
+	//     means nothing changed (a red or stale or unknown audit, a node that is not provisioning).
+	//   - promote=false: the node stays `provisioning` and port25_open is set to what the audit says (false): a red audit never leaves a node
+	//     marked as able to send.
+	// An EMPTY auditID, or a node that is not provisioning, changes nothing.
+	SettleProvisioningNode(ctx context.Context, nodeID, auditID string, promote bool) (promoted bool, err error)
+
 	// ReserveWarmupSlot atomically reserves one :smtp slot for a node in the given window against
 	// `cap` (§5.2). It is the DURABLE ascending-cap gate: if the window is at cap it returns
 	// Allowed=false (caller degrades to cheap, smtp_skipped_reason="warmup_cap"); otherwise it
@@ -650,6 +740,16 @@ type Store interface {
 	// DuplicateOf must be below its ordinal (the database CHECKs; the Mem fake mirrors them). The enqueuer
 	// calls it BEFORE it enqueues the work items, so a work item can never settle before its rows exist.
 	RecordJob(ctx context.Context, job JobRow, rows []JobRowEntry, rejects []VerificationRow) error
+
+	// RecordKeyedJob is RecordJob for a submission that carries an Idempotency-Key (0019, owner ruling OD-6/OD-8): it claims the key, writes the
+	// job, its rows, the LOG rows of its malformed rows AND its work items in ONE transaction, or writes nothing and says why (KeyedJobOutcome).
+	//
+	// The claim is "insert, and on a conflict select": the job row carries (idem_caller_id, idempotency_key) under a unique index, so two requests
+	// with one key cannot both create a job. The second one WAITS for the first transaction and then sees the key taken (if the first fails, the
+	// second creates the job instead). A taken key whose job has the same request fingerprint is a replay (Replayed, the original job id and its
+	// 202 counts); one whose fingerprint differs is a Conflict. A different caller with the same key never meets it: the key is scoped to the
+	// authenticated caller. Everything RecordJob refuses is refused here too, and rec.Items must be exactly the work items the rows point at.
+	RecordKeyedJob(ctx context.Context, rec KeyedJobRecord, malformedListCap int) (KeyedJobOutcome, error)
 
 	// DequeueReady leases up to `limit` ready items (status IN (ready,waiting_retry) AND
 	// now>=not_before) via FOR UPDATE SKIP LOCKED, in group-by-domain order (§6.2), setting
@@ -739,6 +839,13 @@ type Store interface {
 	// complete, duplicates included. SCOPED TO ITS OWNER: a job owned by another caller returns
 	// ErrNotWired, exactly as a nonexistent one does.
 	JobCompletion(ctx context.Context, jobID, ownerUserID string) (complete bool, total, settled int, err error)
+
+	// JobStatusSnapshot reads everything GET /v1/jobs/{id} reports in ONE consistent read (0019, owner ruling OD-6/OD-8): the job row, whether it
+	// is complete (NOT EXISTS a non-terminal work item, as JobCompletion judges it) and its JobTotals. One statement on Postgres, one lock
+	// acquisition on the in-memory store, so the identities of JobTotals (Submitted = Settled + Pending, Settled = sum(ByStatus)) hold whatever
+	// the drainer settles meanwhile; it is never assembled from two reads. SCOPED TO ITS OWNER exactly like GetJob: known=false covers both "no
+	// such job" and "not yours".
+	JobStatusSnapshot(ctx context.Context, jobID, ownerUserID string) (snap JobSnapshot, known bool, err error)
 
 	// ListJobResults returns the input rows of a job that have an outcome — rows whose work item is
 	// settled|dead, plus malformed rows — joined to their verdicts, ORDERED BY ORDINAL and
@@ -878,6 +985,16 @@ func (StubStore) GetNodeHealth(context.Context, string) (NodeHealth, bool, error
 }
 func (StubStore) UpsertNodeState(context.Context, string, string, string, bool) error {
 	return ErrNotWired
+}
+func (StubStore) RegisterNode(context.Context, string, string) error { return ErrNotWired }
+func (StubStore) SettleProvisioningNode(context.Context, string, string, bool) (bool, error) {
+	return false, ErrNotWired
+}
+func (StubStore) RecordKeyedJob(context.Context, KeyedJobRecord, int) (KeyedJobOutcome, error) {
+	return KeyedJobOutcome{}, ErrNotWired
+}
+func (StubStore) JobStatusSnapshot(context.Context, string, string) (JobSnapshot, bool, error) {
+	return JobSnapshot{}, false, ErrNotWired
 }
 func (StubStore) ReserveWarmupSlot(context.Context, string, time.Time, int) (WarmupDecision, error) {
 	return WarmupDecision{}, ErrNotWired

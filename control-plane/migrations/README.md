@@ -27,6 +27,7 @@
 | `0017_schema_migrations.sql` | Owner ruling "M1 migration tracker" ([`../../Docs/future-work.md`](../../Docs/future-work.md) FW-3) | Creates **`verify.schema_migrations`** (`version`, `checksum`, `how`, `applied_at`, `applied_by`), owned by `verify_owner`; `verify_app` holds nothing on it, `verify_admin` may `SELECT`. Idempotent and harmless under the old psql loop; it fails naming `0016` if `0016` has not run. The runner fills it. See "The runner and the tracker" below. |
 
 | `0018_per_job_dedup.sql` | Owner rulings A1 (per-item identity on bulk) and A2 (dedup scope); research gaps M1-G1, M1-G2. See [`../../Docs/bulk-item-identity.md`](../../Docs/bulk-item-identity.md) | Creates **`verify.job_rows`** (one row per INPUT row of a bulk job: `(job_id, ordinal)` PK, optional `item_id` unique per job, `work_item_id`, `duplicate_of_ordinal` (the first row with the same address), `malformed` with `verification_id` (the row's own `invalid_syntax` LOG row); CHECKs, NULL-safe: `ordinal >= 0`, a malformed row has a `verification_id` and no work item and every other row the reverse, `duplicate_of_ordinal` is below the ordinal and never on a malformed row, `item_id` 1..200 bytes; no address and no hash), owned by `verify_owner`; `verify_app` holds `SELECT, INSERT` only, `verify_admin` `ALL`. **Backfills** one row per work item for every job that has none yet (legacy jobs keep serving results). Replaces the **global** `UNIQUE` on `work_items.idempotency_key` (`work_items_idempotency_key_key`, from `0009`) by uniqueness **per job**: partial unique index `uq_work_items_job_idem (job_id, idempotency_key) WHERE job_id IS NOT NULL` and `uq_work_items_unjobbed_idem (idempotency_key) WHERE job_id IS NULL` (a job-less check keeps its old semantics). Idempotent; refuses (SQLSTATE `55000`) where `0009`/`0016` have not run; ends with a self-check that no global unique index on the key survives. Adds **no** `REVOKE`. See "Since 0018" below. |
+| `0019_idempotent_jobs_and_node_promotion.sql` | Owner rulings OD-6/OD-8 (partial Tier 4: an idempotent bulk create) and OD-4 (node self-promotion). See [`../../Docs/api-contract.md`](../../Docs/api-contract.md) "Idempotent bulk create" and [`../../Docs/install-and-deploy.md`](../../Docs/install-and-deploy.md) §3.2 d.4 | **Additive only.** `verify.jobs` gains three NULLable columns (`idem_caller_id`, `idempotency_key`, `request_fingerprint`), a NULL-safe CHECK `jobs_idempotency_shape` (all three or none; the key is 1..128 characters of `[A-Za-z0-9._:-]`; the fingerprint 32 bytes) and the **partial unique index** `uq_jobs_caller_idempotency_key (idem_caller_id, idempotency_key) WHERE idempotency_key IS NOT NULL`; every existing job, and every job created without the header, has all three NULL. `verify.nodes` gains `registered_at timestamptz` and `promoted_by_audit_id uuid` (both NULL on a node never registered by this code). No new privilege (the table-level grants of `0007`/`0009` cover the new columns) and no `REVOKE`. Idempotent (`ADD COLUMN IF NOT EXISTS`, the CHECK added once, `CREATE UNIQUE INDEX IF NOT EXISTS`); refuses (SQLSTATE `55000`) where `0009`/`0016`/`0018` have not run; ends with a self-check. See "Since 0019" below. |
 
 Rows `0005`–`0015` describe those files as they were written, so they still say `cp_runtime` / `cp_admin` and unqualified table names; `0016` is what renames the roles and moves the tables.
 
@@ -79,6 +80,19 @@ Two rulings, one migration (details and the API contract: [`../../Docs/bulk-item
   `work_items` takes a lock that blocks writes while it builds.
 * **Privileges.** `verify_app` gets exactly `SELECT` and `INSERT` on `job_rows` (the code appends rows and reads them; nothing updates
   or deletes them). `0018` adds no `REVOKE`, so the counts in "Since 0016" and "No Down Migrations" are unchanged.
+
+## Since 0019: an idempotency key on jobs, and the columns of node self-promotion
+
+* **`verify.jobs`** gains `idem_caller_id`, `idempotency_key` and `request_fingerprint`. A caller of `POST /v1/verify/bulk` may send an
+  `Idempotency-Key`; the job it creates carries the authenticated caller, the key and a digest of the canonical request, and the partial unique
+  index makes two requests with one key create **one** job (the second `INSERT ... ON CONFLICT DO NOTHING` waits for the first transaction
+  and then selects the original). The 202's numbers are reproduced from `verify.job_rows`, which is append-only, so nothing more is stored. A job
+  with no key has all three columns NULL and takes no index entry. A **keyed** job is written, work items included, in ONE transaction.
+* **`verify.nodes`** gains `registered_at` (the database clock at the boot's `RegisterNode`) and `promoted_by_audit_id`. Only an audit row with
+  `node_audits.created_at > nodes.registered_at` can promote the node, and the promotion is a single `UPDATE ... FROM verify.node_audits` that also
+  sets `port25_open` from that audit and writes the audit's id. `verify_app` already holds `INSERT, UPDATE` on `nodes` and `SELECT, INSERT` on
+  `node_audits`, so no grant changes.
+* Nothing is backfilled and nothing is rewritten. Replaying the file is a no-op (the old psql loop may apply it twice).
 
 ## The runner and the tracker (since 0017)
 

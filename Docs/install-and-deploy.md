@@ -1,7 +1,7 @@
 # Install and deploy — from a clean checkout to a running system
 
 **Status:** LIVE. Commands, env var names, ports and counts were checked against the code on
-2026-11-13 (control-plane default listen `:8080`, node `:3000`); the migration count (18), the database roles and the migration runner were brought up to migration `0018` on 2026-11-17 (the runner: `0017`, 2026-11-16; roles: `0016`, 2026-11-15). Read
+2026-11-13 (control-plane default listen `:8080`, node `:3000`); the migration count (19), the database roles and the migration runner were brought up to migration `0019` on 2026-11-18 (the runner: `0017`, 2026-11-16; roles: `0016`, 2026-11-15). Read
 [`architecture.md`](architecture.md) first for what you are installing; operate it with
 [`operator-runbook.md`](operator-runbook.md); follow the ordered, status-marked path to live in
 [`go-live-checklist.md`](go-live-checklist.md). The deep per-phase design is in [`history/`](history/).
@@ -34,7 +34,7 @@ go vet ./...
 
 # A throwaway Postgres for the store + append-only integration tests:
 docker run -d --name cp-pg -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=cptest -p 5432:5432 postgres:16-alpine
-# Apply every migration (0001 … 0018) with the runner: once each, in order, recorded in verify.schema_migrations; a second run is a no-op.
+# Apply every migration (0001 … 0019) with the runner: once each, in order, recorded in verify.schema_migrations; a second run is a no-op.
 # TM_MIGRATE_DATABASE_URL is the MIGRATING identity (here the superuser), never the runtime verify_app. See migrations/README.md "The runner and the tracker".
 TM_MIGRATE_DATABASE_URL='postgres://postgres:dev@localhost:5432/cptest' go run ./cmd/migrate status
 TM_MIGRATE_DATABASE_URL='postgres://postgres:dev@localhost:5432/cptest' go run ./cmd/migrate up
@@ -157,7 +157,7 @@ see [`security-posture.md`](security-posture.md) §2):
 A template with every secret and non-secret knob is `control-plane/config/secrets.example.env`; the full
 list of every dial and flag is [`config-reference.md`](config-reference.md) (generated).
 
-Apply the migrations with the runner (`go run ./cmd/migrate up`, §2: all of `0001` … `0018`, once each, in order; `TM_MIGRATE_DATABASE_URL` is the migrating identity and `TM_MIGRATIONS_DIR` the directory, default `migrations`), then start the control-plane. A plain `psql` loop is valid only on an empty database and records nothing; the runner adopts such a database on its first run ([`operator-runbook.md`](operator-runbook.md) §9.6).
+Apply the migrations with the runner (`go run ./cmd/migrate up`, §2: all of `0001` … `0019`, once each, in order; `TM_MIGRATE_DATABASE_URL` is the migrating identity and `TM_MIGRATIONS_DIR` the directory, default `migrations`), then start the control-plane. A plain `psql` loop is valid only on an empty database and records nothing; the runner adopts such a database on its first run ([`operator-runbook.md`](operator-runbook.md) §9.6).
 
 **The runtime login (since `0016`).** The migrations create module 1's tables in schema `verify`, owned by the no-login role `verify_owner`, and make `verify_app` a `LOGIN` role holding only the runtime privileges. Give it a password **out of band** (never in a migration) and point `TM_DATABASE_URL` at it:
 
@@ -237,23 +237,55 @@ or the system default — replacing the mock ports.
 **d. The ordered, config-only flip — audit BEFORE traffic, the order is safety-critical.** Zero control-plane
 code changes.
 
-1. **Egress-25 smoke test, then set the node's `port25_open=true`.** ⚠ There is no operator/env/admin command
-   for this yet ([`future-work.md`](future-work.md) FW-2). Interim, as `verify_admin` (`SET ROLE verify_admin` from a session that may; the role has no login):
-   `UPDATE verify.nodes SET port25_open=true WHERE id='…'`. Until it is true the node is not `:smtp`-eligible.
+1. **Egress-25 smoke test (an acceptance check; no database write).** Prove outbound port 25 from the box (V1 above) before you
+   turn traffic on. Nobody sets `port25_open` by hand any more: since migration `0019` the control plane writes it **from the
+   node's own audit**, in the same statement that promotes the node (step 4). A green audit does **not** probe port 25 (it checks
+   the public IP lookup, the A record, the PTR and the resolver, below), so V1 stays the operator's proof of egress; the runtime
+   backstops are the warm-up cap and the block-rate watcher ([§5 of the runbook](operator-runbook.md)).
 2. **Point the box at real config** (`SMTP_PORT=25`, real `DNS`) and `POST /v1/config/reload` → a new
    `config_fingerprint` (which naturally invalidates a mock-era cache).
 3. **Set the brain's node descriptor:** `TM_NODE_ID`, `TM_NODE_BASE_URL=<private-network address>`,
    `TM_NODE_PUBLIC_EGRESS_IP=<public egress IP>` (**must equal V5**), `TM_NODE_ENABLED=true`,
    `TM_SMTP_MODE=enabled`, and the node's token in `TM_NODE_TOKENS` (`<id>=<token>`). Node #2 is a numbered
    block, `TM_NODE_2_ID`, `TM_NODE_2_BASE_URL`, `TM_NODE_2_ENABLED`, `TM_NODE_2_PUBLIC_EGRESS_IP` — no code change.
-4. **First audit → require green.** The node promotes `provisioning → active` **only** if the audit is green ∧
-   `port25_open` ∧ the audit's `current_host_ip == TM_NODE_PUBLIC_EGRESS_IP`. A green on the wrong IP will not
-   promote (ADR-0009) — look for the `egress-IP != audited current_host_ip (GAP-24)` warning.
+4. **First audit → the node promotes itself (no SQL; owner ruling OD-4, migration `0019`).** At every boot the control plane
+   registers each enabled node as `provisioning`, `port25_open=false`, with `registered_at` = the database clock; it never trusts
+   a status an earlier process left behind. The health watcher then audits **at once** (its first cycle is immediate, then every
+   `TM_WATCHER_CADENCE_SECONDS`, default 45) and promotes `provisioning → active` **only** when ALL of these hold: the audit
+   fetched is **green** (`warnings` empty and a non-empty `current_host_ip`); its `current_host_ip == TM_NODE_PUBLIC_EGRESS_IP`
+   (a green on the wrong IP never promotes, ADR-0009: look for the `egress-IP != audited current_host_ip (GAP-24)` warning); the
+   node answers its liveness probe; and the audit row was recorded **after** this boot's registration (an earlier boot's green
+   row never promotes a re-registered node). The promotion is **one statement** that sets `status='active'`, takes
+   `port25_open` from that audit (true) and writes the audit row's id to `verify.nodes.promoted_by_audit_id`. A **red** audit
+   leaves the node `provisioning` (it is *not* quarantined: it was never serving) with `port25_open=false`; the next green one
+   promotes it. A **restart** re-registers, re-audits and re-promotes by itself. The log line is
+   `health: node=<id> provisioning->active (audit_promote, audit=<audit id>, auto)`. With `TM_WATCHER_CADENCE_SECONDS=0` there is
+   exactly ONE audit at boot: a node that is not up for that pass stays `provisioning` until the next restart, so run production
+   with a non-zero cadence.
 5. **Start the warmup cap low:** `TM_WARMUP_DAILY_CAP=50` on day 1; step up only on prior-day low `smtp_blocked`
    and a green audit. The cap counts *verifications*; a catch-all check is about two connections — size against
    connections.
 6. **Confirm real verdicts flow** with a non-null `verifier_ip` equal to the egress IP, and a real `node_id`,
    `engine_version` and `config_fingerprint`.
+
+**What a green node audit needs from its environment** (the checks `GET /v1/audit` runs, read from truemail 3.3.1's `host_audit`
+and the wrapper; an environment that cannot satisfy one has a node that never promotes, and an integration harness satisfies them
+with fixtures, never with SQL). **Green means `warnings == {}` and a non-empty `current_host_ip`**; each line below is one way to be red:
+
+| # | The audit needs | Red when | Warning key |
+|---|---|---|---|
+| 1 | the node can make an outbound **HTTPS** request to `https://api.ipify.org` (resolved through the node's operating-system resolver, the certificate verified against the node's trust store); the response body, with no trailing newline, is the node's public IP and becomes `current_host_ip` | the request fails, or the body is empty: `current_host_ip` is empty, which the control plane reads as red | (IP) |
+| 2 | the **A record** of `VERIFIER_DOMAIN`, resolved by truemail's resolver (the node's `DNS` setting, else `resolv.conf`), equals that IP | it differs or is missing | `dns` |
+| 3 | a **PTR record** for that IP exists and names `VERIFIER_DOMAIN` exactly | it is missing or names another host | `ptr` |
+| 4 | a **clean resolver** (ADR-0019 addendum): no `search` or `domain` line in `resolv.conf`, no `ndots` above 1, a hostname with no dot | any of the three | `resolver` |
+| 5 | the **probe-destination guard is on**: `PROBE_ALLOW_NON_PUBLIC` unset (ADR-0021) | it is set | `probe_guard` |
+
+And on the control plane, for the audit to promote the node: `TM_SMTP_MODE=enabled`, `TM_NODE_ENABLED=true`, the node's token in
+`TM_NODE_TOKENS`, a boot-time `GET /v1/config` of the node that succeeded (otherwise the process runs cheap-layers-only for its
+whole life and never audits), `TM_NODE_PUBLIC_EGRESS_IP` equal to the IP of row 1 (GAP-24), the node answering `/healthcheck`, and a
+non-zero `TM_WATCHER_CADENCE_SECONDS`. A router eligibility check runs on every request after promotion and additionally needs the
+audit to be younger than `TM_AUDIT_MAX_AGE_SECONDS` (default 7200: keep it above the cadence). Held by `TestPromotion_*` (both
+directions, with the green case as the control of every refusal) and, on Postgres, `TestSettleProvisioningNode_*`.
 
 **Reversible:** `TM_NODE_ENABLED=false` or `TM_SMTP_MODE=disabled` returns to cheap verdicts with no redeploy and
 no lost history. Those cheap verdicts say so: every residue address settles `risky` / `plausible` with

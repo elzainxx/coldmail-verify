@@ -287,7 +287,10 @@ func (o *Orchestrator) compute(ctx context.Context, rawEmail string, def *policy
 		return computed{}, err
 	}
 	emailHash := o.hasher.EmailHash(normalized)
-	localPart := normalized[:indexAt(normalized)]
+	// The ONE split of a normalised address into the local part a layer judges (hash.SplitNormalized): the shared vector file's
+	// syntax_ok expectations go through the same function. The domain stays the second value Normalize returned, which the
+	// vector test proves equal to the split's.
+	localPart, _ := hash.SplitNormalized(normalized)
 
 	// 1b. Phase-7 HISTORICAL-BOUNCE GATE (§4.6), the ONE new P7 gate. If this address has ≥N confirmed
 	//     invalid-signal (mailbox_not_found) bounces on record within the TTL, short-circuit to
@@ -721,15 +724,6 @@ func confidenceForReject(def *policy.Definition) int {
 		return v
 	}
 	return 99
-}
-
-func indexAt(s string) int {
-	for i := len(s) - 1; i >= 0; i-- {
-		if s[i] == '@' {
-			return i
-		}
-	}
-	return 0
 }
 
 // mustID returns a bare UUIDv7 string for request_id. It must be a plain UUID (no prefix):

@@ -52,6 +52,15 @@ type MemStore struct {
 	jobRows   map[string][]JobRowEntry
 	attempts  []WorkItemAttemptRow
 
+	// 0019 — idempotent jobs: keyedJobs maps callerID + "\x00" + Idempotency-Key -> the job it created and the fingerprint of its request (the unique
+	// index uq_jobs_caller_idempotency_key of Postgres). Node self-promotion: seq is a logical clock (one tick per registration and per audit row),
+	// regSeq the tick of a node's last RegisterNode (Postgres: nodes.registered_at) and auditSeq the tick of each audit row (node_audits.created_at),
+	// so "recorded AFTER the registration" is a comparison of ticks here and of the database's clock there.
+	keyedJobs map[string]keyedJob
+	seq       int64
+	regSeq    map[string]int64
+	auditSeq  map[string]int64
+
 	// Phase 6 (§5/§6) — the append-only external-verifier call log (spend + provenance). Tests read
 	// it to assert spend-once (exactly one row per settled escalation, even under a reclaim).
 	ExternalCalls []ExternalCallRow
@@ -109,6 +118,9 @@ func NewMem(now func() time.Time) *MemStore {
 		idemKeys:     map[string]string{},
 		jobs:         map[string]JobRow{},
 		jobRows:      map[string][]JobRowEntry{},
+		keyedJobs:    map[string]keyedJob{},
+		regSeq:       map[string]int64{},
+		auditSeq:     map[string]int64{},
 		outcomeDedup: map[string]struct{}{},
 		cursors:      map[string]string{},
 	}
@@ -285,6 +297,8 @@ func (m *MemStore) AppendNodeAudit(_ context.Context, row NodeAuditRow) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.NodeAudits = append(m.NodeAudits, row)
+	m.seq++
+	m.auditSeq[row.ID] = m.seq // the row's place in time, for "recorded after the registration" (0019)
 	if _, ok := m.registered[row.NodeID]; !ok {
 		return nil // no `nodes` row → summary UPDATE is a no-op (mirrors PG's WHERE id=$1 matching 0)
 	}
@@ -531,6 +545,12 @@ func (m *MemStore) RecordJob(_ context.Context, job JobRow, rows []JobRowEntry, 
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.recordJobLocked(job, rows, rejects)
+}
+
+// recordJobLocked is the body of RecordJob, with m.mu held: every check runs before anything is stored, so a refusal leaves nothing behind. It is
+// shared with RecordKeyedJob so the keyed path cannot be laxer than the unkeyed one.
+func (m *MemStore) recordJobLocked(job JobRow, rows []JobRowEntry, rejects []VerificationRow) error {
 	if _, exists := m.jobs[job.ID]; exists {
 		return fmt.Errorf("store: record job: job %s already exists (jobs_pkey)", job.ID)
 	}

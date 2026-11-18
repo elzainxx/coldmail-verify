@@ -40,9 +40,10 @@ Every route this module serves. `{id}` is a ServeMux wildcard.
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | `POST` | `/v1/verify` | per-caller key **or** legacy static token | Verify one address synchronously; returns the Door-1 v1 response (P1 §3.1.3) |
-| `POST` | `/v1/verify/bulk` | per-caller key **required** (PN-13) | Submit a bulk job as `addresses` **or** `items` (each row with a caller `item_id`); returns a job handle (§7). Row identity and dedup scope: [`bulk-item-identity.md`](bulk-item-identity.md) |
-| `GET` | `/v1/jobs/{id}` | per-caller key **required** (PN-13) | Job progress counts **over input rows** (`pending` reaches 0 when complete), scoped to the owning caller (D1 tenancy) |
-| `GET` | `/v1/jobs/{id}/results` | per-caller key **required** (PN-13) | One result per input row that has an outcome, **ordered by `ordinal`**, cursor-paginated (cursor = the last row returned); each is the `/v1/verify` object plus `ordinal` and `item_id` |
+| `POST` | `/v1/verify/bulk` | per-caller key **required** (PN-13) | Submit a bulk job as `addresses` **or** `items` (each row with a caller `item_id`); returns a job handle (§7). **Idempotent on an optional `Idempotency-Key` header** (below). Row identity and dedup scope: [`bulk-item-identity.md`](bulk-item-identity.md) |
+| `GET` | `/v1/jobs/{id}` | per-caller key **required** (PN-13) | Job progress counts **over input rows** (`pending` reaches 0 when complete) and the job's **`totals`** (below), from one consistent read, scoped to the owning caller (D1 tenancy). `{id}` must be a UUID (else 400) |
+| `GET` | `/v1/jobs/{id}/results` | per-caller key **required** (PN-13) | One result per input row that has an outcome, **ordered by `ordinal`**, cursor-paginated (cursor = the last row returned); each is the `/v1/verify` object plus `ordinal` and `item_id`. **Stable once `complete` is true** (below). `{id}` must be a UUID (else 400) |
+| `GET` | `/v1/describe` | per-caller key **required** | The module's self-description in the shape family of modules 2 and 3 (below): routes, schemas, vocabularies read from the code's own constants, error codes |
 | `GET` | `/healthz` | none | Liveness: the process is up. Additive `at` timestamp (item 10) |
 | `GET` | `/readyz` | none | Readiness with secret PRESENCE only, never values. 503 `not_ready` unless `pepper`, `db` and (once declared) `queue` are all true; a not-ready queue adds `reasons` (below) |
 
@@ -57,6 +58,106 @@ address is several malformed rows, never a duplicate. Identical addresses **with
 result; **nothing is deduplicated across jobs or tenants**. Read results after `complete` is `true`. The whole contract, with
 examples, is [`bulk-item-identity.md`](bulk-item-identity.md); the pagination property is held by a walk over several page sizes
 that must return every ordinal exactly once, with paired controls (a look-ahead cursor, an unsorted listing).
+
+### Idempotent bulk create: `Idempotency-Key` (partial Tier 4, owner rulings OD-6 / OD-8; migration 0019)
+
+`POST /v1/verify/bulk` takes an OPTIONAL request header `Idempotency-Key: <key>`. **Without it nothing changes**: every POST makes its own
+job exactly as before (a retried POST is a second job), the 202 has the same six keys and no new header, and nothing is stored about
+idempotency (proved byte for byte by `TestBulkIdempotency_NoHeaderIsTodaysBehaviour_ByteForByte` and, at the store, by
+`TestUnkeyedJobsCarryNoIdempotencyRecord`).
+
+| Property | Rule |
+|---|---|
+| The key | one header value of **1 to 128 characters of `[A-Za-z0-9._:-]`**. Anything else (empty, a space, another character, 129 characters, the header given twice) is `400 validation_failed` with `details: [{"field":"Idempotency-Key","issue":"malformed"}]`, judged after authentication and **before the body is read**; nothing is created |
+| The scope | the key is scoped to the **authenticated caller** (the `caller_id` of the bearer key, never anything in the body). The same key from another caller is another job; one caller's key is invisible to another |
+| A repeat of the same request | returns the **original job**: `202`, the **same body byte for byte** (`job_id`, `counts`, `malformed_rows`, `malformed_rows_truncated`; `processing_paused` stays the live value), plus the response header **`Idempotent-Replayed: true`**. No second job, no second set of work items, no second set of LOG rows. A first answer, and any answer without a key, carries no such header. It stays a replay after the job has completed |
+| The same key with a different request | `409` with the envelope and the code **`idempotency_key_reused`**, `details: [{"field":"Idempotency-Key","issue":"conflict"}]`. Nothing is created and the other job's id is not disclosed. The key still names the original job |
+| Two requests with one key at once | create exactly **one** job: a unique index on `(caller, key)` makes the second request wait for the first transaction and then be a replay (or, if the first failed, create the job itself). A request that fails creates nothing and does **not** consume the key, so it can be retried |
+| What is stored | the key, the caller and a 32-byte fingerprint of the canonical request on the job row (columns `idem_caller_id`, `idempotency_key`, `request_fingerprint`). The 202's numbers are reproduced from the job's own rows (`job_rows` is append-only), so a replay equals the first answer. The fingerprint holds no address and no unkeyed hash of one (Door 3): it digests the keyed email hash |
+| Retention | a key lives as long as its job row; there is no expiry |
+| A keyed job is created atomically | the job, its rows, the malformed rows' LOG rows **and its work items** commit in ONE transaction, so a repeat can never meet a half-made job. (An unkeyed job is still written in two steps, as before.) |
+
+**What "the same request" means (the canonical request).** After JSON decoding and norm/v1: the **effective policy** (an omitted
+`policy` and `"cold-email"` are one), the `caller_ref`, the owner (from the key), the number of rows and, per row in order, its
+`item_id` and its **normalised** address. So whitespace and key order of the JSON, and the case or surrounding spaces of an address,
+do not matter; a different address, a different or missing label, a different order, one more or fewer row, a different
+`caller_ref`, or the `addresses` shape against the `items` shape, make it **another request** (409). A **malformed** row is identified
+by its position and label only (its content does not change what the job holds, an `invalid_syntax` row), so two requests that differ
+only in the garbage of a malformed row are the same request. The config fingerprint and the policy version are **not** part of it, so a
+retry after a deploy is still a replay.
+
+Held by `TestBulkIdempotency_*` (HTTP), `TestSubmitBulkRowsKeyed_*` (the enqueuer, on both stores), `TestRecordKeyedJob_*` (both stores)
+and, on Postgres only, `TestPGKeyedJobs_*` (the CHECK and the unique index; the forced interleave in which both database backends are
+proved in flight and the second waits on the first's key, with a paired control of two different keys that make two jobs).
+
+### Job totals: `totals` on `GET /v1/jobs/{id}` (partial Tier 4; migration-free)
+
+The status gains one additive object, **`totals`**, over the job's **input rows**:
+
+```json
+{"job_id": "019a…", "status": "running", "complete": false, "caller_ref": "platform-job-42",
+ "counts": {"total": 8, "settled": 5, "pending": 3},
+ "totals": {"submitted": 8, "settled": 5, "pending": 3, "duplicates": 2, "malformed": 2,
+            "by_status": {"valid": 1, "invalid": 3, "risky": 1, "unknown": 0}},
+ "processing_paused": false}
+```
+
+| Field | Exactly |
+|---|---|
+| `submitted` | the number of input rows the job recorded, malformed and duplicate rows included. It equals `counts.total` for every job submitted since migration 0018 and equals the 202's `counts.total`; for an older job `counts.total` keeps the old figure and `submitted` is the number of rows that exist (one per work item) |
+| `settled` | the rows that **have an outcome**: every malformed row (its `invalid`/`invalid_syntax` LOG row exists from the 202), plus every row whose work item is `settled` or `dead` (a duplicate row settles with the row it repeats). It is exactly the number of elements `GET /v1/jobs/{id}/results` serves at that instant, and equals `counts.settled` |
+| `pending` | `submitted − settled` (equals `counts.pending` for a job submitted since 0018) |
+| `duplicates` | the rows that repeat an **earlier** row's normalised address in this job (the rows that carry `duplicate_of`), counted from submission, settled or not. Equals the 202's `counts.duplicate` |
+| `malformed` | the rows whose address did not normalise, counted from submission, settled by construction. Equals the 202's `counts.malformed` |
+| `by_status` | the **settled** rows counted by verdict `status`; **always the four keys** `valid`, `invalid`, `risky`, `unknown` (zero included), the vocabulary the code owns (`describe`: `vocabularies.status`). A malformed row counts as `invalid`; a duplicate row counts under its first row's verdict |
+
+**The identities, true in every response, in flight and after completion:** `submitted = settled + pending`, and
+`sum(by_status) = settled`. They hold because `complete`, `counts` and `totals` all come from **one consistent read** (one SQL
+statement on Postgres, one lock acquisition in memory), never from two reads the drainer could separate; the handler also refuses to
+serve numbers that break them (`contract_violation`). After completion `pending = 0`, `settled = submitted`, the results are the whole listing and
+each of `by_status`, `duplicates`, `malformed` equals the count of the same thing across the results row by row
+(`TestJobStatus_TotalsEqualTheResultsRowByRow_InFlightAndAfterCompletion`, with a paired control per kind of wrong count, and
+`TestJobStatusSnapshot_*` at the store). A job in flight has `pending > 0` and still satisfies them.
+
+### When the listing of a job's results is stable
+
+`GET /v1/jobs/{id}/results` is a **stable listing from the moment the status route answers `complete: true`**: the elements, their
+order (`ordinal`), every verdict and every byte are then immutable (a settled or dead work item never changes, the LOG rows and
+`job_rows` are append-only), so two full walks, with any page size, return **identical** results
+(`TestJobResults_TheListingIsStableOnceTheJobIsComplete`). For a job submitted since 0018 `complete: true` also means
+`totals.pending == 0` and the listing holds exactly `totals.submitted` elements, each ordinal once. **While the job runs it is not
+stable**: a row that settles later at an ordinal below a cursor already issued is never revisited by that walk, and
+`next_cursor: ""` means "nothing further *as the listing stands now*", not "the job is done". Read the results after `complete` is
+`true`. (A job submitted before 0018 can be `complete` with `pending > 0`, because its old `total` can exceed its rows; its listing is
+stable all the same.)
+
+### Job ids and the results cursor are validated, not guessed (close-out A3)
+
+A `{id}` that is not a UUID (its canonical 8-4-4-4-12 form, hex digits of either case) is **`400 validation_failed`** with
+`details: [{"field":"id","issue":"malformed"}]` on **both** routes that take one, `GET /v1/jobs/{id}` and
+`GET /v1/jobs/{id}/results`, after authentication and **before the database is touched** (it used to reach Postgres and come back as a
+`500 internal_error`). A well-formed id that names no job, or another caller's job, is still the `404 not_found` of tenancy, and a
+known id works (`TestJobRoutes_ANonUUIDJobIDIs400WithTheEnvelope_AndNeverReachesTheStore`, one case per route, with those controls).
+A results `cursor` that is not one this service issued was already, and stays, `400 validation_failed` on field `cursor`
+(`TestJobResults_AGarbageCursorIsA400NotA500`); it is checked after the tenancy 404.
+
+### `GET /v1/describe` (partial Tier 4)
+
+Authenticated like the bulk and job routes (a **per-caller key**; the legacy static token is refused, 401). It reads no database and holds no
+secret. The body is in the shape family of modules 2 and 3:
+
+| Key | Content |
+|---|---|
+| `module`, `api_version` | `"verify"`, and `"v1"` derived from the served `/v1` routes (never typed; a table whose versioned routes disagree names none) |
+| `capabilities` | `sync_verify`, `bulk_verify`, `idempotent_bulk_create`, `job_totals`: `true`; `quote`, `run`, `report`: `false` (no verb parity was built; what is charged depends on the answer, so module 1 has nothing to quote) |
+| `routes[]` | every served route, **derived from the same table the router serves**: `{id, method, path, auth, description, request_schema_ref?, response_schema_ref?}`; `auth` is `per_caller_key`, `per_caller_key_or_legacy_token` or `none`. A served route cannot be undescribed and a described route cannot be unserved (`TestDescribe_EveryServedRouteIsDescribedAndNothingElse`, both directions, each with a paired control) |
+| `schemas` | JSON-schema-like fragments of every request and response body; where a value set exists the schema says `vocabulary: <name>` instead of repeating it. Held against **real responses** of the real handlers by `TestDescribe_SchemasMatchRealResponses` |
+| `vocabularies{}` | `{name: {source: "module_constant", values[], fields[]}}` for `status`, `reason`, `recommendation`, `failure_origin`, `smtp_skipped_reason`, `job_status`, `submit_status` and `detail_issue`. **Every value list is built from the code's own constants** (`internal/vocab`, the issue slugs of `errors.go`), never retyped; `TestDescribe_VocabulariesAndErrorCodesEqualTheCodesOwn` compares the endpoint with them and has a paired control (a value removed from the describe source turns it red). The node lifecycle (`provisioning`/`active`/…) is deliberately **not** published: it never appears in a response, and the two-vocabulary rule keeps mechanics out of the caller's view |
+| `error_codes[]` | `[{code, http_status}]` sorted by status then code, **derived from `codeStatus`**, the map the error serializer resolves a status from, so it can neither omit an emittable code nor invent one. The fixed message is not published |
+| `idempotency` | the contract above in machine form: the header, its pattern, the scope, the replay response header and the code a reused key answers with |
+
+The body holds no secret (`TestDescribe_HoldsNoSecret` wires run-time-generated canaries for every secret the server holds and scans the
+body, with a control that finds a planted one).
 
 **`/readyz` body.** `status` (`ready`/`not_ready`), `ready` (bool, the same answer), `checks{}` (booleans: `pepper`,
 `db`, and `queue` on a process whose boot reached the queue wiring), `at`, and the older `config`, `pepper`,
@@ -151,7 +252,7 @@ all-rows-bad check — which left every single-row case green and only
 - **No `/metrics`.** `internal/metrics` computes block/unknown/cache rates and latency percentiles
   with no HTTP exposure. That is fix-plan item 15b, open, and listed here so its absence reads as a
   known gap rather than an oversight.
-- **No platform-facing admin surface.** M1's Tier 4 platform routes were declined; see
+- **No platform-facing admin surface, and no `quote` / `run` / `report`.** M1 serves a **partial** Tier 4 (owner rulings OD-6 / OD-8, 2026-11-18): `describe`, an idempotent bulk create and `totals` on the job status, all above; the full verb parity was declined (what is charged depends on the answer, so a quote would be an estimate); see
   `../../coldmail-platform/alignment-fix-plan.md`.
 
 ---
@@ -174,9 +275,10 @@ the one log line an operator greps all name the same id.
 | Code | Status | Means |
 |---|---|---|
 | `unauthenticated` | 401 | Missing or invalid credentials |
-| `validation_failed` | 400 | A field is missing, malformed, or out of range. `details[].issue` is one of `required`, `malformed`, `out_of_range`, `not_found`, and (bulk, 0018) `conflict` (both `addresses` and `items` given) and `duplicate` (a repeated `item_id`; the field is `items[N].item_id`) |
+| `validation_failed` | 400 | A field is missing, malformed, or out of range. `details[].issue` is one of `required`, `malformed`, `out_of_range`, `not_found`, and (bulk, 0018) `conflict` (both `addresses` and `items` given) and `duplicate` (a repeated `item_id`; the field is `items[N].item_id`). Since 0019 it is also the answer to a job id that is not a UUID (field `id`, issue `malformed`) and to a bad `Idempotency-Key` header (field `Idempotency-Key`, issue `malformed`) |
 | `not_found` | 404 | No such resource — **or** it belongs to another caller (tenancy scoping, D1: the two are indistinguishable on purpose) |
 | `method_not_allowed` | 405 | A real path, a verb it does not serve |
+| `idempotency_key_reused` | 409 | (0019) The `Idempotency-Key` of `POST /v1/verify/bulk` was already used, by this caller, for a **different** request. Nothing was created. A repeat of the *same* request is not an error: it is a 202 with `Idempotent-Replayed: true`. M1-only (the senders have no key on a create) |
 | `payload_too_large` | 413 | Over the §7.5 submission cap |
 | `unavailable` | 503 | This deployment is not wired (no pepper, no reachable DB) — page someone |
 | `paused` | 503 | An operator pulled kill-switch Rung 4 — retry later, page nobody |

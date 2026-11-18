@@ -248,7 +248,7 @@ Regenerate on any manifest change; CI verifies this file is up to date
 | fleet-wide detection threshold | ≥50% active nodes ELEVATED (not just tripped) same window | P4 §5.5 |
 | elevated-fraction (staggered-spike guard) | 0.6 × QuarThreshold ("climbing") counts toward the fleet signal | P4 §5.5, GAP-28 |
 | alert thresholds/channels (quarantine, block-spike, audit-red, pool-eligible-low, rate-saturation) | set per §8.2 | P4 §8.2 |
-| `TM_WATCHER_CADENCE_SECONDS` (control-loop `T`) | 45 (0 ⇒ one pass at boot, no loop) | P4 §5.1, OQ-P4-13 |
+| `TM_WATCHER_CADENCE_SECONDS` (control-loop `T`) | 45 (0 ⇒ one pass at boot, no loop; **since 0019 that single pass is also a provisioning node's only chance to self-promote until the next restart**, so production runs it non-zero) | P4 §5.1, OQ-P4-13, OD-4 |
 | `TM_BLOCK_RATE_WINDOW_SECONDS` (rolling block-rate window) | 1800 (30 min) | P4 §5.2, OQ-P4-13 |
 | `TM_BLOCK_MIN_SAMPLES` (sample gate) | 20 (zero-disallowed) | P4 §5.3, GAP-27 |
 | `TM_BLOCK_QUAR_THRESHOLD_PCT` (quarantine threshold %) | 30 | P4 §5.4 |

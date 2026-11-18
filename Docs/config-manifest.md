@@ -288,7 +288,7 @@ It does not resolve open questions or set UNSET values — those are owner decis
 | name | type | default | mis-setting effect | blast radius | source |
 |---|---|---|---|---|---|
 | **`TM_NODE_<i>_ID` / `_BASE_URL` / `_ENABLED` / `_PUBLIC_EGRESS_IP`** (nodes #2..#N, numbered) | feature-flag | absent ⇒ N=1 (only node #1's bare `TM_NODE_*`) | the GAP-31 proof: adding node #2 is a config-only numbered block, zero brain code | pool | P4 §7, GAP-31 |
-| **`TM_WATCHER_CADENCE_SECONDS`** (control-loop `T`) | dial | 45 (0 ⇒ one pass at boot, no loop) | too fast → twitchy; too slow → late quarantine | pool | P4 §5.1, OQ-P4-13 |
+| **`TM_WATCHER_CADENCE_SECONDS`** (control-loop `T`) | dial | 45 (0 ⇒ one pass at boot, no loop; **since 0019 that single pass is also a provisioning node's only chance to self-promote until the next restart**, so production runs it non-zero) | too fast → twitchy; too slow → late quarantine and a late promotion after a restart | pool | P4 §5.1, OQ-P4-13, OD-4 |
 | **`TM_BLOCK_RATE_WINDOW_SECONDS`** (rolling block-rate window) | dial | 1800 (30 min) | too short → noise; too long → slow | pool | P4 §5.2, OQ-P4-13 |
 | **`TM_BLOCK_MIN_SAMPLES`** (sample gate) | dial | 20 (zero-disallowed) | zero → false-quarantine on 1–2 unlucky checks | pool | P4 §5.3, GAP-27 |
 | **`TM_BLOCK_QUAR_THRESHOLD_PCT`** (quarantine threshold %) | dial | 30 | too low → over-quarantine | pool | P4 §5.4 |

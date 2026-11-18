@@ -70,6 +70,12 @@ type NodeSnapshot struct {
 	// flag lets Evaluate see "a block-quarantine just happened AND another node is tripping now" — the
 	// cascade signature — and brake. (Found by the Phase-4 adversarial review; the staggered bypass.)
 	RecentlyBlockQuarantined bool
+
+	// SELF-PROMOTION INPUTS (0019, owner ruling OD-4). AuditID is the id of the audit row THIS cycle's observation recorded ("" when none was: the
+	// fetch failed). EgressConfirmed is true iff the node has a configured public egress IP AND that audit's own current_host_ip equals it
+	// (GAP-24, ADR-0009: a green on the wrong IP never promotes). Only a `provisioning` node reads them.
+	AuditID         string
+	EgressConfirmed bool
 }
 
 // BlockRate is Blocked/Attempts, or 0 when there are no attempts (avoids div-by-zero; a node with no
@@ -106,15 +112,18 @@ type Action struct {
 	To          string // the target lifecycle (== From when no change)
 	Apply       bool   // true => auto-transition (caller mutates); false => recommendation only
 	Recommend   string // human-readable proposal when !Apply (recommend-only / brake-held), else ""
-	Reason      string // why: audit_red | liveness | block_rate | canary_recover | canary_reblock | fleet_brake_hold
+	Reason      string // why: audit_red | liveness | block_rate | canary_recover | canary_reblock | fleet_brake_hold | audit_promote
 	ResetWarmup bool   // §5.4/PM3: on recovery, reset the durable warmup counter to a low start
+	// AuditID is set only on an `audit_promote` action: the audit row the promotion rests on, which the watcher hands to the store so the
+	// promotion is one atomic step recorded with that row's id (0019).
+	AuditID string
 }
 
 // Alert is a watcher alert for the observability layer (§8.2). Severity: warn|high|critical. The
 // fleet-wide block spike is CRITICAL (§5.5/§8.2 — the human backstop to the brake's deliberate
 // non-action; OQ-P4-9).
 type Alert struct {
-	Kind     string // quarantine | block_spike | audit_red | fleet_wide | recovering | rate_saturation
+	Kind     string // quarantine | block_spike | audit_red | fleet_wide | recovering | rate_saturation | promoted
 	Severity string // warn | high | critical
 	NodeID   string // "" for fleet-wide
 	Detail   string
@@ -207,7 +216,10 @@ func Evaluate(fleet []NodeSnapshot, p Params) Result {
 		switch {
 		// 1. Audit-red → quarantine AUTO (A2 deterministic — §5.4 first-red, inherited P3). Applies from
 		//    any non-quarantined state. This is NOT gated by the fleet brake (deterministic fault).
-		case n.AuditKnown && !n.AuditGreen && n.Status != LifecycleQuarantined:
+		//    A PROVISIONING node is NOT quarantined by a red audit (0019, owner ruling OD-4): it is not serving, so there is nothing to protect, and
+		//    quarantine would put a node that merely has not finished its DNS/PTR setup on the slow canary path instead of letting its next green
+		//    audit promote it. A red audit leaves it provisioning (case 6 below); it is quarantined only after it has been active.
+		case n.AuditKnown && !n.AuditGreen && n.Status != LifecycleQuarantined && n.Status != LifecycleProvisioning:
 			a.To, a.Apply, a.Reason = LifecycleQuarantined, true, "audit_red"
 			res.Alerts = append(res.Alerts, Alert{Kind: "audit_red", Severity: "high", NodeID: n.NodeID, Detail: "audit went red — quarantined"})
 			res.Alerts = append(res.Alerts, Alert{Kind: "quarantine", Severity: "warn", NodeID: n.NodeID, Detail: "active→quarantined (audit_red)"})
@@ -278,6 +290,15 @@ func Evaluate(fleet []NodeSnapshot, p Params) Result {
 		case n.Status == LifecycleQuarantined && n.AuditGreen && n.Live:
 			a.To, a.Apply, a.Reason = LifecycleRecovering, true, "canary_start"
 			res.Alerts = append(res.Alerts, Alert{Kind: "recovering", Severity: "warn", NodeID: n.NodeID, Detail: "quarantined→recovering (audit-green + live; starting metered canary, §5.4)"})
+
+		// 6. SELF-PROMOTION of a provisioning node (0019, owner ruling OD-4; Docs/install-and-deploy.md "d.4"): provisioning → active ONLY on a
+		//    green audit that THIS cycle recorded (AuditID names the row), on the node's configured egress IP (EgressConfirmed: GAP-24), from a node that
+		//    answers its liveness probe. Anything less leaves it provisioning: no audit this cycle, a red one, a green on the wrong IP, a node that
+		//    does not answer. Whether the row was recorded AFTER this boot's registration, and that it is green, is re-checked by the store in the
+		//    same statement that writes the promotion (Store.SettleProvisioningNode), so a stale row can never promote even if this decision were wrong.
+		case n.Status == LifecycleProvisioning && n.AuditKnown && n.AuditGreen && n.EgressConfirmed && n.Live && n.AuditID != "":
+			a.To, a.Apply, a.Reason, a.AuditID = LifecycleActive, true, "audit_promote", n.AuditID
+			res.Alerts = append(res.Alerts, Alert{Kind: "promoted", Severity: "warn", NodeID: n.NodeID, Detail: "provisioning→active (green audit on the configured egress IP; self-promotion, OD-4)"})
 		}
 
 		res.Actions = append(res.Actions, a)
