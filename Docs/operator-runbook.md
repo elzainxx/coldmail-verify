@@ -179,7 +179,7 @@ audit needs").
 | You see | Means | Do |
 |---|---|---|
 | `health: node=<id> provisioning->active (audit_promote, audit=<id>, auto)` | the node promoted itself | nothing |
-| a node stays `provisioning`, `audit_status=red` in `verify.nodes` | the audit is red: read `verify.node_audits.warnings` for the key (`dns`, `ptr`, `resolver`, `probe_guard`; an empty `current_host_ip` is the IP lookup failing) | fix the environment; the next cycle promotes it (a red audit does **not** quarantine a node that was never active) |
+| a node stays `provisioning`, `audit_status=red` in `verify.nodes` | the audit is red: read `verify.node_audits.warnings` for the key (`ip`, `dns`, `ptr`, `resolver`, `probe_guard`; `ip` and an empty `current_host_ip` are the public-IP lookup failing) | fix the environment; the next cycle promotes it (a red audit does **not** quarantine a node that was never active) |
 | `provisioning` with `audit_status=green` | the audit is green but the promotion did not fire: `egress-IP != audited current_host_ip (GAP-24)` in the log, or the node is not answering `/healthcheck`, or `TM_NODE_PUBLIC_EGRESS_IP` is unset | correct the setting |
 | `health: node=<id> promotion REFUSED by the store` | the store re-checked and the audit row was not a green row recorded after this boot's registration | a clock or ordering problem; it retries next cycle |
 | `TM_WATCHER_CADENCE_SECONDS=0` and a node never promotes | one audit at boot only, and the node was not up for it | restart after the node is up, and run with a non-zero cadence |
@@ -198,13 +198,10 @@ sweep** sees the lease is older than the **lease TTL**. Both numbers come from o
 | lease TTL | **max SMTP client deadline + the lease margin**: `TM_SMTP_CLIENT_DEADLINE_MS` (**60 s is assumed when it is unset**) `+` `TM_QUEUE_LEASE_MARGIN_SECONDS` (**default 120**, must be > 0) = **180 s by default**; **150 s** with `TM_SMTP_CLIENT_DEADLINE_MS=30000` | the two dials. The margin must stay above 0 so the TTL strictly exceeds the deadline (GAP-37): a live, merely slow attempt must never lose its lease and be run twice |
 | reclaim sweep | once per **lease TTL** (the drainer's `ReclaimEvery` defaults to the TTL; it is not a separate dial), and **once at drainer start** | `TM_QUEUE_LEASE_MARGIN_SECONDS` (it moves both) |
 
-So the stranded batch is not recoverable until its lease is **TTL old**, and is then picked up by the next sweep, which can be up
-to **one more TTL** later: **up to about 2 × TTL after the stop (360 s by default; 300 s with a 30 s deadline)**, and not less than
-one TTL after the restart in practice (the sweep at start finds leases that are only seconds old). Nothing is lost and nothing is
-run twice: the settlement is a compare-and-set on the lease. The dial that shortens the wait is **`TM_QUEUE_LEASE_MARGIN_SECONDS`**
+So the stranded batch is not recoverable until its lease is **one TTL old**, and it is then picked up by the first sweep that runs after that. Sweeps run **once when the drainer starts and then every TTL**, so after a stop and an immediate restart the sweep at boot finds the lease too young and the next one, a TTL later, recovers it: **about one TTL after the stop, and in the worst case (the sweep clock not aligned with the lease) up to one more TTL on top: 150 s plus up to another 150 s with a 30 s deadline, 180 s plus up to another 180 s with the defaults.** A restart that took longer than the TTL recovers the batch at the boot sweep. Nothing is lost and nothing is run twice: the settlement is a compare-and-set on the lease. The dial that shortens the wait is **`TM_QUEUE_LEASE_MARGIN_SECONDS`**
 (for example `5` with a 30 s deadline gives a 35 s TTL and about a minute of recovery); the cost of a short margin is that an attempt
 slower than the TTL is reclaimed under a live holder, so keep the TTL above the real worst-case attempt time, and never below the
-deadline. A graceful stop (SIGTERM) does not strand work in this way; a SIGKILL mid-batch does, and is not covered by any test here.
+deadline. **Every** stop that interrupts a batch leaves the rest of it leased, a graceful one included: on shutdown the drainer returns mid-batch and does not release its leases. The platform harness has proved the graceful case; a SIGKILL in the middle of a send is not covered by any test here.
 
 ---
 

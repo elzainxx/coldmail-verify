@@ -274,7 +274,7 @@ with fixtures, never with SQL). **Green means `warnings == {}` and a non-empty `
 
 | # | The audit needs | Red when | Warning key |
 |---|---|---|---|
-| 1 | the node can make an outbound **HTTPS** request to `https://api.ipify.org` (resolved through the node's operating-system resolver, the certificate verified against the node's trust store); the response body, with no trailing newline, is the node's public IP and becomes `current_host_ip` | the request fails, or the body is empty: `current_host_ip` is empty, which the control plane reads as red | (IP) |
+| 1 | the node can make an outbound **HTTPS** request to `https://api.ipify.org` (resolved through the node's operating-system resolver, the certificate verified against the node's trust store); the response body, with no trailing newline, is the node's public IP and becomes `current_host_ip` | the request fails (truemail then skips checks 2 and 3) or the body is empty: `current_host_ip` is empty, which the control plane also reads as red | `ip` |
 | 2 | the **A record** of `VERIFIER_DOMAIN`, resolved by truemail's resolver (the node's `DNS` setting, else `resolv.conf`), equals that IP | it differs or is missing | `dns` |
 | 3 | a **PTR record** for that IP exists and names `VERIFIER_DOMAIN` exactly | it is missing or names another host | `ptr` |
 | 4 | a **clean resolver** (ADR-0019 addendum): no `search` or `domain` line in `resolv.conf`, no `ndots` above 1, a hostname with no dot | any of the three | `resolver` |
